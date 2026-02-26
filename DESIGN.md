@@ -325,7 +325,47 @@ Tab completion is registered via `LineNoise.setCompletionCallback`. The callback
 | `read/write/sub -c <partial>` | Known characteristic UUIDs (prefix match) |
 | After `-F`/`--format` | All format names |
 
-### 4.9 ExitCodes
+### 4.9 BLENames
+
+`BLENames` is a namespace enum in the `blew` executable target responsible for mapping standard Bluetooth SIG UUIDs to human-readable names.
+
+**Data source**
+
+The Nordic Semiconductor [bluetooth-numbers-database](https://github.com/NordicSemiconductor/bluetooth-numbers-database) is included as a git submodule at `Vendor/bluetooth-numbers-database/`. It contains three JSON files under `v1/`:
+
+- `service_uuids.json`
+- `characteristic_uuids.json`
+- `descriptor_uuids.json`
+
+Entries with `source == "gss"` are official Bluetooth SIG assignments.
+
+**Build-time generation**
+
+The `GenerateBLENames` SwiftPM build tool plugin (`Plugins/GenerateBLENames/plugin.swift`) declares a `prebuildCommand` that invokes `Scripts/generate-ble-names.rb` before each build. The Ruby script reads the three JSON files from the submodule, deduplicates entries by UUID, and writes `BLENames.generated.swift` into SwiftPM's plugin work directory. SwiftPM compiles this generated file as part of the `blew` target. The generated file is not checked in.
+
+To update the name database, run `git submodule update --remote Vendor/bluetooth-numbers-database` and rebuild.
+
+**UUID normalization**
+
+CoreBluetooth represents standard Bluetooth SIG UUIDs in their short form (e.g. `"180F"` rather than `"0000180F-0000-1000-8000-00805F9B34FB"`). `BLENames.shortUUID(_:)` handles all three input forms:
+
+- 4-char short hex (`"180F"`) — returned as-is uppercased
+- 8-char 32-bit hex (`"0000180F"`) — last 4 chars returned
+- Full 128-bit Bluetooth Base UUID (`"0000XXXX-0000-1000-8000-00805F9B34FB"`) — `XXXX` extracted
+
+Custom vendor UUIDs that do not follow the Bluetooth Base pattern return `nil`.
+
+**Resolution order**
+
+1. Look up the short UUID in the appropriate `BLENameData` dictionary (services / characteristics / descriptors)
+2. If not found, return the raw UUID string as-is
+
+**Output conventions**
+
+- Text mode: names appended inline — `180F (Battery Service)`
+- KV mode: separate `name=` field emitted when a name is known; field omitted for unknown UUIDs
+
+### 4.10 ExitCodes
 
 `BlewExitCode` is a thin `Error` wrapper around `Int32`. It implements `CustomNSError` so ArgumentParser can extract and propagate the exit code correctly.
 
@@ -373,12 +413,15 @@ This lets the REPL and `--exec` runner remain purely synchronous while the BLE s
 
 ```
 blew (executable)
- ├── BLEManager          (CoreBluetooth, swift-atomics)
- ├── LineNoise           (system libedit — linenoise Swift implementation)
- └── ArgumentParser      (swift-argument-parser)
+ ├── BLEManager                        (CoreBluetooth, swift-atomics)
+ ├── LineNoise                         (system libedit — linenoise Swift implementation)
+ ├── ArgumentParser                    (swift-argument-parser)
+ └── [build plugin] GenerateBLENames   (reads Vendor/bluetooth-numbers-database/v1/*.json
+                                        via Scripts/generate-ble-names.rb,
+                                        emits BLENames.generated.swift at compile time)
 ```
 
-`BLEManager` and `LineNoise` have no dependency on each other. `BLEManager` has no dependency on ArgumentParser or any CLI concern.
+`BLEManager` and `LineNoise` have no dependency on each other. `BLEManager` has no dependency on ArgumentParser or any CLI concern. The `GenerateBLENames` plugin runs as a prebuild command and has no runtime presence.
 
 ---
 

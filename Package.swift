@@ -19,7 +19,14 @@ let package = Package(
                 "LineNoise",
                 "BLEManager",
             ],
-            exclude: ["Info.plist"]
+            exclude: ["Info.plist"],
+            plugins: [
+                .plugin(name: "GenerateBLENames"),
+            ]
+        ),
+        .plugin(
+            name: "GenerateBLENames",
+            capability: .buildTool()
         ),
         .target(
             name: "LineNoise"

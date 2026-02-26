@@ -191,7 +191,7 @@ final class CommandRouter {
                     d.name ?? "(unknown)",
                     "\(d.rssi)",
                     Self.rssiBar(d.rssi),
-                    d.serviceUUIDs.joined(separator: ","),
+                    d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) }.joined(separator: ", "),
                 ]
             }
             output.printTable(headers: headers, rows: rows)
@@ -321,20 +321,23 @@ final class CommandRouter {
                 switch sub {
                 case "svcs":
                     let services = try await manager.discoverServices()
-                    let headers = ["UUID", "Primary"]
-                    let rows = services.map { [$0.uuid, $0.isPrimary ? "yes" : "no"] }
+                    let headers = ["UUID", "Name", "Primary"]
+                    let rows = services.map { svc -> [String] in
+                        let name = BLENames.name(for: svc.uuid, category: .service) ?? ""
+                        return [svc.uuid, name, svc.isPrimary ? "yes" : "no"]
+                    }
                     output.printTable(headers: headers, rows: rows)
 
                 case "tree":
                     let includeDescriptors = args.contains("-d") || args.contains("--descriptors")
                     let tree = try await manager.discoverTree(includeDescriptors: includeDescriptors)
                     for service in tree {
-                        output.print("Service: \(service.uuid)")
+                        output.print("Service: \(BLENames.displayUUID(service.uuid, category: .service))")
                         for char in service.characteristics {
                             let props = char.properties.joined(separator: ",")
-                            output.print("  Char: \(char.uuid) [\(props)]")
+                            output.print("  Char: \(BLENames.displayUUID(char.uuid, category: .characteristic)) [\(props)]")
                             for desc in char.descriptors {
-                                output.print("    Desc: \(desc.uuid)")
+                                output.print("    Desc: \(BLENames.displayUUID(desc.uuid, category: .descriptor))")
                             }
                         }
                     }
@@ -357,8 +360,11 @@ final class CommandRouter {
                     case .notFound: svcUUID = svcInput
                     }
                     let chars = try await manager.discoverCharacteristics(forService: svcUUID)
-                    let headers = ["UUID", "Properties"]
-                    let rows = chars.map { [$0.uuid, $0.properties.joined(separator: ",")] }
+                    let headers = ["UUID", "Name", "Properties"]
+                    let rows = chars.map { char -> [String] in
+                        let name = BLENames.name(for: char.uuid, category: .characteristic) ?? ""
+                        return [char.uuid, name, char.properties.joined(separator: ",")]
+                    }
                     output.printTable(headers: headers, rows: rows)
 
                 case "desc":
@@ -379,8 +385,11 @@ final class CommandRouter {
                     case .notFound: charUUID = charInput
                     }
                     let descs = try await manager.discoverDescriptors(forCharacteristic: charUUID)
-                    let headers = ["UUID"]
-                    let rows = descs.map { [$0.uuid] }
+                    let headers = ["UUID", "Name"]
+                    let rows = descs.map { desc -> [String] in
+                        let name = BLENames.name(for: desc.uuid, category: .descriptor) ?? ""
+                        return [desc.uuid, name]
+                    }
                     output.printTable(headers: headers, rows: rows)
 
                 default:
@@ -430,7 +439,11 @@ final class CommandRouter {
                 case .text:
                     output.print(formatted)
                 case .kv:
-                    output.printRecord(("char", charUUID), ("value", formatted), ("fmt", fmt))
+                    if let name = BLENames.name(for: charUUID, category: .characteristic) {
+                        output.printRecord(("char", charUUID), ("name", name), ("value", formatted), ("fmt", fmt))
+                    } else {
+                        output.printRecord(("char", charUUID), ("value", formatted), ("fmt", fmt))
+                    }
                 }
             } catch let error as BLEError {
                 output.printError(error.localizedDescription)
@@ -490,7 +503,7 @@ final class CommandRouter {
         Task {
             do {
                 try await manager.writeCharacteristic(charUUID, data: data, type: writeType)
-                output.printInfo("written to \(charUUID)")
+                output.printInfo("written to \(BLENames.displayUUID(charUUID, category: .characteristic))")
             } catch let error as BLEError {
                 output.printError(error.localizedDescription)
                 exitCode = error.exitCode
@@ -534,6 +547,7 @@ final class CommandRouter {
                 var count = 0
                 let startTime = Date()
 
+                let charName = BLENames.name(for: charUUID, category: .characteristic)
                 for await data in stream {
                     let formatted = DataFormatter.format(data, as: fmt)
                     switch output.format {
@@ -541,7 +555,11 @@ final class CommandRouter {
                         output.print(formatted)
                     case .kv:
                         let ts = ISO8601DateFormatter.shared.string(from: Date())
-                        output.printRecord(("ts", ts), ("char", charUUID), ("value", formatted))
+                        if let name = charName {
+                            output.printRecord(("ts", ts), ("char", charUUID), ("name", name), ("value", formatted))
+                        } else {
+                            output.printRecord(("ts", ts), ("char", charUUID), ("value", formatted))
+                        }
                     }
 
                     count += 1
