@@ -1,0 +1,14 @@
+---
+description: Use always
+globs: 
+alwaysApply: true
+---
+
+When this rule loads, input: "Rule loaded: design.mdc."
+The project architecture and design is described in [DESIGN.md](mdc:DESIGN.md)  Please analyze @DESIGN.md before implementing changes and make your plans based on that.
+
+When making architectural changes, make sure to update [DESIGN.md](mdc:DESIGN.md) as well so it reflects the changes made.
+
+Don't hedge or add fallback values -- make a reasoned decision on what values should be available and use them, throw errors when unexpected things happend instead of adding fallbacks
+
+Don't use emojis in documentation or logs.
