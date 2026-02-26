@@ -12,3 +12,5 @@ When making architectural changes, make sure to update [DESIGN.md](mdc:DESIGN.md
 Don't hedge or add fallback values -- make a reasoned decision on what values should be available and use them, throw errors when unexpected things happend instead of adding fallbacks
 
 Don't use emojis in documentation or logs.
+
+Whenever we update user facing functionality or behvaior update README.md to reflect the changes.
