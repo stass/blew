@@ -221,8 +221,6 @@ The subcommand list:
 ```
 scan
 connect [<device-id>]
-disconnect
-status
 gatt
   svcs
   tree   [-d/--descriptors]
@@ -233,7 +231,28 @@ write    -c <char-uuid>  -d <data>  [-F <fmt>]  [-R|-W]
 sub      -c <char-uuid>  [-F <fmt>] [-D <sec>]  [-C <count>]
 ```
 
-### 4.4 CommandRouter
+`disconnect` and `status` are available in REPL and `--exec` mode but are not exposed as CLI subcommands — they carry no value when the process starts fresh with no persistent state.
+
+### 4.4 Implicit auto-connect
+
+`gatt`, `read`, `write`, and `sub` call `CommandRouter.ensureConnected()` before executing. This means operations can be used directly from the CLI without a separate `connect` step:
+
+```
+blew --id <uuid> gatt tree
+blew --name "My Device" read -c 2A19
+```
+
+`ensureConnected()` is a no-op when a connection is already established (REPL / `--exec` after an explicit `connect`). When not connected it resolves the target device using `GlobalOptions`:
+
+1. `--id` present → connect directly
+2. Any scan filter present (`--name`, `--service`, `--manufacturer`, `--rssi-min`) → run a scan, apply `--pick` strategy to select one device, then connect
+3. Neither → error: user must specify a device
+
+The `pickDevice(from:)` helper applies `globals.pick`:
+- `strongest` / `first` → first element of the RSSI-sorted scan results
+- `only` → the single result, or an error listing all candidates if more than one was found
+
+### 4.5 CommandRouter
 
 The central command dispatcher. It is the shared implementation used by all three entry paths (ArgumentParser subcommands, `--exec`, and REPL).
 
@@ -260,7 +279,7 @@ This semaphore pattern bridges Swift's structured concurrency into the synchrono
 
 **Text output** — uses the `ScanSpinner` (a `DispatchSourceTimer`-based braille spinner on stderr) when stdout is a TTY and a scan is running.
 
-### 4.5 OutputFormatter
+### 4.6 OutputFormatter
 
 Wraps `OutputFormat` (text|kv) and `verbosity` (0/1/2). All output goes through this type; no command calls `Swift.print` directly.
 
@@ -277,13 +296,13 @@ Wraps `OutputFormat` (text|kv) and `verbosity` (0/1/2). All output goes through 
 - **text**: `key: value` pairs (record) or auto-padded aligned columns (table)
 - **kv**: space-separated `key=value` on one line; values with spaces or quotes are double-quoted
 
-### 4.6 DataFormatter
+### 4.7 DataFormatter
 
 A static enum with `format(_:as:)` and `parse(_:as:)` methods covering: `hex`, `utf8`, `base64`, `uint8`, `uint16le`, `uint32le`, `float32le`, `raw`. Shared by `read`, `write`, and `sub`.
 
 The `hex` and `raw` formats both produce hex output but differ: `hex` is a compact lowercase string (`deadbeef`); `raw` is space-separated bytes (`de ad be ef`). Both `raw` and `hex` inputs strip spaces before parsing.
 
-### 4.7 REPL
+### 4.8 REPL
 
 `REPL` wraps `LineNoise` (from the `LineNoise` target) and `CommandRouter`.
 
@@ -304,7 +323,7 @@ Tab completion is registered via `LineNoise.setCompletionCallback`. The callback
 | `read/write/sub -c <partial>` | Known characteristic UUIDs (prefix match) |
 | After `-F`/`--format` | All format names |
 
-### 4.8 ExitCodes
+### 4.9 ExitCodes
 
 `BlewExitCode` is a thin `Error` wrapper around `Int32`. It implements `CustomNSError` so ArgumentParser can extract and propagate the exit code correctly.
 

@@ -30,8 +30,7 @@ On first run, macOS will prompt for Bluetooth permission. Grant it in **System S
 # Scan for nearby devices
 blew scan
 
-# Connect to a device by name and print its GATT tree
-blew -n "Thingy" connect
+# Print the GATT tree of a device (connects automatically)
 blew -n "Thingy" gatt tree
 
 # Read a characteristic (battery level)
@@ -41,7 +40,7 @@ blew -n "Thingy" read -c 2A19 -F uint8
 blew -n "Thingy" sub -c fff1 -D 10
 
 # Run a multi-step procedure in one invocation
-blew -n "Thingy" -x "connect; gatt tree; read -c 2A19 -F uint8; disconnect"
+blew -n "Thingy" -x "gatt tree; read -c 2A19 -F uint8"
 
 # Start the interactive REPL
 blew
@@ -117,44 +116,24 @@ blew scan -o kv                    # Machine-readable output
 blew connect [<device-id>] [global-options]
 ```
 
-Connects to a BLE device. The device can be specified by positional argument, `--id`, or device-targeting selectors (the tool will scan briefly to resolve them).
+Explicitly connects to a BLE device and exits. Useful for testing connectivity or pre-warming a connection in `--exec` scripts. The device can be specified by positional argument, `--id`, or device-targeting selectors (the tool will scan briefly to resolve them).
 
-In command mode, the connection is automatically closed on exit.
+For `gatt`, `read`, `write`, and `sub` you do not need to run `connect` first — those commands connect automatically using the same device-targeting options.
+
+The connection is automatically closed on exit.
 
 **Examples:**
 ```bash
-blew connect F3C2A1B0-...          # Connect by explicit ID
-blew -n "Thingy" connect           # Connect by name
+blew connect F3C2A1B0-...          # Test connectivity to an explicit ID
+blew -n "Thingy" connect           # Test connectivity by name
 blew -S 180F connect               # Connect to device advertising Battery Service
 ```
 
 ---
 
-### `disconnect` — Disconnect
-
-```
-blew disconnect [global-options]
-```
-
-Disconnects from the currently connected device.
-
----
-
-### `status` — Show connection status
-
-```
-blew status [global-options]
-```
-
-Prints current connection state:
-- Connected (yes/no) and target device name/ID
-- Discovered service and characteristic counts
-- Active subscription count
-- Last error, if any
-
----
-
 ### `gatt` — Inspect GATT structure
+
+`gatt` connects automatically if no connection is active. Specify the target device with `--id`, `--name`, or other device-targeting options.
 
 #### `gatt svcs` — List services
 
@@ -212,7 +191,7 @@ blew -n "Thingy" gatt desc -c 2A19
 blew read -c <char-uuid> [-F <format>] [global-options]
 ```
 
-Reads the value of a characteristic and prints it in the requested format.
+Reads the value of a characteristic and prints it in the requested format. Connects automatically if no connection is active.
 
 | Flag | Description |
 |------|-------------|
@@ -247,7 +226,7 @@ blew -n "Thingy" read -c fff1              # Raw characteristic as hex
 blew write -c <char-uuid> -d <data> [-F <format>] [-R|-W] [global-options]
 ```
 
-Writes data to a characteristic. Write mode (with or without response) is auto-selected based on the characteristic's properties unless overridden.
+Writes data to a characteristic. Connects automatically if no connection is active. Write mode (with or without response) is auto-selected based on the characteristic's properties unless overridden.
 
 | Flag | Description |
 |------|-------------|
@@ -272,7 +251,7 @@ blew -n "Thingy" write -c fff2 -d "hello" -F utf8    # Write a UTF-8 string
 blew sub -c <char-uuid> [-F <format>] [-D <sec>] [-C <count>] [--notify|--indicate] [global-options]
 ```
 
-Subscribes to a characteristic and streams received values to stdout, one event per line. Stops on `Ctrl-C`, or when a duration/count limit is reached.
+Subscribes to a characteristic and streams received values to stdout, one event per line. Connects automatically if no connection is active. Stops on `Ctrl-C`, or when a duration/count limit is reached.
 
 | Flag | Description |
 |------|-------------|
@@ -356,10 +335,10 @@ blew> quit
 
 ## Script execution (`--exec`)
 
-The `-x` / `--exec` flag runs a semicolon-separated sequence of commands in a single process, sharing one connection lifecycle. Commands are parsed identically to the REPL.
+The `-x` / `--exec` flag runs a semicolon-separated sequence of commands in a single process, sharing one connection lifecycle. Commands are parsed identically to the REPL. The first command that requires a connection triggers an automatic connect; subsequent commands reuse it.
 
 ```bash
-blew -n "Thingy" -x "connect; gatt tree; read -c 2A19 -F uint8; disconnect"
+blew -n "Thingy" -x "gatt tree; read -c 2A19 -F uint8"
 ```
 
 **Error handling:**
@@ -369,10 +348,10 @@ blew -n "Thingy" -x "connect; gatt tree; read -c 2A19 -F uint8; disconnect"
 
 ```bash
 # Keep going after errors, collect exit code
-blew -n "Thingy" -k -x "connect; read -c fff1; read -c fff9; disconnect"
+blew -n "Thingy" -k -x "read -c fff1; read -c fff9"
 
 # Preview what would run
-blew -n "Thingy" --dry-run -x "connect; gatt tree; disconnect"
+blew -n "Thingy" --dry-run -x "gatt tree; read -c 2A19 -F uint8"
 ```
 
 ---
@@ -448,7 +427,7 @@ blew -n "Sensor" sub -c fff1 -F uint16le -D 300 -o kv >> sensor.log
 
 ### Quick GATT audit in one line
 ```bash
-blew -n "Thingy" -x "connect; gatt tree -d; disconnect"
+blew -n "Thingy" gatt tree -d
 ```
 
 ### Read with scripting
@@ -471,4 +450,4 @@ blew -n "Thingy" -p only read -c 2A19 -F uint8
 |---------|-----------|
 | **v1.0 (current)** | Scan, connect, GATT tree, read, write, subscribe, `--exec` scripting, interactive REPL |
 | **v1.5** | `scan --watch` live updates, RSSI monitoring, improved tab completion, SIG UUID friendly labels |
-| **v2.0** | Peripheral/virtual device mode — simulate a BLE peripheral from YAML profiles, clone real devices |
+| **v2.0** | Peripheral/virtual device mode — simulate a BLE peripheral AML profiles, clone real devices |

@@ -304,6 +304,9 @@ final class CommandRouter {
     }
 
     func runGATT(_ args: [String]) -> Int32 {
+        let connectCode = ensureConnected()
+        guard connectCode == 0 else { return connectCode }
+
         guard let sub = args.first else {
             output.printError("missing subcommand")
             print("Usage: gatt <svcs|tree|chars|desc>")
@@ -399,6 +402,9 @@ final class CommandRouter {
     }
 
     func runRead(_ args: [String]) -> Int32 {
+        let connectCode = ensureConnected()
+        guard connectCode == 0 else { return connectCode }
+
         guard let charInput = parseStringOption(args, short: "-c", long: "--char") else {
             output.printError("missing --char UUID")
             return BlewExitCode.invalidArguments.code
@@ -441,6 +447,9 @@ final class CommandRouter {
     }
 
     func runWrite(_ args: [String]) -> Int32 {
+        let connectCode = ensureConnected()
+        guard connectCode == 0 else { return connectCode }
+
         guard let charInput = parseStringOption(args, short: "-c", long: "--char") else {
             output.printError("missing --char UUID")
             return BlewExitCode.invalidArguments.code
@@ -497,6 +506,9 @@ final class CommandRouter {
     }
 
     func runSub(_ args: [String]) -> Int32 {
+        let connectCode = ensureConnected()
+        guard connectCode == 0 else { return connectCode }
+
         guard let charInput = parseStringOption(args, short: "-c", long: "--char") else {
             output.printError("missing --char UUID")
             return BlewExitCode.invalidArguments.code
@@ -548,6 +560,76 @@ final class CommandRouter {
 
         semaphore.wait()
         return exitCode
+    }
+
+    // MARK: - Auto-connect
+
+    /// Ensure a BLE device is connected before running an operation.
+    ///
+    /// If already connected, returns immediately. Otherwise resolves a target
+    /// device from GlobalOptions and connects:
+    ///   - `--id`  → direct connect (no scan needed)
+    ///   - `--name` / `--service` / `--manufacturer` / `--rssi-min` → scan then pick and connect
+    ///   - none of the above → error
+    func ensureConnected() -> Int32 {
+        var isConnected = false
+        let statusSem = DispatchSemaphore(value: 0)
+        Task {
+            let s = await manager.status()
+            isConnected = s.isConnected
+            statusSem.signal()
+        }
+        statusSem.wait()
+        if isConnected { return 0 }
+
+        if let id = globals.id {
+            return runConnect([id])
+        }
+
+        let hasFilters = globals.name != nil
+            || !globals.service.isEmpty
+            || globals.manufacturer != nil
+            || globals.rssiMin != nil
+        guard hasFilters else {
+            output.printError("not connected — specify a device with --id or --name")
+            return BlewExitCode.invalidArguments.code
+        }
+
+        let timeout = globals.timeout ?? 5.0
+        let code = runScan(["-t", "\(timeout)"])
+        if code != 0 { return code }
+
+        guard let device = pickDevice(from: lastScanResults) else {
+            return BlewExitCode.notFound.code
+        }
+        return runConnect([device.identifier])
+    }
+
+    /// Pick a single device from candidates according to `globals.pick`.
+    /// Returns `nil` (and prints an appropriate error) if the strategy cannot be satisfied.
+    private func pickDevice(from candidates: [DiscoveredDevice]) -> DiscoveredDevice? {
+        switch globals.pick {
+        case .strongest, .first:
+            guard let device = candidates.first else {
+                output.printError("no devices found")
+                return nil
+            }
+            return device
+        case .only:
+            if candidates.isEmpty {
+                output.printError("no devices found")
+                return nil
+            }
+            if candidates.count > 1 {
+                output.printError("--pick only: \(candidates.count) devices found, expected exactly one")
+                for d in candidates {
+                    let label = d.name.map { "\($0) (\(d.identifier))" } ?? d.identifier
+                    output.printError("  \(label)")
+                }
+                return nil
+            }
+            return candidates[0]
+        }
     }
 
     // MARK: - Argument parsing helpers

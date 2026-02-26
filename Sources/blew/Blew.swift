@@ -11,8 +11,6 @@ struct Blew: ParsableCommand {
         subcommands: [
             ScanCommand.self,
             ConnectCommand.self,
-            DisconnectCommand.self,
-            StatusCommand.self,
             GATTCommand.self,
             ReadCommand.self,
             WriteCommand.self,
