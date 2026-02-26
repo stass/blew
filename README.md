@@ -165,7 +165,7 @@ FFF0                         yes
 #### `gatt tree` — Show full GATT tree
 
 ```
-blew [global-options] gatt tree [-d]
+blew [global-options] gatt tree [-d] [-V]
 ```
 
 Prints services and their characteristics with properties (read / write / notify / indicate). Standard UUIDs show their name in parentheses.
@@ -181,11 +181,21 @@ Service: FFF0
 | Flag | Description |
 |------|-------------|
 | `-d, --descriptors` | Also show descriptors for each characteristic. |
+| `-V` | Read and display values for all readable characteristics inline. Well-known Bluetooth SIG characteristics are decoded to their natural type (e.g. battery level as an integer, manufacturer name as a string); others are shown as hex. |
+
+With `-V`:
+```
+Service: 180F (Battery Service)
+  Char: 2A19 (Battery Level) [read,notify] = 85
+Service: 180A (Device Information)
+  Char: 2A29 (Manufacturer Name String) [read] = Apple Inc.
+  Char: 2A24 (Model Number String) [read] = MacBookPro18,3
+```
 
 #### `gatt chars` — List characteristics for a service
 
 ```
-blew [global-options] gatt chars -S <service-uuid>
+blew [global-options] gatt chars -S <service-uuid> [-V]
 ```
 
 Output columns: UUID, Name, Properties.
@@ -193,6 +203,7 @@ Output columns: UUID, Name, Properties.
 | Flag | Description |
 |------|-------------|
 | `-S, --service <uuid>` | Service UUID to inspect. Required. |
+| `-V` | Read and display values for all readable characteristics. Adds a Value column to the table; non-readable characteristics get an empty cell. |
 
 #### `gatt desc` — List descriptors for a characteristic
 
@@ -210,7 +221,10 @@ Output columns: UUID, Name.
 ```bash
 blew -n "Thingy" gatt tree
 blew -n "Thingy" gatt tree -d        # Include descriptors
+blew -n "Thingy" gatt tree -V        # Show values for readable characteristics
+blew -n "Thingy" gatt tree -dV       # Descriptors + values
 blew -n "Thingy" gatt chars -S 180F
+blew -n "Thingy" gatt chars -S 180A -V  # Show values for Device Information
 blew -n "Thingy" gatt desc -c 2A19
 ```
 
@@ -461,6 +475,11 @@ blew -n "Sensor" -o kv sub -c fff1 -F uint16le -D 300 >> sensor.log
 ### Quick GATT audit in one line
 ```bash
 blew -n "Thingy" gatt tree -d
+```
+
+### Inspect device info characteristics with values
+```bash
+blew -n "Thingy" gatt chars -S 180A -V
 ```
 
 ### Read with scripting

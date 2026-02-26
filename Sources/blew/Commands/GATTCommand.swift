@@ -39,10 +39,14 @@ struct GATTTreeCommand: ParsableCommand {
     @Flag(name: [.short, .long], help: "Include descriptors.")
     var descriptors: Bool = false
 
+    @Flag(name: .customShort("V"), help: "Read and display values for readable characteristics.")
+    var values: Bool = false
+
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
         var args: [String] = ["tree"]
         if descriptors { args.append("-d") }
+        if values { args.append("-V") }
         let code = router.runGATT(args)
         if code != 0 { throw BlewExitCode(code) }
     }
@@ -58,9 +62,14 @@ struct GATTCharsCommand: ParsableCommand {
     @Option(name: [.customShort("S"), .long], help: "Service UUID.")
     var service: String
 
+    @Flag(name: .customShort("V"), help: "Read and display values for readable characteristics.")
+    var values: Bool = false
+
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
-        let code = router.runGATT(["chars", "-S", service])
+        var args: [String] = ["chars", "-S", service]
+        if values { args.append("-V") }
+        let code = router.runGATT(args)
         if code != 0 { throw BlewExitCode(code) }
     }
 }

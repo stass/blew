@@ -330,12 +330,24 @@ final class CommandRouter {
 
                 case "tree":
                     let includeDescriptors = args.contains("-d") || args.contains("--descriptors")
+                    let includeValues = args.contains("-V") || args.contains("--values")
                     let tree = try await manager.discoverTree(includeDescriptors: includeDescriptors)
                     for service in tree {
                         output.print("Service: \(BLENames.displayUUID(service.uuid, category: .service))")
                         for char in service.characteristics {
                             let props = char.properties.joined(separator: ",")
-                            output.print("  Char: \(BLENames.displayUUID(char.uuid, category: .characteristic)) [\(props)]")
+                            var charLine = "  Char: \(BLENames.displayUUID(char.uuid, category: .characteristic)) [\(props)]"
+                            if includeValues && char.properties.contains("read") {
+                                do {
+                                    let data = try await manager.readCharacteristic(char.uuid)
+                                    let value = WellKnownCharacteristics.decode(data, uuid: char.uuid)
+                                        ?? DataFormatter.format(data, as: "hex")
+                                    charLine += " = \(value)"
+                                } catch {
+                                    charLine += " = (read error)"
+                                }
+                            }
+                            output.print(charLine)
                             for desc in char.descriptors {
                                 output.print("    Desc: \(BLENames.displayUUID(desc.uuid, category: .descriptor))")
                             }
@@ -359,13 +371,32 @@ final class CommandRouter {
                         return
                     case .notFound: svcUUID = svcInput
                     }
+                    let includeValues = args.contains("-V") || args.contains("--values")
                     let chars = try await manager.discoverCharacteristics(forService: svcUUID)
-                    let headers = ["UUID", "Name", "Properties"]
-                    let rows = chars.map { char -> [String] in
-                        let name = BLENames.name(for: char.uuid, category: .characteristic) ?? ""
-                        return [char.uuid, name, char.properties.joined(separator: ",")]
+                    if includeValues {
+                        var rows: [[String]] = []
+                        for char in chars {
+                            let name = BLENames.name(for: char.uuid, category: .characteristic) ?? ""
+                            var value = ""
+                            if char.properties.contains("read") {
+                                do {
+                                    let data = try await manager.readCharacteristic(char.uuid)
+                                    value = WellKnownCharacteristics.decode(data, uuid: char.uuid)
+                                        ?? DataFormatter.format(data, as: "hex")
+                                } catch {
+                                    value = "(read error)"
+                                }
+                            }
+                            rows.append([char.uuid, name, char.properties.joined(separator: ","), value])
+                        }
+                        output.printTable(headers: ["UUID", "Name", "Properties", "Value"], rows: rows)
+                    } else {
+                        let rows = chars.map { char -> [String] in
+                            let name = BLENames.name(for: char.uuid, category: .characteristic) ?? ""
+                            return [char.uuid, name, char.properties.joined(separator: ",")]
+                        }
+                        output.printTable(headers: ["UUID", "Name", "Properties"], rows: rows)
                     }
-                    output.printTable(headers: headers, rows: rows)
 
                 case "desc":
                     guard let charInput = parseStringOption(Array(args.dropFirst()), short: "-c", long: "--char") else {

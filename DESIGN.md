@@ -225,8 +225,8 @@ scan
 connect [<device-id>]
 gatt
   svcs
-  tree   [-d/--descriptors]
-  chars  -S <service-uuid>
+  tree   [-d/--descriptors]  [-V]
+  chars  -S <service-uuid>   [-V]
   desc   -c <char-uuid>
 read     -c <char-uuid>  [-F <fmt>]
 write    -c <char-uuid>  -d <data>  [-F <fmt>]  [-R|-W]
@@ -325,7 +325,22 @@ Tab completion is registered via `LineNoise.setCompletionCallback`. The callback
 | `read/write/sub -c <partial>` | Known characteristic UUIDs (prefix match) |
 | After `-F`/`--format` | All format names |
 
-### 4.9 BLENames
+### 4.9 WellKnownCharacteristics
+
+`WellKnownCharacteristics` is a namespace enum that maps standard Bluetooth SIG characteristic UUIDs to the `DataFormatter` format string that correctly decodes their value. It is used by `gatt tree -V` and `gatt chars -V` to produce human-readable values inline.
+
+The internal `formats` dictionary keys are 4-char uppercase short UUIDs. Examples:
+
+- `"2A00"` → `"utf8"` (Device Name)
+- `"2A19"` → `"uint8"` (Battery Level)
+- `"2A01"` → `"uint16le"` (Appearance)
+- `"2A23"` → `"hex"` (System ID)
+
+`bestFormat(for:)` returns the format for a UUID, falling back to `"hex"` for unknown UUIDs. `decode(_:uuid:)` returns a decoded string only when the UUID has a known format entry; callers use `nil` to decide whether to apply the format or fall back to hex.
+
+Only characteristics with a single unambiguous scalar or string encoding are included. Multi-field characteristics (e.g. Heart Rate Measurement) are intentionally omitted and decoded as hex.
+
+### 4.10 BLENames
 
 `BLENames` is a namespace enum in the `blew` executable target responsible for mapping standard Bluetooth SIG UUIDs to human-readable names.
 
@@ -365,7 +380,7 @@ Custom vendor UUIDs that do not follow the Bluetooth Base pattern return `nil`.
 - Text mode: names appended inline — `180F (Battery Service)`
 - KV mode: separate `name=` field emitted when a name is known; field omitted for unknown UUIDs
 
-### 4.10 ExitCodes
+### 4.11 ExitCodes
 
 `BlewExitCode` is a thin `Error` wrapper around `Int32`. It implements `CustomNSError` so ArgumentParser can extract and propagate the exit code correctly.
 
