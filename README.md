@@ -16,9 +16,12 @@ Works in two modes:
 Build from source with Swift:
 
 ```bash
+git clone --recurse-submodules <repo-url>
 swift build -c release
 cp .build/release/blew /usr/local/bin/blew
 ```
+
+`--recurse-submodules` is required — the Bluetooth SIG name database is included as a git submodule at `Vendor/bluetooth-numbers-database`. The Swift build generates the name mapping automatically from the submodule data.
 
 On first run, macOS will prompt for Bluetooth permission. Grant it in **System Settings → Privacy & Security → Bluetooth**.
 
@@ -103,6 +106,8 @@ Scans for advertising BLE peripherals and prints a table of discovered devices. 
 
 **Output columns (text):** ID, Name, RSSI, Signal (visual bar), Services
 
+Standard Bluetooth SIG service UUIDs in the Services column are shown with their human-readable name: e.g. `180F (Battery Service), 180A (Device Information)`.
+
 **Examples:**
 ```bash
 blew scan                          # Scan for 5 seconds
@@ -139,13 +144,23 @@ blew -S 180F connect               # Connect to device advertising Battery Servi
 
 `gatt` connects automatically if no connection is active. Specify the target device with `--id`, `--name`, or other device-targeting options.
 
+All UUID outputs include human-readable names for standard Bluetooth SIG UUIDs. Custom or vendor UUIDs are shown as-is.
+
 #### `gatt svcs` — List services
 
 ```
 blew [global-options] gatt svcs
 ```
 
-Lists all discovered services on the connected device.
+Lists all discovered services. Output columns: UUID, Name, Primary.
+
+```
+UUID   Name                  Primary
+------------------------------------
+180F   Battery Service       yes
+180A   Device Information    yes
+FFF0                         yes
+```
 
 #### `gatt tree` — Show full GATT tree
 
@@ -153,7 +168,15 @@ Lists all discovered services on the connected device.
 blew [global-options] gatt tree [-d]
 ```
 
-Prints services and their characteristics with properties (read / write / notify / indicate).
+Prints services and their characteristics with properties (read / write / notify / indicate). Standard UUIDs show their name in parentheses.
+
+```
+Service: 180F (Battery Service)
+  Char: 2A19 (Battery Level) [read,notify]
+    Desc: 2902 (Client Characteristic Configuration)
+Service: FFF0
+  Char: FFF1 [read,write-without-response,notify]
+```
 
 | Flag | Description |
 |------|-------------|
@@ -165,6 +188,8 @@ Prints services and their characteristics with properties (read / write / notify
 blew [global-options] gatt chars -S <service-uuid>
 ```
 
+Output columns: UUID, Name, Properties.
+
 | Flag | Description |
 |------|-------------|
 | `-S, --service <uuid>` | Service UUID to inspect. Required. |
@@ -174,6 +199,8 @@ blew [global-options] gatt chars -S <service-uuid>
 ```
 blew [global-options] gatt desc -c <char-uuid>
 ```
+
+Output columns: UUID, Name.
 
 | Flag | Description |
 |------|-------------|
@@ -311,16 +338,16 @@ The REPL provides:
 ```
 blew> scan -t 3 -n Thingy
 ID                                    NAME    RSSI  Signal    Services
---------------------------------------------------------------------
-F3C2A1B0-1234-5678-ABCD-000000000001  Thingy  -58   ████████  180F,180A
+-------------------------------------------------------------------------------------------
+F3C2A1B0-1234-5678-ABCD-000000000001  Thingy  -58   ████████  180F (Battery Service), 180A (Device Information)
 
 blew> connect F3C2A1B0-1234-5678-ABCD-000000000001
 
 blew> gatt tree
-Service: 180F
-  Char: 2A19 [read,notify]
-Service: 180A
-  Char: 2A29 [read]
+Service: 180F (Battery Service)
+  Char: 2A19 (Battery Level) [read,notify]
+Service: 180A (Device Information)
+  Char: 2A29 (Manufacturer Name String) [read]
 
 blew> read -c 2A19 -F uint8
 87
@@ -394,9 +421,11 @@ Pass `-o kv` to get machine-parseable output. Each record is one line of space-s
 
 ```
 id=F3C2A1B0-... name=Thingy rssi=-58 services=180F,180A
-char=2A19 value=57 fmt=uint8
+char=2A19 name="Battery Level" value=57 fmt=uint8
 ts=2026-02-21T12:34:56.789Z char=fff1 value=deadbeef
 ```
+
+The `name=` field is included when the UUID is a known Bluetooth SIG UUID. It is omitted for custom or vendor UUIDs.
 
 ```bash
 blew -n "Thingy" -o kv sub -c fff1 -D 60 | awk -F'value=' '{print $2}'
@@ -452,6 +481,6 @@ blew -n "Thingy" -p only read -c 2A19 -F uint8
 
 | Version | Highlights |
 |---------|-----------|
-| **v1.0 (current)** | Scan, connect, GATT tree, read, write, subscribe, `--exec` scripting, interactive REPL |
-| **v1.5** | `scan --watch` live updates, RSSI monitoring, improved tab completion, SIG UUID friendly labels |
-| **v2.0** | Peripheral/virtual device mode — simulate a BLE peripheral AML profiles, clone real devices |
+| **v1.0 (current)** | Scan, connect, GATT tree, read, write, subscribe, `--exec` scripting, interactive REPL, Bluetooth SIG UUID human-readable names |
+| **v1.5** | `scan --watch` live updates, RSSI monitoring, improved tab completion, custom/vendor UUID name mappings |
+| **v2.0** | Peripheral/virtual device mode — simulate a BLE peripheral and profiles, clone real devices |
