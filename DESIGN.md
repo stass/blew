@@ -301,6 +301,17 @@ Wraps `OutputFormat` (text|kv) and `verbosity` (0/1/2). All output goes through 
 - **text**: `key: value` pairs (record) or auto-padded aligned columns (table)
 - **kv**: space-separated `key=value` on one line; values with spaces or quotes are double-quoted
 
+**ANSI formatting** — `OutputFormatter` detects whether stdout is a TTY at init time (`isatty(fileno(stdout))`). When in text mode with a TTY, two helpers apply ANSI escape sequences:
+- `bold(_:)` — wraps text in `\e[1m...\e[0m`
+- `dim(_:)` — wraps text in `\e[2m...\e[0m`
+
+Both helpers return the string unchanged when stdout is not a TTY or format is `kv`, so piped output and machine-readable output are never polluted with escape codes. These helpers are used by:
+- `printTable` — bold column headers, dim separator line
+- `printRecord` — bold key names (text mode)
+- `gatt tree` — bold service/characteristic UUIDs, dim properties and values
+- `gatt info` — bold characteristic name header and "Structure:" label, dim conditional field annotations
+- `help` — bold command names
+
 ### 4.7 DataFormatter
 
 A static enum with `format(_:as:)` and `parse(_:as:)` methods covering: `hex`, `utf8`, `base64`, `uint8`, `uint16le`, `uint32le`, `float32le`, `raw`. Shared by `read`, `write`, and `sub`.

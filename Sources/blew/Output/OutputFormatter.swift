@@ -3,11 +3,27 @@ import Foundation
 struct OutputFormatter {
     let format: OutputFormat
     let verbosity: Int
+    let isTTY: Bool
 
     init(format: OutputFormat, verbosity: Int = 0) {
         self.format = format
         self.verbosity = verbosity
+        self.isTTY = isatty(fileno(stdout)) != 0
     }
+
+    // MARK: - ANSI helpers
+
+    func bold(_ text: String) -> String {
+        guard isTTY && format == .text else { return text }
+        return "\u{1B}[1m\(text)\u{1B}[0m"
+    }
+
+    func dim(_ text: String) -> String {
+        guard isTTY && format == .text else { return text }
+        return "\u{1B}[2m\(text)\u{1B}[0m"
+    }
+
+    // MARK: - Logging (stderr)
 
     func printError(_ message: String) {
         FileHandle.standardError.write(Data("Error: \(message)\n".utf8))
@@ -23,6 +39,8 @@ struct OutputFormatter {
         FileHandle.standardError.write(Data("[debug] \(message)\n".utf8))
     }
 
+    // MARK: - Output (stdout)
+
     func print(_ text: String) {
         Swift.print(text)
     }
@@ -35,7 +53,7 @@ struct OutputFormatter {
         switch format {
         case .text:
             for (key, value) in pairs {
-                Swift.print("\(key): \(value)")
+                Swift.print("\(bold(key)): \(value)")
             }
         case .kv:
             let line = pairs.map { key, value in
@@ -59,10 +77,10 @@ struct OutputFormatter {
                 }
             }
             let header = headers.enumerated().map { i, h in
-                h.padding(toLength: widths[i], withPad: " ", startingAt: 0)
+                bold(h).padding(toLength: widths[i] + boldPadding(h), withPad: " ", startingAt: 0)
             }.joined(separator: "  ")
             Swift.print(header)
-            Swift.print(String(repeating: "-", count: header.count))
+            Swift.print(dim(String(repeating: "─", count: widths.reduce(0, +) + max(0, widths.count - 1) * 2)))
             for row in rows {
                 let line = row.enumerated().map { i, cell in
                     cell.padding(toLength: i < widths.count ? widths[i] : cell.count, withPad: " ", startingAt: 0)
@@ -81,5 +99,16 @@ struct OutputFormatter {
                 Swift.print(pairs)
             }
         }
+    }
+
+    // MARK: - Private helpers
+
+    // When we bold a header string, we add ANSI escape sequences that are invisible
+    // but take up bytes. padding(toLength:) counts bytes, not visible characters,
+    // so we need to widen the target length by the number of escape bytes added.
+    private func boldPadding(_ text: String) -> Int {
+        guard isTTY && format == .text else { return 0 }
+        // bold() wraps with \e[1m (4 bytes) + \e[0m (4 bytes) = 8 extra bytes
+        return 8
     }
 }

@@ -168,14 +168,16 @@ FFF0                         yes
 blew [global-options] gatt tree [-d] [-V]
 ```
 
-Prints services and their characteristics with properties (read / write / notify / indicate). Standard UUIDs show their name in parentheses.
+Prints services and their characteristics with properties (read / write / notify / indicate). Standard UUIDs show their human-readable name alongside.
 
 ```
-Service: 180F (Battery Service)
-  Char: 2A19 (Battery Level) [read,notify]
-    Desc: 2902 (Client Characteristic Configuration)
-Service: FFF0
-  Char: FFF1 [read,write-without-response,notify]
+Service 180F  Battery Service
+├── 2A19  Battery Level  [read, notify]
+│   └── 2902  Client Characteristic Configuration
+└── FFF1  [read, write-without-response, notify]
+
+Service FFF0
+└── FFF1  [read, write-without-response, notify]
 ```
 
 | Flag | Description |
@@ -185,11 +187,12 @@ Service: FFF0
 
 With `-V`:
 ```
-Service: 180F (Battery Service)
-  Char: 2A19 (Battery Level) [read,notify] = 85
-Service: 180A (Device Information)
-  Char: 2A29 (Manufacturer Name String) [read] = Apple Inc.
-  Char: 2A24 (Model Number String) [read] = MacBookPro18,3
+Service 180F  Battery Service
+└── 2A19  Battery Level  [read, notify]  = 85
+
+Service 180A  Device Information
+├── 2A29  Manufacturer Name String  [read]  = Apple Inc.
+└── 2A24  Model Number String  [read]  = MacBookPro18,3
 ```
 
 #### `gatt chars` — List characteristics for a service
@@ -404,10 +407,11 @@ F3C2A1B0-1234-5678-ABCD-000000000001  Thingy  -58   ████████  18
 blew> connect F3C2A1B0-1234-5678-ABCD-000000000001
 
 blew> gatt tree
-Service: 180F (Battery Service)
-  Char: 2A19 (Battery Level) [read,notify]
-Service: 180A (Device Information)
-  Char: 2A29 (Manufacturer Name String) [read]
+Service 180F  Battery Service
+└── 2A19  Battery Level  [read, notify]
+
+Service 180A  Device Information
+└── 2A29  Manufacturer Name String  [read]
 
 blew> read -c 2A19 -F uint8
 87

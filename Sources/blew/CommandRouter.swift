@@ -70,25 +70,26 @@ final class CommandRouter {
     }
 
     func printHelp() {
-        let help = """
-        Available commands:
-          scan        Scan for BLE devices
-          connect     Connect to a device
-          disconnect  Disconnect from current device
-          status      Show connection status
-          gatt        Inspect GATT services/characteristics
-                        svcs             List services
-                        tree [-d] [-V]   Full GATT tree
-                        chars -S <uuid>  List characteristics for a service
-                        desc -c <uuid>   List descriptors for a characteristic
-                        info -c <uuid>   Show SIG specification for a characteristic
-          read        Read a characteristic value
-          write       Write to a characteristic
-          sub         Subscribe to notifications/indications
-          help        Show this help
-          quit/exit   Exit the REPL
-        """
-        print(help)
+        func cmd(_ name: String) -> String { output.bold(name) }
+        let lines = [
+            "Available commands:",
+            "  \(cmd("scan"))        Scan for BLE devices",
+            "  \(cmd("connect"))     Connect to a device",
+            "  \(cmd("disconnect"))  Disconnect from current device",
+            "  \(cmd("status"))      Show connection status",
+            "  \(cmd("gatt"))        Inspect GATT services/characteristics",
+            "                \(cmd("svcs"))             List services",
+            "                \(cmd("tree")) [-d] [-V]   Full GATT tree",
+            "                \(cmd("chars")) -S <uuid>  List characteristics for a service",
+            "                \(cmd("desc")) -c <uuid>   List descriptors for a characteristic",
+            "                \(cmd("info")) -c <uuid>   Show SIG specification for a characteristic",
+            "  \(cmd("read"))        Read a characteristic value",
+            "  \(cmd("write"))       Write to a characteristic",
+            "  \(cmd("sub"))         Subscribe to notifications/indications",
+            "  \(cmd("help"))        Show this help",
+            "  \(cmd("quit"))/\(cmd("exit"))   Exit the REPL",
+        ]
+        print(lines.joined(separator: "\n"))
     }
 
     private func tokenize(_ line: String) -> [String] {
@@ -367,28 +368,62 @@ final class CommandRouter {
                     let includeDescriptors = args.contains("-d") || args.contains("--descriptors")
                     let includeValues = args.contains("-V") || args.contains("--values")
                     let tree = try await manager.discoverTree(includeDescriptors: includeDescriptors)
-                    for service in tree {
-                        output.print("Service: \(BLENames.displayUUID(service.uuid, category: .service))")
-                        for char in service.characteristics {
-                            let props = char.properties.joined(separator: ",")
-                            var charLine = "  Char: \(BLENames.displayUUID(char.uuid, category: .characteristic)) [\(props)]"
+                    for (svcIdx, service) in tree.enumerated() {
+                        let svcName = BLENames.name(for: service.uuid, category: .service)
+                        var svcLine = "Service \(output.bold(service.uuid))"
+                        if let name = svcName { svcLine += "  \(name)" }
+                        output.print(svcLine)
+
+                        for (charIdx, char) in service.characteristics.enumerated() {
+                            let isLastChar = charIdx == service.characteristics.count - 1
+                            let charBranch = isLastChar ? "└── " : "├── "
+                            let descIndent = isLastChar ? "    " : "│   "
+                            // Value lines are indented under the char, at the same depth as descriptors
+                            let valueIndent = descIndent + "  "
+
+                            let charName = BLENames.name(for: char.uuid, category: .characteristic)
+                            let props = char.properties.joined(separator: ", ")
+                            var charLine = charBranch + output.bold(char.uuid)
+                            if let name = charName { charLine += "  \(name)" }
+                            charLine += "  \(output.dim("[\(props)]"))"
+
                             if includeValues && char.properties.contains("read") {
                                 do {
                                     let data = try await manager.readCharacteristic(char.uuid)
-                                    let value = GATTDecoder.decode(data, uuid: char.uuid)
+                                    let decoded = GATTDecoder.decode(data, uuid: char.uuid)
                                         ?? DataFormatter.format(data, as: "hex")
-                                    charLine += " = \(value)"
+                                    let parts = decoded.components(separatedBy: " | ")
+                                    if parts.count > 1 {
+                                        // Multi-field: print char header first, then each field on its own line
+                                        output.print(charLine)
+                                        for part in parts {
+                                            let (label, value) = Self.splitFieldPart(part)
+                                            output.print(output.dim(valueIndent + label + ": ") + value)
+                                        }
+                                    } else {
+                                        // Single-field: dim the "= " separator, normal weight for the value
+                                        output.print(charLine + output.dim("  = ") + decoded)
+                                    }
                                 } catch is CancellationError {
                                     throw CancellationError()
                                 } catch {
-                                    charLine += " = (read error)"
+                                    output.print(charLine + output.dim("  = (read error)"))
                                 }
+                            } else {
+                                output.print(charLine)
                             }
-                            output.print(charLine)
-                            for desc in char.descriptors {
-                                output.print("    Desc: \(BLENames.displayUUID(desc.uuid, category: .descriptor))")
+
+                            for (descIdx, desc) in char.descriptors.enumerated() {
+                                let isLastDesc = descIdx == char.descriptors.count - 1
+                                let descBranch = isLastDesc ? "└── " : "├── "
+                                let descName = BLENames.name(for: desc.uuid, category: .descriptor)
+                                var descLine = descIndent + descBranch + output.dim(desc.uuid)
+                                if let name = descName { descLine += output.dim("  \(name)") }
+                                output.print(descLine)
                             }
                         }
+
+                        if svcIdx < tree.count - 1 { output.print("") }
                     }
 
                 case "chars":
@@ -497,12 +532,12 @@ final class CommandRouter {
 
         switch output.format {
         case .text:
-            output.print("\(info.name) (\(info.uuid))")
+            output.print("\(output.bold("\(info.name) (\(info.uuid))"))")
             output.print("")
             output.print(info.description)
             if !info.fields.isEmpty {
                 output.print("")
-                output.print("Structure:")
+                output.print(output.bold("Structure:"))
                 let nameWidth = info.fields.map { $0.name.count }.max() ?? 0
                 let typeWidth = info.fields.map { $0.typeName.count }.max() ?? 0
                 for f in info.fields {
@@ -510,7 +545,7 @@ final class CommandRouter {
                     line += "  \(f.typeName.padding(toLength: typeWidth, withPad: " ", startingAt: 0))"
                     line += "  \(f.sizeDescription)"
                     if let cond = f.conditionDescription {
-                        line += "  [\(cond)]"
+                        line += "  \(output.dim("[\(cond)]"))"
                     }
                     output.print(line)
                 }
@@ -932,6 +967,24 @@ extension CommandRouter {
         case 1: return .resolved(matches[0])
         default: return .ambiguous(matches)
         }
+    }
+}
+
+// MARK: - GATT value display helpers
+
+extension CommandRouter {
+    /// Split a decoded field string like "Outer.Inner.Leaf: 2026" into
+    /// a simplified label ("Leaf") and the raw value string ("2026").
+    /// The caller is responsible for applying any visual styling to each part.
+    static func splitFieldPart(_ field: String) -> (label: String, value: String) {
+        guard let colonRange = field.range(of: ": ") else { return ("", field) }
+        let fullName = String(field[field.startIndex..<colonRange.lowerBound])
+        let value = String(field[colonRange.upperBound...])
+        let shortName = fullName
+            .components(separatedBy: ".")
+            .last?
+            .trimmingCharacters(in: .whitespaces) ?? fullName
+        return (shortName, value)
     }
 }
 
