@@ -71,26 +71,120 @@ final class REPL {
         let gattSubs = ["svcs", "tree", "chars", "desc"]
         let formats = ["hex", "utf8", "base64", "uint8", "uint16le", "uint32le", "float32le", "raw"]
 
-        ln.setCompletionCallback { buffer in
-            let parts = buffer.split(separator: " ", maxSplits: 1)
+        ln.setCompletionCallback { [weak self] buffer in
+            guard let self else { return [] }
+
+            let parts = buffer.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
+
+            // Completing the command word itself
             if parts.count <= 1 {
-                return commands.filter { $0.hasPrefix(buffer) }
+                return commands
+                    .filter { $0.hasPrefix(buffer) }
+                    .map { $0 + " " }
             }
 
             let cmd = String(parts[0])
             let rest = parts.count > 1 ? String(parts[1]) : ""
 
-            if cmd == "gatt" {
-                return gattSubs
-                    .filter { $0.hasPrefix(rest) }
-                    .map { "\(cmd) \($0)" }
+            // --- connect: complete device IDs and names ---
+            if cmd == "connect" {
+                let partial = rest.lowercased()
+                let strippedPartial = partial.replacingOccurrences(of: "-", with: "")
+                var seen = Set<String>()
+                var matches: [String] = []
+                for device in self.router.lastScanResults {
+                    let id = device.identifier
+                    let nameMatch = device.name.map {
+                        $0.lowercased().contains(partial)
+                    } ?? false
+                    // Match any contiguous portion of the UUID (hyphens stripped)
+                    let strippedId = id.lowercased().replacingOccurrences(of: "-", with: "")
+                    let idMatch = !strippedPartial.isEmpty && strippedId.contains(strippedPartial)
+                    if nameMatch || idMatch {
+                        if seen.insert(id).inserted {
+                            matches.append("connect \(id) ")
+                        }
+                    }
+                }
+                return matches
             }
 
+            // --- gatt subcommands ---
+            if cmd == "gatt" {
+                let gattParts = rest.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
+                let sub = gattParts.isEmpty ? "" : String(gattParts[0])
+
+                // Still completing the subcommand itself
+                if gattParts.count <= 1 && !rest.hasSuffix(" ") {
+                    return gattSubs
+                        .filter { $0.hasPrefix(sub) }
+                        .map { "gatt \($0) " }
+                }
+
+                // gatt chars -S <service-uuid>
+                if sub == "chars" {
+                    if buffer.hasSuffix("-S ") || buffer.hasSuffix("--service ") {
+                        return self.router.manager.knownServiceUUIDs()
+                            .map { "\(buffer)\($0)" }
+                    }
+                    let flagPrefix = self.completionUUIDAfterFlag(
+                        buffer: buffer,
+                        flags: ["-S", "--service"],
+                        candidates: self.router.manager.knownServiceUUIDs()
+                    )
+                    return flagPrefix
+                }
+
+                // gatt desc -c <char-uuid>
+                if sub == "desc" {
+                    if buffer.hasSuffix("-c ") || buffer.hasSuffix("--char ") {
+                        return self.router.manager.knownCharacteristicUUIDs()
+                            .map { "\(buffer)\($0)" }
+                    }
+                    return self.completionUUIDAfterFlag(
+                        buffer: buffer,
+                        flags: ["-c", "--char"],
+                        candidates: self.router.manager.knownCharacteristicUUIDs()
+                    )
+                }
+
+                return []
+            }
+
+            // --- format completion ---
             if ["-F", "--format"].contains(where: { buffer.hasSuffix($0 + " ") }) {
                 return formats.map { "\(buffer)\($0)" }
             }
 
+            // --- read / write / sub: complete -c <char-uuid> ---
+            if ["read", "write", "sub"].contains(cmd) {
+                if buffer.hasSuffix("-c ") || buffer.hasSuffix("--char ") {
+                    return self.router.manager.knownCharacteristicUUIDs()
+                        .map { "\(buffer)\($0)" }
+                }
+                return self.completionUUIDAfterFlag(
+                    buffer: buffer,
+                    flags: ["-c", "--char"],
+                    candidates: self.router.manager.knownCharacteristicUUIDs()
+                )
+            }
+
             return []
         }
+    }
+
+    /// Given a buffer like `read -c 2A0` and a list of UUID candidates,
+    /// returns completions where the last token (after one of the given flags) is
+    /// extended to full matching UUIDs.
+    private func completionUUIDAfterFlag(buffer: String, flags: [String], candidates: [String]) -> [String] {
+        let tokens = buffer.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard tokens.count >= 2 else { return [] }
+        let lastFlag = tokens[tokens.count - 2]
+        guard flags.contains(lastFlag) else { return [] }
+        let partial = tokens.last!.lowercased()
+        let prefix = buffer.hasSuffix(partial) ? String(buffer.dropLast(partial.count)) : buffer + " "
+        return candidates
+            .filter { $0.lowercased().hasPrefix(partial) }
+            .map { "\(prefix)\($0)" }
     }
 }

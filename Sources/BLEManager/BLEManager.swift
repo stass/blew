@@ -461,6 +461,22 @@ public final class BLECentral: @unchecked Sendable {
         stateLock.unlock()
     }
 
+    // MARK: - Synchronous accessors for completion
+
+    public func knownCharacteristicUUIDs() -> [String] {
+        stateLock.lock()
+        let uuids = discoveredCharacteristics.map { $0.uuid.uuidString }
+        stateLock.unlock()
+        return uuids
+    }
+
+    public func knownServiceUUIDs() -> [String] {
+        stateLock.lock()
+        let uuids = discoveredServices.map { $0.uuid.uuidString }
+        stateLock.unlock()
+        return uuids
+    }
+
     private func propertiesList(_ props: CBCharacteristicProperties) -> [String] {
         var list: [String] = []
         if props.contains(.read) { list.append("read") }

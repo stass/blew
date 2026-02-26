@@ -5,6 +5,7 @@ final class CommandRouter {
     let globals: GlobalOptions
     let manager: BLECentral
     let output: OutputFormatter
+    private(set) var lastScanResults: [DiscoveredDevice] = []
 
     init(globals: GlobalOptions, manager: BLECentral? = nil) {
         self.globals = globals
@@ -180,6 +181,7 @@ final class CommandRouter {
         }
 
         let sorted = devices.sorted { $0.rssi > $1.rssi }
+        lastScanResults = sorted
 
         if output.format == .text {
             let headers = ["ID", "Name", "RSSI", "Signal", "Services"]
@@ -212,9 +214,28 @@ final class CommandRouter {
         let deviceId = args.first ?? globals.id
         let connectTimeout = globals.timeout ?? 10.0
 
-        guard let targetId = deviceId else {
+        guard let rawInput = deviceId else {
             output.printError("missing device identifier")
             return BlewExitCode.invalidArguments.code
+        }
+
+        let resolved = resolveDevice(rawInput)
+        if case .ambiguous(let matches) = resolved {
+            output.printError("ambiguous device '\(rawInput)' — matches:")
+            for d in matches {
+                let label = d.name.map { "\($0) (\(d.identifier))" } ?? d.identifier
+                output.printError("  \(label)")
+            }
+            return BlewExitCode.invalidArguments.code
+        }
+
+        let targetId: String
+        if case .resolved(let device) = resolved {
+            let label = device.name.map { "\($0) (\(device.identifier))" } ?? device.identifier
+            output.printInfo("resolved '\(rawInput)' → \(label)")
+            targetId = device.identifier
+        } else {
+            targetId = rawInput
         }
 
         output.printInfo("connecting to \(targetId)...")
@@ -316,11 +337,21 @@ final class CommandRouter {
                     }
 
                 case "chars":
-                    guard let svcUUID = parseStringOption(Array(args.dropFirst()), short: "-S", long: "--service") else {
+                    guard let svcInput = parseStringOption(Array(args.dropFirst()), short: "-S", long: "--service") else {
                         output.printError("missing --service UUID")
                         exitCode = BlewExitCode.invalidArguments.code
                         semaphore.signal()
                         return
+                    }
+                    let svcUUID: String
+                    switch resolveService(svcInput) {
+                    case .resolved(let uuid): svcUUID = uuid
+                    case .ambiguous(let uuids):
+                        output.printError("ambiguous service '\(svcInput)' — matches: \(uuids.joined(separator: ", "))")
+                        exitCode = BlewExitCode.invalidArguments.code
+                        semaphore.signal()
+                        return
+                    case .notFound: svcUUID = svcInput
                     }
                     let chars = try await manager.discoverCharacteristics(forService: svcUUID)
                     let headers = ["UUID", "Properties"]
@@ -328,11 +359,21 @@ final class CommandRouter {
                     output.printTable(headers: headers, rows: rows)
 
                 case "desc":
-                    guard let charUUID = parseStringOption(Array(args.dropFirst()), short: "-c", long: "--char") else {
+                    guard let charInput = parseStringOption(Array(args.dropFirst()), short: "-c", long: "--char") else {
                         output.printError("missing --char UUID")
                         exitCode = BlewExitCode.invalidArguments.code
                         semaphore.signal()
                         return
+                    }
+                    let charUUID: String
+                    switch resolveCharacteristic(charInput) {
+                    case .resolved(let uuid): charUUID = uuid
+                    case .ambiguous(let uuids):
+                        output.printError("ambiguous characteristic '\(charInput)' — matches: \(uuids.joined(separator: ", "))")
+                        exitCode = BlewExitCode.invalidArguments.code
+                        semaphore.signal()
+                        return
+                    case .notFound: charUUID = charInput
                     }
                     let descs = try await manager.discoverDescriptors(forCharacteristic: charUUID)
                     let headers = ["UUID"]
@@ -358,9 +399,17 @@ final class CommandRouter {
     }
 
     func runRead(_ args: [String]) -> Int32 {
-        guard let charUUID = parseStringOption(args, short: "-c", long: "--char") else {
+        guard let charInput = parseStringOption(args, short: "-c", long: "--char") else {
             output.printError("missing --char UUID")
             return BlewExitCode.invalidArguments.code
+        }
+        let charUUID: String
+        switch resolveCharacteristic(charInput) {
+        case .resolved(let uuid): charUUID = uuid
+        case .ambiguous(let uuids):
+            output.printError("ambiguous characteristic '\(charInput)' — matches: \(uuids.joined(separator: ", "))")
+            return BlewExitCode.invalidArguments.code
+        case .notFound: charUUID = charInput
         }
         let fmt = parseStringOption(args, short: "-F", long: "--format") ?? "hex"
 
@@ -392,9 +441,17 @@ final class CommandRouter {
     }
 
     func runWrite(_ args: [String]) -> Int32 {
-        guard let charUUID = parseStringOption(args, short: "-c", long: "--char") else {
+        guard let charInput = parseStringOption(args, short: "-c", long: "--char") else {
             output.printError("missing --char UUID")
             return BlewExitCode.invalidArguments.code
+        }
+        let charUUID: String
+        switch resolveCharacteristic(charInput) {
+        case .resolved(let uuid): charUUID = uuid
+        case .ambiguous(let uuids):
+            output.printError("ambiguous characteristic '\(charInput)' — matches: \(uuids.joined(separator: ", "))")
+            return BlewExitCode.invalidArguments.code
+        case .notFound: charUUID = charInput
         }
         guard let dataStr = parseStringOption(args, short: "-d", long: "--data") else {
             output.printError("missing --data value")
@@ -440,9 +497,17 @@ final class CommandRouter {
     }
 
     func runSub(_ args: [String]) -> Int32 {
-        guard let charUUID = parseStringOption(args, short: "-c", long: "--char") else {
+        guard let charInput = parseStringOption(args, short: "-c", long: "--char") else {
             output.printError("missing --char UUID")
             return BlewExitCode.invalidArguments.code
+        }
+        let charUUID: String
+        switch resolveCharacteristic(charInput) {
+        case .resolved(let uuid): charUUID = uuid
+        case .ambiguous(let uuids):
+            output.printError("ambiguous characteristic '\(charInput)' — matches: \(uuids.joined(separator: ", "))")
+            return BlewExitCode.invalidArguments.code
+        case .notFound: charUUID = charInput
         }
         let fmt = parseStringOption(args, short: "-F", long: "--format") ?? "hex"
         let duration = parseDoubleOption(args, short: "-D", long: "--duration")
@@ -507,6 +572,89 @@ final class CommandRouter {
     private func parseIntOption(_ args: [String], short: String, long: String) -> Int? {
         guard let str = parseStringOption(args, short: short, long: long) else { return nil }
         return Int(str)
+    }
+}
+
+// MARK: - Device & characteristic resolution
+
+extension CommandRouter {
+    enum DeviceMatch {
+        case resolved(DiscoveredDevice)
+        case ambiguous([DiscoveredDevice])
+        case notFound
+    }
+
+    /// Resolve a user-supplied string to a device from the last scan.
+    /// Priority: exact UUID → name substring → UUID substring (hyphens stripped).
+    func resolveDevice(_ input: String) -> DeviceMatch {
+        let lower = input.lowercased()
+
+        // Exact UUID match
+        if let exact = lastScanResults.first(where: {
+            $0.identifier.lowercased() == lower
+        }) {
+            return .resolved(exact)
+        }
+
+        // Name contains match (case-insensitive)
+        let nameMatches = lastScanResults.filter {
+            $0.name?.lowercased().contains(lower) == true
+        }
+        if nameMatches.count == 1 { return .resolved(nameMatches[0]) }
+        if nameMatches.count > 1 { return .ambiguous(nameMatches) }
+
+        // UUID substring match — strip hyphens so partial segments like "683687" or
+        // "683687E7E810" match anywhere in the UUID, not just at the start.
+        let strippedInput = lower.replacingOccurrences(of: "-", with: "")
+        guard !strippedInput.isEmpty else { return .notFound }
+        let uuidMatches = lastScanResults.filter {
+            let strippedId = $0.identifier.lowercased().replacingOccurrences(of: "-", with: "")
+            return strippedId.contains(strippedInput)
+        }
+        if uuidMatches.count == 1 { return .resolved(uuidMatches[0]) }
+        if uuidMatches.count > 1 { return .ambiguous(uuidMatches) }
+
+        return .notFound
+    }
+
+    enum UUIDMatch {
+        case resolved(String)
+        case ambiguous([String])
+        case notFound
+    }
+
+    /// Resolve a partial UUID prefix to a full characteristic UUID.
+    func resolveCharacteristic(_ input: String) -> UUIDMatch {
+        let lower = input.lowercased()
+        let known = manager.knownCharacteristicUUIDs()
+
+        if let exact = known.first(where: { $0.lowercased() == lower }) {
+            return .resolved(exact)
+        }
+
+        let matches = known.filter { $0.lowercased().hasPrefix(lower) }
+        switch matches.count {
+        case 0: return .notFound
+        case 1: return .resolved(matches[0])
+        default: return .ambiguous(matches)
+        }
+    }
+
+    /// Resolve a partial UUID prefix to a full service UUID.
+    func resolveService(_ input: String) -> UUIDMatch {
+        let lower = input.lowercased()
+        let known = manager.knownServiceUUIDs()
+
+        if let exact = known.first(where: { $0.lowercased() == lower }) {
+            return .resolved(exact)
+        }
+
+        let matches = known.filter { $0.lowercased().hasPrefix(lower) }
+        switch matches.count {
+        case 0: return .notFound
+        case 1: return .resolved(matches[0])
+        default: return .ambiguous(matches)
+        }
     }
 }
 
