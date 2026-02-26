@@ -378,6 +378,8 @@ final class CommandRouter {
                                     let value = GATTDecoder.decode(data, uuid: char.uuid)
                                         ?? DataFormatter.format(data, as: "hex")
                                     charLine += " = \(value)"
+                                } catch is CancellationError {
+                                    throw CancellationError()
                                 } catch {
                                     charLine += " = (read error)"
                                 }
@@ -416,6 +418,8 @@ final class CommandRouter {
                                     let data = try await manager.readCharacteristic(char.uuid)
                                     value = GATTDecoder.decode(data, uuid: char.uuid)
                                         ?? DataFormatter.format(data, as: "hex")
+                                } catch is CancellationError {
+                                    throw CancellationError()
                                 } catch {
                                     value = "(read error)"
                                 }
@@ -741,12 +745,12 @@ final class CommandRouter {
             if interruptRequested {
                 interruptRequested = false
                 task.cancel()
-                semaphore.wait()
+                _ = semaphore.wait(timeout: .now() + 2.0)
                 return .interrupted
             }
             if let dl = deadline, Date() > dl {
                 task.cancel()
-                semaphore.wait()
+                _ = semaphore.wait(timeout: .now() + 2.0)
                 return .timedOut
             }
         }

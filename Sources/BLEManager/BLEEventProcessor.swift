@@ -207,18 +207,42 @@ final class BLEEventProcessor: @unchecked Sendable {
                 disconnectContinuation = nil
                 cont.resume()
             }
-            // Also cancel any notification streams
+            // Finish any active notification streams
             for (_, cont) in notificationContinuations {
                 cont.finish()
             }
             notificationContinuations.removeAll()
 
-            // Fail pending operations
+            // Fail all pending one-shot continuations
             let connError = BLEError.connectionFailed(error ?? "disconnected")
             if let cont = connectContinuation {
                 connectContinuation = nil
                 cont.resume(throwing: connError)
             }
+            if let cont = discoverServicesContinuation {
+                discoverServicesContinuation = nil
+                cont.resume(throwing: connError)
+            }
+            for (_, cont) in discoverCharsContinuations {
+                cont.resume(throwing: connError)
+            }
+            discoverCharsContinuations.removeAll()
+            for (_, cont) in discoverDescContinuations {
+                cont.resume(throwing: connError)
+            }
+            discoverDescContinuations.removeAll()
+            for (_, cont) in readContinuations {
+                cont.resume(throwing: connError)
+            }
+            readContinuations.removeAll()
+            for (_, cont) in writeContinuations {
+                cont.resume(throwing: connError)
+            }
+            writeContinuations.removeAll()
+            for (_, cont) in subscribeContinuations {
+                cont.resume(throwing: connError)
+            }
+            subscribeContinuations.removeAll()
 
         case .didDiscoverServices(_, let uuids, let error):
             if let cont = discoverServicesContinuation {
