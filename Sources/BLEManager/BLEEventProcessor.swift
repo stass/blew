@@ -119,6 +119,48 @@ final class BLEEventProcessor: @unchecked Sendable {
         lock.unlock()
     }
 
+    // MARK: - Cancellation
+
+    func cancelConnectContinuation() {
+        lock.lock(); let c = connectContinuation; connectContinuation = nil; lock.unlock()
+        c?.resume(throwing: CancellationError())
+    }
+
+    func cancelDisconnectContinuation() {
+        lock.lock(); let c = disconnectContinuation; disconnectContinuation = nil; lock.unlock()
+        c?.resume(throwing: CancellationError())
+    }
+
+    func cancelDiscoverServicesContinuation() {
+        lock.lock(); let c = discoverServicesContinuation; discoverServicesContinuation = nil; lock.unlock()
+        c?.resume(throwing: CancellationError())
+    }
+
+    func cancelDiscoverCharsContinuation(forService uuid: String) {
+        lock.lock(); let c = discoverCharsContinuations.removeValue(forKey: uuid); lock.unlock()
+        c?.resume(throwing: CancellationError())
+    }
+
+    func cancelDiscoverDescContinuation(forChar uuid: String) {
+        lock.lock(); let c = discoverDescContinuations.removeValue(forKey: uuid); lock.unlock()
+        c?.resume(throwing: CancellationError())
+    }
+
+    func cancelReadContinuation(forChar uuid: String) {
+        lock.lock(); let c = readContinuations.removeValue(forKey: uuid); lock.unlock()
+        c?.resume(throwing: CancellationError())
+    }
+
+    func cancelWriteContinuation(forChar uuid: String) {
+        lock.lock(); let c = writeContinuations.removeValue(forKey: uuid); lock.unlock()
+        c?.resume(throwing: CancellationError())
+    }
+
+    func cancelSubscribeContinuation(forChar uuid: String) {
+        lock.lock(); let c = subscribeContinuations.removeValue(forKey: uuid); lock.unlock()
+        c?.resume(throwing: CancellationError())
+    }
+
     // MARK: - Processing loop
 
     private func processLoop() {

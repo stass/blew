@@ -2,6 +2,11 @@ import ArgumentParser
 import Foundation
 import BLEManager
 
+/// Set by the SIGINT handler when a command is in flight; cleared by the polling loop.
+nonisolated(unsafe) var interruptRequested = false
+/// Set to true while a command's polling loop is active; controls SIGINT disposition.
+nonisolated(unsafe) var commandIsRunning = false
+
 @main
 struct Blew: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -62,7 +67,11 @@ private func installSignalHandlers() {
         _exit(0)
     }
     signal(SIGINT) { _ in
-        cleanupBeforeExit()
-        _exit(130)
+        if commandIsRunning {
+            interruptRequested = true
+        } else {
+            cleanupBeforeExit()
+            _exit(130)
+        }
     }
 }

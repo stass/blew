@@ -134,12 +134,16 @@ public final class BLECentral: @unchecked Sendable {
             throw BLEError.deviceNotFound(deviceId)
         }
 
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            processor.setConnectContinuation(cont)
-            cbQueue.async {
-                targetPeripheral.delegate = self.delegate
-                self.centralManager.connect(targetPeripheral, options: nil)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                processor.setConnectContinuation(cont)
+                cbQueue.async {
+                    targetPeripheral.delegate = self.delegate
+                    self.centralManager.connect(targetPeripheral, options: nil)
+                }
             }
+        } onCancel: {
+            self.processor.cancelConnectContinuation()
         }
 
         stateLock.lock()
@@ -167,11 +171,15 @@ public final class BLECentral: @unchecked Sendable {
             throw BLEError.notConnected
         }
 
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            processor.setDisconnectContinuation(cont)
-            cbQueue.async {
-                self.centralManager.cancelPeripheralConnection(p)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                processor.setDisconnectContinuation(cont)
+                cbQueue.async {
+                    self.centralManager.cancelPeripheralConnection(p)
+                }
             }
+        } onCancel: {
+            self.processor.cancelDisconnectContinuation()
         }
 
         stateLock.lock()
@@ -232,11 +240,16 @@ public final class BLECentral: @unchecked Sendable {
             for char in chars {
                 var descInfos: [DescriptorInfo] = []
                 if includeDescriptors {
-                    let descUUIDs = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[String], Error>) in
-                        self.processor.setDiscoverDescContinuation(forChar: char.uuid.uuidString, cont)
-                        self.cbQueue.async {
-                            peripheral.discoverDescriptors(for: char)
+                    let charUUIDStr = char.uuid.uuidString
+                    let descUUIDs = try await withTaskCancellationHandler {
+                        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[String], Error>) in
+                            self.processor.setDiscoverDescContinuation(forChar: charUUIDStr, cont)
+                            self.cbQueue.async {
+                                peripheral.discoverDescriptors(for: char)
+                            }
                         }
+                    } onCancel: {
+                        self.processor.cancelDiscoverDescContinuation(forChar: charUUIDStr)
                     }
                     descInfos = descUUIDs.map { DescriptorInfo(uuid: $0) }
                 }
@@ -286,11 +299,16 @@ public final class BLECentral: @unchecked Sendable {
             throw BLEError.characteristicNotFound(charUUID)
         }
 
-        let descUUIDs = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[String], Error>) in
-            processor.setDiscoverDescContinuation(forChar: charUUID.uppercased(), cont)
-            cbQueue.async {
-                peripheral.discoverDescriptors(for: c)
+        let canonicalUUID = charUUID.uppercased()
+        let descUUIDs = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[String], Error>) in
+                processor.setDiscoverDescContinuation(forChar: canonicalUUID, cont)
+                cbQueue.async {
+                    peripheral.discoverDescriptors(for: c)
+                }
             }
+        } onCancel: {
+            self.processor.cancelDiscoverDescContinuation(forChar: canonicalUUID)
         }
 
         return descUUIDs.map { DescriptorInfo(uuid: $0) }
@@ -313,11 +331,16 @@ public final class BLECentral: @unchecked Sendable {
             throw BLEError.characteristicNotFound(charUUID)
         }
 
-        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
-            processor.setReadContinuation(forChar: c.uuid.uuidString, cont)
-            cbQueue.async {
-                peripheral.readValue(for: c)
+        let readUUID = c.uuid.uuidString
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
+                processor.setReadContinuation(forChar: readUUID, cont)
+                cbQueue.async {
+                    peripheral.readValue(for: c)
+                }
             }
+        } onCancel: {
+            self.processor.cancelReadContinuation(forChar: readUUID)
         }
     }
 
@@ -349,11 +372,16 @@ public final class BLECentral: @unchecked Sendable {
         }
 
         if cbType == .withResponse {
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                processor.setWriteContinuation(forChar: c.uuid.uuidString, cont)
-                cbQueue.async {
-                    peripheral.writeValue(data, for: c, type: cbType)
+            let writeUUID = c.uuid.uuidString
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                    processor.setWriteContinuation(forChar: writeUUID, cont)
+                    cbQueue.async {
+                        peripheral.writeValue(data, for: c, type: cbType)
+                    }
                 }
+            } onCancel: {
+                self.processor.cancelWriteContinuation(forChar: writeUUID)
             }
         } else {
             cbQueue.async {
@@ -380,11 +408,16 @@ public final class BLECentral: @unchecked Sendable {
         }
 
         // Enable notifications
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            processor.setSubscribeContinuation(forChar: c.uuid.uuidString, cont)
-            cbQueue.async {
-                peripheral.setNotifyValue(true, for: c)
+        let subscribeUUID = c.uuid.uuidString
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                processor.setSubscribeContinuation(forChar: subscribeUUID, cont)
+                cbQueue.async {
+                    peripheral.setNotifyValue(true, for: c)
+                }
             }
+        } onCancel: {
+            self.processor.cancelSubscribeContinuation(forChar: subscribeUUID)
         }
 
         stateLock.lock()
@@ -427,11 +460,15 @@ public final class BLECentral: @unchecked Sendable {
     }
 
     private func discoverAllServices(peripheral: CBPeripheral) async throws {
-        let serviceUUIDs = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[String], Error>) in
-            processor.setDiscoverServicesContinuation(cont)
-            cbQueue.async {
-                peripheral.discoverServices(nil)
+        let serviceUUIDs = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[String], Error>) in
+                self.processor.setDiscoverServicesContinuation(cont)
+                self.cbQueue.async {
+                    peripheral.discoverServices(nil)
+                }
             }
+        } onCancel: {
+            self.processor.cancelDiscoverServicesContinuation()
         }
 
         // Wait for services to be available on the peripheral object
@@ -444,11 +481,16 @@ public final class BLECentral: @unchecked Sendable {
         allServices = services
 
         for service in services {
-            let chars = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[BLEEvent.DiscoveredCharacteristic], Error>) in
-                self.processor.setDiscoverCharsContinuation(forService: service.uuid.uuidString, cont)
-                self.cbQueue.async {
-                    peripheral.discoverCharacteristics(nil, for: service)
+            let svcUUID = service.uuid.uuidString
+            let chars = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[BLEEvent.DiscoveredCharacteristic], Error>) in
+                    self.processor.setDiscoverCharsContinuation(forService: svcUUID, cont)
+                    self.cbQueue.async {
+                        peripheral.discoverCharacteristics(nil, for: service)
+                    }
                 }
+            } onCancel: {
+                self.processor.cancelDiscoverCharsContinuation(forService: svcUUID)
             }
             if let discovered = service.characteristics {
                 allChars.append(contentsOf: discovered)
