@@ -11,6 +11,7 @@ struct GATTCommand: ParsableCommand {
             GATTTreeCommand.self,
             GATTCharsCommand.self,
             GATTDescCommand.self,
+            GATTInfoCommand.self,
         ]
     )
 }
@@ -87,6 +88,23 @@ struct GATTDescCommand: ParsableCommand {
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
         let code = router.runGATT(["desc", "-c", char])
+        if code != 0 { throw BlewExitCode(code) }
+    }
+}
+
+struct GATTInfoCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "info",
+        abstract: "Show Bluetooth SIG description for a standard characteristic UUID",
+        discussion: "Does not require a connected device. Shows the characteristic name, description, and field structure from the Bluetooth SIG specification."
+    )
+
+    @Option(name: [.customShort("c"), .long], help: "Characteristic UUID (4-char or full form).")
+    var char: String
+
+    mutating func run() throws {
+        let router = CommandRouter(globals: GlobalOptions.current)
+        let code = router.runGATT(["info", "-c", char])
         if code != 0 { throw BlewExitCode(code) }
     }
 }

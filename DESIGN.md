@@ -228,10 +228,13 @@ gatt
   tree   [-d/--descriptors]  [-V]
   chars  -S <service-uuid>   [-V]
   desc   -c <char-uuid>
+  info   -c <char-uuid>
 read     -c <char-uuid>  [-F <fmt>]
 write    -c <char-uuid>  -d <data>  [-F <fmt>]  [-R|-W]
 sub      -c <char-uuid>  [-F <fmt>] [-D <sec>]  [-C <count>]
 ```
+
+`gatt info` does not require a connected device. It looks up the UUID in the generated `GATTCharacteristicDB` and prints the Bluetooth SIG specification: name, description, and field structure.
 
 `disconnect` and `status` are available in REPL and `--exec` mode but are not exposed as CLI subcommands — they carry no value when the process starts fresh with no persistent state.
 
@@ -325,40 +328,60 @@ Tab completion is registered via `LineNoise.setCompletionCallback`. The callback
 | `read/write/sub -c <partial>` | Known characteristic UUIDs (prefix match) |
 | After `-F`/`--format` | All format names |
 
-### 4.9 WellKnownCharacteristics
+### 4.9 GATTDecoder and GATTCharacteristicDB
 
-`WellKnownCharacteristics` is a namespace enum that maps standard Bluetooth SIG characteristic UUIDs to the `DataFormatter` format string that correctly decodes their value. It is used by `gatt tree -V` and `gatt chars -V` to produce human-readable values inline.
+`GATTDecoder` is the runtime decoder for standard Bluetooth SIG characteristic values. It replaces the old hand-maintained `WellKnownCharacteristics` table.
 
-The internal `formats` dictionary keys are 4-char uppercase short UUIDs. Examples:
+**Data source**
 
-- `"2A00"` → `"utf8"` (Device Name)
-- `"2A19"` → `"uint8"` (Battery Level)
-- `"2A01"` → `"uint16le"` (Appearance)
-- `"2A23"` → `"hex"` (System ID)
+`GATTCharacteristicDB` is a generated enum (from `BLECharacteristics.generated.swift`) containing the complete field-level structure of all 265+ Bluetooth SIG characteristics sourced from the official bluetooth-SIG repository at `Vendor/bluetooth-SIG/gss/`. Each characteristic entry includes:
 
-`bestFormat(for:)` returns the format for a UUID, falling back to `"hex"` for unknown UUIDs. `decode(_:uuid:)` returns a decoded string only when the UUID has a known format entry; callers use `nil` to decide whether to apply the format or fall back to hex.
+- `name` and `description` from the Bluetooth SIG GSS YAML files
+- `fields: [Field]` — a flat ordered list of fully resolved fields, each with:
+  - `name`: field name (struct fields are recursively inlined with dot-separated names, e.g. `"Date Time.Year"`)
+  - `type`: a `FieldType` case — `uint8/16/24/32/48/64`, `sint8/16/32`, `boolean8/16/32`, `medfloat16/32`, `utf8s`, or `opaque`
+  - `size`: byte count when present; `-1` = variable; `-2` = variable-length array
+  - `flagBit`/`flagSet`: conditional field presence (`flagBit == -1` means always present; `flagBit >= 0` means present only when that bit of the first boolean/flags field has the value `flagSet`)
 
-Only characteristics with a single unambiguous scalar or string encoding are included. Multi-field characteristics (e.g. Heart Rate Measurement) are intentionally omitted and decoded as hex.
+**Struct resolution**
+
+Many GSS characteristics embed sub-structures defined in other characteristics (e.g., `Date Time` characteristic embedded inside `Day Date Time`). The code generator (`Scripts/generate-ble-characteristics.rb`) resolves these recursively at build time by following `\autoref{sec:org.bluetooth.characteristic.XXX}` annotations in each `struct`-typed field's description. Circular references and missing references fall back to `.opaque` fields with a build-time warning.
+
+**Decoding** (`GATTDecoder.decode(_:uuid:)`)
+
+Reads fields sequentially from the `Data` buffer:
+1. The first `boolean[N]` field is decoded and stored as a flags bitmap.
+2. Each subsequent conditional field (`flagBit >= 0`) is included or skipped based on that bitmap.
+3. Variable-length fields consume all remaining bytes.
+4. Single-field characteristics emit just the value; multi-field characteristics emit `"FieldName: value | FieldName: value"`.
+
+Supported types include all standard GATT integer types (`uint8` through `uint64`, `sint8`/`sint16`/`sint32`), IEEE 11073-20601 medical floats (`medfloat16`, `medfloat32`), UTF-8 strings, and hex-encoded opaque blobs.
+
+**Info query** (`GATTDecoder.info(for:)`)
+
+Returns a `CharacteristicInfo` struct for use by `gatt info`, containing the name, description, and a `FieldInfo` array with human-readable type and size descriptions.
 
 ### 4.10 BLENames
 
 `BLENames` is a namespace enum in the `blew` executable target responsible for mapping standard Bluetooth SIG UUIDs to human-readable names.
 
-**Data source**
+**Data sources**
 
-The Nordic Semiconductor [bluetooth-numbers-database](https://github.com/NordicSemiconductor/bluetooth-numbers-database) is included as a git submodule at `Vendor/bluetooth-numbers-database/`. It contains three JSON files under `v1/`:
+Two git submodules under `Vendor/` provide the raw data:
 
-- `service_uuids.json`
-- `characteristic_uuids.json`
-- `descriptor_uuids.json`
-
-Entries with `source == "gss"` are official Bluetooth SIG assignments.
+- `Vendor/bluetooth-numbers-database/` — Nordic Semiconductor's JSON database with `service_uuids.json`, `characteristic_uuids.json`, and `descriptor_uuids.json` under `v1/`. Entries with `source == "gss"` are official Bluetooth SIG assignments.
+- `Vendor/bluetooth-SIG/` — The official Bluetooth SIG repository. `assigned_numbers/uuids/characteristic_uuids.yaml` provides the UUID-to-identifier mapping; `gss/*.yaml` (277 files) provides full characteristic structure definitions.
 
 **Build-time generation**
 
-The `GenerateBLENames` SwiftPM build tool plugin (`Plugins/GenerateBLENames/plugin.swift`) declares a `prebuildCommand` that invokes `Scripts/generate-ble-names.rb` before each build. The Ruby script reads the three JSON files from the submodule, deduplicates entries by UUID, and writes `BLENames.generated.swift` into SwiftPM's plugin work directory. SwiftPM compiles this generated file as part of the `blew` target. The generated file is not checked in.
+The `GenerateBLENames` SwiftPM build tool plugin (`Plugins/GenerateBLENames/plugin.swift`) declares a single `prebuildCommand` that runs `Scripts/generate-all-ble.sh` before each build. That shell script invokes two Ruby generators in sequence:
 
-To update the name database, run `git submodule update --remote Vendor/bluetooth-numbers-database` and rebuild.
+1. `Scripts/generate-ble-names.rb` — reads the Nordic JSON files, filters to `source == "gss"` entries, deduplicates by UUID, and writes `BLENames.generated.swift` (UUID-to-name dictionaries for services, characteristics, and descriptors).
+2. `Scripts/generate-ble-characteristics.rb` — reads `characteristic_uuids.yaml` and all `gss/*.yaml` files, resolves struct fields recursively via `\autoref` annotations, and writes `BLECharacteristics.generated.swift` (the full `GATTCharacteristicDB` with field-level structure for each characteristic). Build-time warnings are emitted for struct fields that cannot be resolved.
+
+Both generated files are written to SwiftPM's plugin work directory and compiled as part of the `blew` target. Neither is checked in.
+
+To update the databases, run `git submodule update --remote` and rebuild.
 
 **UUID normalization**
 
@@ -431,9 +454,14 @@ blew (executable)
  ├── BLEManager                        (CoreBluetooth, swift-atomics)
  ├── LineNoise                         (system libedit — linenoise Swift implementation)
  ├── ArgumentParser                    (swift-argument-parser)
- └── [build plugin] GenerateBLENames   (reads Vendor/bluetooth-numbers-database/v1/*.json
-                                        via Scripts/generate-ble-names.rb,
-                                        emits BLENames.generated.swift at compile time)
+ └── [build plugin] GenerateBLENames   runs Scripts/generate-all-ble.sh, which invokes:
+                                         Scripts/generate-ble-names.rb
+                                           reads Vendor/bluetooth-numbers-database/v1/*.json
+                                           emits BLENames.generated.swift
+                                         Scripts/generate-ble-characteristics.rb
+                                           reads Vendor/bluetooth-SIG/gss/*.yaml
+                                           reads Vendor/bluetooth-SIG/assigned_numbers/uuids/characteristic_uuids.yaml
+                                           emits BLECharacteristics.generated.swift
 ```
 
 `BLEManager` and `LineNoise` have no dependency on each other. `BLEManager` has no dependency on ArgumentParser or any CLI concern. The `GenerateBLENames` plugin runs as a prebuild command and has no runtime presence.

@@ -1,3 +1,6 @@
 [submodule "Vendor/bluetooth-numbers-database"]
 	path = Vendor/bluetooth-numbers-database
 	url = https://github.com/NordicSemiconductor/bluetooth-numbers-database.git
+[submodule "Vendor/bluetooth-SIG"]
+	path = Vendor/bluetooth-SIG
+	url = https://bitbucket.org/bluetooth-SIG/public.git

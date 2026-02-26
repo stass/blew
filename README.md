@@ -21,7 +21,7 @@ swift build -c release
 cp .build/release/blew /usr/local/bin/blew
 ```
 
-`--recurse-submodules` is required — the Bluetooth SIG name database is included as a git submodule at `Vendor/bluetooth-numbers-database`. The Swift build generates the name mapping automatically from the submodule data.
+`--recurse-submodules` is required — the Bluetooth SIG name and characteristic databases are included as git submodules under `Vendor/`. The Swift build generates all data files automatically from the submodule data.
 
 On first run, macOS will prompt for Bluetooth permission. Grant it in **System Settings → Privacy & Security → Bluetooth**.
 
@@ -216,6 +216,52 @@ Output columns: UUID, Name.
 | Flag | Description |
 |------|-------------|
 | `-c, --char <uuid>` | Characteristic UUID to inspect. Required. |
+
+#### `gatt info` — Show Bluetooth SIG specification for a characteristic
+
+```
+blew gatt info -c <char-uuid>
+```
+
+Displays the Bluetooth SIG name, description, and field-level structure for any standard characteristic UUID. Does **not** require a connected device — it reads directly from the generated characteristic database.
+
+| Flag | Description |
+|------|-------------|
+| `-c, --char <uuid>` | Characteristic UUID to look up (4-char short form or full 128-bit). Required. |
+
+```
+$ blew gatt info -c 2A37
+Heart Rate Measurement (2A37)
+
+The Heart Rate Measurement characteristic is used to represent data related to a heart rate measurement.
+
+Structure:
+  Flags                                             boolean[8]  1 byte
+  Heart Rate Measurement Value (8 bit resolution)   uint8       1 byte  [present if bit 0 of Flags is 0]
+  Heart Rate Measurement Value (16 bit resolution)  uint16      2 bytes  [present if bit 0 of Flags is 1]
+  Energy Expended                                   uint16      2 bytes  [present if bit 3 of Flags is 1]
+  RR-interval                                       opaque      variable (array)  [present if bit 4 of Flags is 1]
+```
+
+Struct-typed fields (such as an embedded `Date Time`) are recursively inlined with dot-separated names:
+
+```
+$ blew gatt info -c 2A0A
+Day Date Time (2A0A)
+
+The Day Date Time characteristic is used to represent weekday, date, and time.
+
+Structure:
+  Date Time.Year           uint16  2 bytes
+  Date Time.Month          uint8   1 byte
+  Date Time.Day            uint8   1 byte
+  Date Time.Hours          uint8   1 byte
+  Date Time.Minutes        uint8   1 byte
+  Date Time.Seconds        uint8   1 byte
+  Day of Week.Day of Week  uint8   1 byte
+```
+
+With `-o kv`, one record per field is emitted (for scripting).
 
 **Examples:**
 ```bash

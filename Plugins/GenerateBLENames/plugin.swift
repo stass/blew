@@ -4,17 +4,17 @@ import Foundation
 @main
 struct GenerateBLENames: BuildToolPlugin {
     func createBuildCommands(context: PluginContext, target: Target) throws -> [Command] {
-        let script = context.package.directory.appending("Scripts/generate-ble-names.rb")
-        let dataDir = context.package.directory.appending("Vendor/bluetooth-numbers-database/v1")
-        let outputFile = context.pluginWorkDirectory.appending("BLENames.generated.swift")
+        let wrapper = context.package.directory.appending("Scripts/generate-all-ble.sh")
+        let namesDataDir = context.package.directory.appending("Vendor/bluetooth-numbers-database/v1")
+        let sigDir = context.package.directory.appending("Vendor/bluetooth-SIG")
 
         return [
             .prebuildCommand(
-                displayName: "Generate BLE SIG names",
-                executable: Path("/usr/bin/env"),
-                arguments: ["ruby", script.string, dataDir.string, outputFile.string],
+                displayName: "Generate BLE SIG names and characteristic definitions",
+                executable: wrapper,
+                arguments: [namesDataDir.string, sigDir.string, context.pluginWorkDirectory.string],
                 outputFilesDirectory: context.pluginWorkDirectory
-            )
+            ),
         ]
     }
 }

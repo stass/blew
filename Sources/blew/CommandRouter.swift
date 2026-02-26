@@ -77,6 +77,11 @@ final class CommandRouter {
           disconnect  Disconnect from current device
           status      Show connection status
           gatt        Inspect GATT services/characteristics
+                        svcs             List services
+                        tree [-d] [-V]   Full GATT tree
+                        chars -S <uuid>  List characteristics for a service
+                        desc -c <uuid>   List descriptors for a characteristic
+                        info -c <uuid>   Show SIG specification for a characteristic
           read        Read a characteristic value
           write       Write to a characteristic
           sub         Subscribe to notifications/indications
@@ -328,14 +333,19 @@ final class CommandRouter {
     }
 
     func runGATT(_ args: [String]) -> Int32 {
-        let connectCode = ensureConnected()
-        guard connectCode == 0 else { return connectCode }
-
         guard let sub = args.first else {
             output.printError("missing subcommand")
-            print("Usage: gatt <svcs|tree|chars|desc>")
+            print("Usage: gatt <svcs|tree|chars|desc|info>")
             return BlewExitCode.invalidArguments.code
         }
+
+        // info does not require a connected device
+        if sub == "info" {
+            return runGATTInfo(Array(args.dropFirst()))
+        }
+
+        let connectCode = ensureConnected()
+        guard connectCode == 0 else { return connectCode }
 
         let semaphore = DispatchSemaphore(value: 0)
         var exitCode: Int32 = 0
@@ -365,7 +375,7 @@ final class CommandRouter {
                             if includeValues && char.properties.contains("read") {
                                 do {
                                     let data = try await manager.readCharacteristic(char.uuid)
-                                    let value = WellKnownCharacteristics.decode(data, uuid: char.uuid)
+                                    let value = GATTDecoder.decode(data, uuid: char.uuid)
                                         ?? DataFormatter.format(data, as: "hex")
                                     charLine += " = \(value)"
                                 } catch {
@@ -404,7 +414,7 @@ final class CommandRouter {
                             if char.properties.contains("read") {
                                 do {
                                     let data = try await manager.readCharacteristic(char.uuid)
-                                    value = WellKnownCharacteristics.decode(data, uuid: char.uuid)
+                                    value = GATTDecoder.decode(data, uuid: char.uuid)
                                         ?? DataFormatter.format(data, as: "hex")
                                 } catch {
                                     value = "(read error)"
@@ -446,6 +456,7 @@ final class CommandRouter {
 
                 default:
                     output.printError("unknown gatt subcommand '\(sub)'")
+                    print("Usage: gatt <svcs|tree|chars|desc|info>")
                     exitCode = BlewExitCode.invalidArguments.code
                 }
             } catch is CancellationError {
@@ -467,6 +478,54 @@ final class CommandRouter {
             exitCode = BlewExitCode.timeout.code
         }
         return exitCode
+    }
+
+    private func runGATTInfo(_ args: [String]) -> Int32 {
+        guard let charInput = parseStringOption(args, short: "-c", long: "--char") else {
+            output.printError("missing --char UUID")
+            return BlewExitCode.invalidArguments.code
+        }
+
+        guard let info = GATTDecoder.info(for: charInput) else {
+            output.printError("no Bluetooth SIG definition found for '\(charInput)'")
+            return BlewExitCode.notFound.code
+        }
+
+        switch output.format {
+        case .text:
+            output.print("\(info.name) (\(info.uuid))")
+            output.print("")
+            output.print(info.description)
+            if !info.fields.isEmpty {
+                output.print("")
+                output.print("Structure:")
+                let nameWidth = info.fields.map { $0.name.count }.max() ?? 0
+                let typeWidth = info.fields.map { $0.typeName.count }.max() ?? 0
+                for f in info.fields {
+                    var line = "  \(f.name.padding(toLength: nameWidth, withPad: " ", startingAt: 0))"
+                    line += "  \(f.typeName.padding(toLength: typeWidth, withPad: " ", startingAt: 0))"
+                    line += "  \(f.sizeDescription)"
+                    if let cond = f.conditionDescription {
+                        line += "  [\(cond)]"
+                    }
+                    output.print(line)
+                }
+            }
+        case .kv:
+            output.printRecord(("uuid", info.uuid), ("name", info.name), ("description", info.description))
+            for f in info.fields {
+                var pairs: [(String, String)] = [
+                    ("field", f.name),
+                    ("type", f.typeName),
+                    ("size", f.sizeDescription),
+                ]
+                if let cond = f.conditionDescription {
+                    pairs.append(("condition", cond))
+                }
+                output.printRecord(pairs)
+            }
+        }
+        return 0
     }
 
     func runRead(_ args: [String]) -> Int32 {
