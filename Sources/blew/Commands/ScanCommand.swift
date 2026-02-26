@@ -5,12 +5,12 @@ import BLEManager
 struct ScanCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "scan",
-        abstract: "Scan for BLE devices"
+        abstract: "Scan for BLE devices",
+        discussion: "Device targeting and output options are global options; pass them before the subcommand name (see blew --help)."
     )
 
-    @OptionGroup var globals: GlobalOptions
-
     mutating func run() throws {
+        let globals = GlobalOptions.current!
         let scanTimeout = globals.timeout ?? 5.0
         let router = CommandRouter(globals: globals)
         var args: [String] = ["-t", "\(scanTimeout)"]

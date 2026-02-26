@@ -5,10 +5,9 @@ import BLEManager
 struct ReadCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "read",
-        abstract: "Read a characteristic value"
+        abstract: "Read a characteristic value",
+        discussion: "Device targeting and output options are global options; pass them before the subcommand name (see blew --help)."
     )
-
-    @OptionGroup var globals: GlobalOptions
 
     @Option(name: [.customShort("c"), .long], help: "Characteristic UUID to read.")
     var char: String
@@ -17,7 +16,7 @@ struct ReadCommand: ParsableCommand {
     var format: String = "hex"
 
     mutating func run() throws {
-        let router = CommandRouter(globals: globals)
+        let router = CommandRouter(globals: GlobalOptions.current)
         let code = router.runRead(["-c", char, "-F", format])
         if code != 0 { throw BlewExitCode(code) }
     }

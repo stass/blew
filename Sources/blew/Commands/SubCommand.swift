@@ -5,10 +5,9 @@ import BLEManager
 struct SubCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "sub",
-        abstract: "Subscribe to notifications/indications"
+        abstract: "Subscribe to notifications/indications",
+        discussion: "Device targeting and output options are global options; pass them before the subcommand name (see blew --help)."
     )
-
-    @OptionGroup var globals: GlobalOptions
 
     @Option(name: [.customShort("c"), .long], help: "Characteristic UUID to subscribe.")
     var char: String
@@ -29,7 +28,7 @@ struct SubCommand: ParsableCommand {
     var forceIndicate: Bool = false
 
     mutating func run() throws {
-        let router = CommandRouter(globals: globals)
+        let router = CommandRouter(globals: GlobalOptions.current)
         var args = ["-c", char, "-F", format]
         if let d = duration { args += ["-D", "\(d)"] }
         if let c = count { args += ["-C", "\(c)"] }

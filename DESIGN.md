@@ -181,16 +181,16 @@ A `Sendable` enum that maps each failure kind to both a human-readable descripti
 `Blew` is the `@main` `ParsableCommand`. Its `run()` method selects one of two modes:
 
 ```
-blew <subcommand> [options]   →  subcommand's own run() is called by ArgumentParser
-blew [global-options] --exec  →  CommandRouter.executeScript()
-blew [global-options]         →  REPL.run()
+blew [global-options] <subcommand> [command-options]  →  subcommand's own run() is called by ArgumentParser
+blew [global-options] --exec                          →  CommandRouter.executeScript()
+blew [global-options]                                 →  REPL.run()
 ```
 
 Before any mode exits, `cleanupBeforeExit()` performs a best-effort disconnect (waits up to 2 seconds for the disconnect to complete). SIGINT and SIGTERM both call this function before exiting.
 
 ### 4.2 GlobalOptions
 
-A `ParsableArguments` struct included via `@OptionGroup` in every subcommand. This ensures every command inherits the same device-targeting and output flags without duplicating declarations.
+A `ParsableArguments` struct included via `@OptionGroup` in the root `Blew` command only. Global options are parsed exclusively at the root level — they must appear before the subcommand name on the command line. Subcommands access the parsed values via `GlobalOptions.current`, a static property set in `Blew.validate()` (which ArgumentParser calls before dispatching to the subcommand).
 
 ```
 --verbose (-v)       flag count (0 / 1 / 2)
@@ -207,11 +207,13 @@ A `ParsableArguments` struct included via `@OptionGroup` in every subcommand. Th
 --dry-run            Bool — print parsed steps, don't run
 ```
 
+This design keeps global options out of each subcommand's `--help` output and prevents them from being supplied after the subcommand name.
+
 ### 4.3 Subcommands
 
 Each subcommand is a thin `ParsableCommand` that:
 1. Validates/collects its own flags (e.g. `-c`, `-F`, `-d`)
-2. Creates a `CommandRouter` with the inherited `GlobalOptions`
+2. Creates a `CommandRouter` with `GlobalOptions.current` (set by `Blew.validate()`)
 3. Translates its parsed arguments into a string token array
 4. Calls the matching `CommandRouter.run*()` method
 5. Throws `BlewExitCode` if the result is non-zero

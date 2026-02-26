@@ -5,10 +5,9 @@ import BLEManager
 struct WriteCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "write",
-        abstract: "Write to a characteristic"
+        abstract: "Write to a characteristic",
+        discussion: "Device targeting and output options are global options; pass them before the subcommand name (see blew --help)."
     )
-
-    @OptionGroup var globals: GlobalOptions
 
     @Option(name: [.customShort("c"), .long], help: "Characteristic UUID to write.")
     var char: String
@@ -26,7 +25,7 @@ struct WriteCommand: ParsableCommand {
     var withoutResponse: Bool = false
 
     mutating func run() throws {
-        let router = CommandRouter(globals: globals)
+        let router = CommandRouter(globals: GlobalOptions.current)
         var args = ["-c", char, "-d", data, "-F", format]
         if withResponse { args.append("-R") }
         if withoutResponse { args.append("-W") }

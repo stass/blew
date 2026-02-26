@@ -4,7 +4,7 @@ A macOS command-line tool for debugging and working with Bluetooth Low Energy (B
 
 Works in two modes:
 
-- **Command mode** — run a single command, then exit: `blew <command> [options]`
+- **Command mode** — run a single command, then exit: `blew [global-options] <command> [command-options]`
 - **Interactive REPL** — run `blew` with no command for a readline-style shell with history and tab completion
 
 > Requires macOS 13 or later and Bluetooth permission.
@@ -50,7 +50,11 @@ blew
 
 ## Global options
 
-These options apply to all commands and control device targeting, output, and behavior.
+These options apply to all commands and control device targeting, output, and behavior. They must be placed **before** the subcommand name:
+
+```bash
+blew [global-options] <command> [command-options]
+```
 
 ### Output and verbosity
 
@@ -90,7 +94,7 @@ Use `--id` to target an explicit device, or combine selectors to let blew find a
 ### `scan` — Scan for BLE devices
 
 ```
-blew scan [global-options]
+blew [global-options] scan
 ```
 
 Scans for advertising BLE peripherals and prints a table of discovered devices. Timeout defaults to 5 seconds.
@@ -102,10 +106,10 @@ Scans for advertising BLE peripherals and prints a table of discovered devices. 
 **Examples:**
 ```bash
 blew scan                          # Scan for 5 seconds
-blew scan -t 10                    # Scan for 10 seconds
-blew scan -n "Heart"               # Filter by name
-blew scan -S 180D -r -65           # Heart Rate service, RSSI ≥ -65 dBm
-blew scan -o kv                    # Machine-readable output
+blew -t 10 scan                    # Scan for 10 seconds
+blew -n "Heart" scan               # Filter by name
+blew -S 180D -r -65 scan           # Heart Rate service, RSSI ≥ -65 dBm
+blew -o kv scan                    # Machine-readable output
 ```
 
 ---
@@ -113,7 +117,7 @@ blew scan -o kv                    # Machine-readable output
 ### `connect` — Connect to a device
 
 ```
-blew connect [<device-id>] [global-options]
+blew [global-options] connect [<device-id>]
 ```
 
 Explicitly connects to a BLE device and exits. Useful for testing connectivity or pre-warming a connection in `--exec` scripts. The device can be specified by positional argument, `--id`, or device-targeting selectors (the tool will scan briefly to resolve them).
@@ -138,7 +142,7 @@ blew -S 180F connect               # Connect to device advertising Battery Servi
 #### `gatt svcs` — List services
 
 ```
-blew gatt svcs [global-options]
+blew [global-options] gatt svcs
 ```
 
 Lists all discovered services on the connected device.
@@ -146,7 +150,7 @@ Lists all discovered services on the connected device.
 #### `gatt tree` — Show full GATT tree
 
 ```
-blew gatt tree [-d] [global-options]
+blew [global-options] gatt tree [-d]
 ```
 
 Prints services and their characteristics with properties (read / write / notify / indicate).
@@ -158,7 +162,7 @@ Prints services and their characteristics with properties (read / write / notify
 #### `gatt chars` — List characteristics for a service
 
 ```
-blew gatt chars -S <service-uuid> [global-options]
+blew [global-options] gatt chars -S <service-uuid>
 ```
 
 | Flag | Description |
@@ -168,7 +172,7 @@ blew gatt chars -S <service-uuid> [global-options]
 #### `gatt desc` — List descriptors for a characteristic
 
 ```
-blew gatt desc -c <char-uuid> [global-options]
+blew [global-options] gatt desc -c <char-uuid>
 ```
 
 | Flag | Description |
@@ -188,7 +192,7 @@ blew -n "Thingy" gatt desc -c 2A19
 ### `read` — Read a characteristic value
 
 ```
-blew read -c <char-uuid> [-F <format>] [global-options]
+blew [global-options] read -c <char-uuid> [-F <format>]
 ```
 
 Reads the value of a characteristic and prints it in the requested format. Connects automatically if no connection is active.
@@ -223,7 +227,7 @@ blew -n "Thingy" read -c fff1              # Raw characteristic as hex
 ### `write` — Write to a characteristic
 
 ```
-blew write -c <char-uuid> -d <data> [-F <format>] [-R|-W] [global-options]
+blew [global-options] write -c <char-uuid> -d <data> [-F <format>] [-R|-W]
 ```
 
 Writes data to a characteristic. Connects automatically if no connection is active. Write mode (with or without response) is auto-selected based on the characteristic's properties unless overridden.
@@ -248,7 +252,7 @@ blew -n "Thingy" write -c fff2 -d "hello" -F utf8    # Write a UTF-8 string
 ### `sub` — Subscribe to notifications or indications
 
 ```
-blew sub -c <char-uuid> [-F <format>] [-D <sec>] [-C <count>] [--notify|--indicate] [global-options]
+blew [global-options] sub -c <char-uuid> [-F <format>] [-D <sec>] [-C <count>] [--notify|--indicate]
 ```
 
 Subscribes to a characteristic and streams received values to stdout, one event per line. Connects automatically if no connection is active. Stops on `Ctrl-C`, or when a duration/count limit is reached.
@@ -268,8 +272,8 @@ With `--out kv`, each line includes `ts=`, `char=`, and `value=` fields.
 ```bash
 blew -n "Thingy" sub -c fff1                      # Stream indefinitely (Ctrl-C to stop)
 blew -n "Thingy" sub -c fff1 -F uint16le -D 30   # 30-second capture as uint16
-blew -n "Thingy" sub -c 2A37 -C 100 -o kv        # Capture 100 events, kv output
-blew -n "Thingy" sub -c fff1 -o kv >> data.log   # Append to a log file
+blew -n "Thingy" -o kv sub -c 2A37 -C 100        # Capture 100 events, kv output
+blew -n "Thingy" -o kv sub -c fff1 >> data.log   # Append to a log file
 ```
 
 ---
@@ -417,12 +421,12 @@ blew -n "Thingy" -o kv sub -c fff1 -D 60 | awk -F'value=' '{print $2}'
 
 ### Find a device in a crowded environment
 ```bash
-blew scan -n "Sensor" -S 180F -r -65 -t 10
+blew -n "Sensor" -S 180F -r -65 -t 10 scan
 ```
 
 ### Capture sensor data to a file
 ```bash
-blew -n "Sensor" sub -c fff1 -F uint16le -D 300 -o kv >> sensor.log
+blew -n "Sensor" -o kv sub -c fff1 -F uint16le -D 300 >> sensor.log
 ```
 
 ### Quick GATT audit in one line

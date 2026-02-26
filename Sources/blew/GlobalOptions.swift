@@ -2,6 +2,8 @@ import ArgumentParser
 import Foundation
 
 struct GlobalOptions: ParsableArguments {
+    nonisolated(unsafe) static var current: GlobalOptions!
+
     @Flag(name: [.short, .long], help: "Increase verbosity (repeatable, e.g. -vv).")
     var verbose: Int
 

@@ -7,6 +7,7 @@ struct Blew: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "blew",
         abstract: "macOS BLE CLI workbench",
+        discussion: "Global options must be placed before the subcommand name.",
         version: "0.1.0",
         subcommands: [
             ScanCommand.self,
@@ -19,6 +20,10 @@ struct Blew: ParsableCommand {
     )
 
     @OptionGroup var globals: GlobalOptions
+
+    mutating func validate() throws {
+        GlobalOptions.current = globals
+    }
 
     mutating func run() throws {
         installSignalHandlers()
