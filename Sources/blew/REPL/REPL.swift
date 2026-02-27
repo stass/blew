@@ -1,5 +1,6 @@
 import Foundation
 import LineNoise
+import BLEManager
 
 final class REPL {
     private let globals: GlobalOptions
@@ -65,10 +66,11 @@ final class REPL {
     private func setupCompletion() {
         let commands = [
             "scan", "connect", "disconnect", "status",
-            "gatt", "read", "write", "sub",
+            "gatt", "read", "write", "sub", "periph",
             "help", "quit", "exit",
         ]
         let gattSubs = ["svcs", "tree", "chars", "desc", "info"]
+        let periphSubs = ["adv", "clone", "stop", "set", "notify", "status"]
         let formats = ["hex", "utf8", "base64", "uint8", "uint16le", "uint32le", "float32le", "raw"]
 
         ln.setCompletionCallback { [weak self] buffer in
@@ -107,6 +109,38 @@ final class REPL {
                     }
                 }
                 return matches
+            }
+
+            // --- periph subcommands ---
+            if cmd == "periph" {
+                let periphParts = rest.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
+                let sub = periphParts.isEmpty ? "" : String(periphParts[0])
+
+                if periphParts.count <= 1 && !rest.hasSuffix(" ") {
+                    return periphSubs
+                        .filter { $0.hasPrefix(sub) }
+                        .map { "periph \($0) " }
+                }
+
+                // periph set / notify: complete characteristic UUID
+                if sub == "set" || sub == "notify" {
+                    let afterSub = periphParts.count > 1 ? String(periphParts[1]) : ""
+                    let tokens = afterSub.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+                    let partial = tokens.last.flatMap { $0.hasPrefix("-") ? nil : $0 } ?? ""
+                    let candidates = BLEPeripheral.shared.knownCharacteristicUUIDs()
+                    if partial.isEmpty && buffer.hasSuffix(" ") {
+                        return candidates.map { "\(buffer)\($0)" }
+                    }
+                    if !partial.isEmpty && tokens.count == 1 {
+                        let prefix = String(buffer.dropLast(partial.count))
+                        return candidates
+                            .filter { $0.lowercased().hasPrefix(partial.lowercased()) }
+                            .map { "\(prefix)\($0)" }
+                    }
+                    return []
+                }
+
+                return []
             }
 
             // --- gatt subcommands ---

@@ -60,6 +60,8 @@ final class CommandRouter {
             return runWrite(Array(tokens.dropFirst()))
         case "sub":
             return runSub(Array(tokens.dropFirst()))
+        case "periph":
+            return runPeriph(Array(tokens.dropFirst()))
         case "help":
             printHelp()
             return 0
@@ -85,6 +87,11 @@ final class CommandRouter {
             "  \(cmd("read")) [-f <fmt>] <char>",
             "  \(cmd("write")) [-f <fmt>] [-r|-w] <char> <data>",
             "  \(cmd("sub")) [-f <fmt>] [-d <sec>] [-c <n>] <char>",
+            "  \(cmd("periph")) \(cmd("adv")) [-n <name>] [-S <uuid>] [--config <file>]",
+            "  \(cmd("periph")) \(cmd("clone")) [--save <file>]",
+            "  \(cmd("periph")) \(cmd("stop"))",
+            "  \(cmd("periph")) \(cmd("set")) [-f <fmt>] <char> <value>",
+            "  \(cmd("periph")) \(cmd("notify")) [-f <fmt>] <char> <value>",
             "  \(cmd("help"))",
             "  \(cmd("quit"))/\(cmd("exit"))",
         ]
@@ -1213,6 +1220,466 @@ extension CommandRouter {
             .last?
             .trimmingCharacters(in: .whitespaces) ?? fullName
         return (shortName, value)
+    }
+}
+
+// MARK: - Peripheral commands
+
+extension CommandRouter {
+    func runPeriph(_ args: [String]) -> Int32 {
+        guard let sub = args.first else {
+            output.printError("missing subcommand")
+            print("Usage: periph <adv|clone|stop|set|notify|status>")
+            return BlewExitCode.invalidArguments.code
+        }
+
+        switch sub {
+        case "adv":
+            return runPeriphAdv(Array(args.dropFirst()))
+        case "clone":
+            return runPeriphClone(Array(args.dropFirst()))
+        case "stop":
+            return runPeriphStop(Array(args.dropFirst()))
+        case "set":
+            return runPeriphSet(Array(args.dropFirst()))
+        case "notify":
+            return runPeriphNotify(Array(args.dropFirst()))
+        case "status":
+            return runPeriphStatus(Array(args.dropFirst()))
+        default:
+            output.printError("unknown periph subcommand '\(sub)'")
+            print("Usage: periph <adv|clone|stop|set|notify|status>")
+            return BlewExitCode.invalidArguments.code
+        }
+    }
+
+    func runPeriphAdv(_ args: [String]) -> Int32 {
+        let configPath = parseStringOption(args, short: "-c", long: "--config")
+
+        var serviceUUIDs: [String] = []
+        var i = 0
+        while i < args.count {
+            if args[i] == "-S" || args[i] == "--service", i + 1 < args.count {
+                serviceUUIDs.append(args[i + 1])
+                i += 2
+            } else {
+                i += 1
+            }
+        }
+
+        let nameArg = parseStringOption(args, short: "-n", long: "--name")
+
+        var services: [ServiceDefinition] = []
+        var advName: String
+
+        if let path = configPath {
+            let config: PeripheralConfig
+            do {
+                config = try PeripheralConfig.load(from: path)
+            } catch {
+                output.printError("\(error.localizedDescription)")
+                return BlewExitCode.invalidArguments.code
+            }
+            services = config.services
+            advName = nameArg ?? config.name ?? "blew"
+            serviceUUIDs = serviceUUIDs.isEmpty
+                ? config.services.map { $0.uuid }
+                : serviceUUIDs
+        } else {
+            advName = nameArg ?? "blew"
+            if !serviceUUIDs.isEmpty {
+                services = serviceUUIDs.map { uuid in
+                    ServiceDefinition(uuid: uuid, primary: true, characteristics: [])
+                }
+            }
+        }
+
+        if services.isEmpty && serviceUUIDs.isEmpty {
+            output.printError("no services defined — use --config <file> or -S <uuid>")
+            return BlewExitCode.invalidArguments.code
+        }
+
+        // Resolve initial values from config
+        var initialValues: [String: Data] = [:]
+        if configPath != nil {
+            let config: PeripheralConfig
+            do {
+                config = try PeripheralConfig.load(from: configPath!)
+                initialValues = try config.resolvedInitialValues()
+            } catch {
+                output.printError("\(error.localizedDescription)")
+                return BlewExitCode.invalidArguments.code
+            }
+        }
+
+        let peripheral = BLEPeripheral.shared
+        let semaphore = DispatchSemaphore(value: 0)
+        var exitCode: Int32 = 0
+
+        let task = Task {
+            defer { semaphore.signal() }
+            do {
+                let servicesWithChars = services.filter { !$0.characteristics.isEmpty }
+                if !servicesWithChars.isEmpty {
+                    output.printInfo("configuring \(servicesWithChars.count) service(s)...")
+                    try await peripheral.configure(services: servicesWithChars)
+
+                    // Apply initial values from config
+                    for (uuid, data) in initialValues {
+                        try? peripheral.updateValue(data, forCharacteristic: uuid)
+                    }
+                }
+
+                output.printInfo("starting advertising as \"\(advName)\"...")
+                try await peripheral.startAdvertising(name: advName, serviceUUIDs: serviceUUIDs)
+
+                // Print summary
+                printPeriphSummary(name: advName, services: services, serviceUUIDs: serviceUUIDs)
+
+                // Stream events until cancelled
+                let eventStream = peripheral.events()
+                for await event in eventStream {
+                    printPeriphEvent(event)
+                    if Task.isCancelled { break }
+                }
+            } catch is CancellationError {
+                // handled below
+            } catch let error as BLEError {
+                output.printError(error.localizedDescription)
+                exitCode = error.exitCode
+            } catch {
+                output.printError("\(error)")
+                exitCode = BlewExitCode.operationFailed.code
+            }
+        }
+
+        if case .interrupted = waitInterruptible(task, semaphore: semaphore) {
+            peripheral.stopAdvertising()
+            output.print("Stopped advertising.")
+            exitCode = 0
+        }
+        return exitCode
+    }
+
+    func runPeriphClone(_ args: [String]) -> Int32 {
+        let savePath = parseStringOption(args, short: "-o", long: "--save")
+
+        // First, connect to the target device using central mode
+        let connectCode = ensureConnected()
+        guard connectCode == 0 else { return connectCode }
+
+        output.printInfo("snapshotting GATT tree...")
+
+        var clonedServices: [ServiceDefinition] = []
+        var clonedName: String = "blew-clone"
+        var initialValues: [String: Data] = [:]
+
+        let snapSemaphore = DispatchSemaphore(value: 0)
+        var snapError: Int32 = 0
+
+        let snapTask = Task {
+            defer { snapSemaphore.signal() }
+            do {
+                let tree = try await manager.discoverTree(includeDescriptors: false)
+
+                // Use the connected device name as clone name
+                let status = await manager.status()
+                if let name = status.deviceName {
+                    clonedName = name
+                }
+
+                for svc in tree {
+                    var charDefs: [CharacteristicDefinition] = []
+                    for char in svc.characteristics {
+                        let props = char.properties.compactMap { CharacteristicProperty(rawValue: mapPropertyName($0)) }
+
+                        var valueStr: String? = nil
+                        var valueFmt: String? = nil
+                        if char.properties.contains("read") {
+                            if let data = try? await manager.readCharacteristic(char.uuid) {
+                                valueStr = data.map { String(format: "%02x", $0) }.joined()
+                                valueFmt = "hex"
+                                initialValues[char.uuid.uppercased()] = data
+                            }
+                        }
+                        charDefs.append(CharacteristicDefinition(
+                            uuid: char.uuid,
+                            properties: props,
+                            value: valueStr,
+                            format: valueFmt
+                        ))
+                    }
+                    clonedServices.append(ServiceDefinition(
+                        uuid: svc.uuid,
+                        primary: svc.isPrimary,
+                        characteristics: charDefs
+                    ))
+                }
+            } catch is CancellationError {
+                // handled
+            } catch let error as BLEError {
+                output.printError(error.localizedDescription)
+                snapError = error.exitCode
+            } catch {
+                output.printError("\(error)")
+                snapError = BlewExitCode.operationFailed.code
+            }
+        }
+
+        switch waitInterruptible(snapTask, semaphore: snapSemaphore, timeout: globals.timeout ?? 15.0) {
+        case .completed: break
+        case .interrupted: return 130
+        case .timedOut:
+            output.printError("GATT snapshot timed out")
+            return BlewExitCode.timeout.code
+        }
+        if snapError != 0 { return snapError }
+
+        // Disconnect from real device before advertising
+        _ = runDisconnect([])
+
+        // Optionally save config
+        if let path = savePath {
+            let config = PeripheralConfig(name: clonedName, services: clonedServices)
+            if let data = try? JSONEncoder().encode(config) {
+                let pretty = (try? JSONSerialization.jsonObject(with: data)).flatMap {
+                    try? JSONSerialization.data(withJSONObject: $0, options: .prettyPrinted)
+                }
+                let url = URL(fileURLWithPath: path)
+                try? (pretty ?? data).write(to: url)
+                output.printInfo("saved config to \(path)")
+            }
+        }
+
+        // Now advertise as the clone
+        let serviceUUIDs = clonedServices.map { $0.uuid }
+        let peripheral = BLEPeripheral.shared
+        let semaphore = DispatchSemaphore(value: 0)
+        var exitCode: Int32 = 0
+
+        let task = Task {
+            defer { semaphore.signal() }
+            do {
+                output.printInfo("configuring \(clonedServices.count) cloned service(s)...")
+                try await peripheral.configure(services: clonedServices)
+
+                for (uuid, data) in initialValues {
+                    try? peripheral.updateValue(data, forCharacteristic: uuid)
+                }
+
+                try await peripheral.startAdvertising(name: clonedName, serviceUUIDs: serviceUUIDs)
+                printPeriphSummary(name: clonedName, services: clonedServices, serviceUUIDs: serviceUUIDs)
+
+                let eventStream = peripheral.events()
+                for await event in eventStream {
+                    printPeriphEvent(event)
+                    if Task.isCancelled { break }
+                }
+            } catch is CancellationError {
+                // handled
+            } catch let error as BLEError {
+                output.printError(error.localizedDescription)
+                exitCode = error.exitCode
+            } catch {
+                output.printError("\(error)")
+                exitCode = BlewExitCode.operationFailed.code
+            }
+        }
+
+        if case .interrupted = waitInterruptible(task, semaphore: semaphore) {
+            peripheral.stopAdvertising()
+            output.print("Stopped advertising.")
+            exitCode = 0
+        }
+        return exitCode
+    }
+
+    func runPeriphStop(_ args: [String]) -> Int32 {
+        BLEPeripheral.shared.stopAdvertising()
+        output.printInfo("advertising stopped")
+        return 0
+    }
+
+    func runPeriphSet(_ args: [String]) -> Int32 {
+        let positional = positionalArgs(args, optionsWithValue: ["-f", "--format"])
+        guard positional.count >= 2 else {
+            output.printError(positional.isEmpty
+                ? "missing characteristic UUID and value"
+                : "missing value")
+            return BlewExitCode.invalidArguments.code
+        }
+        let charInput = positional[0]
+        let valueStr = positional[1]
+        let fmt = parseStringOption(args, short: "-f", long: "--format") ?? "hex"
+
+        let charUUID = resolvePeriphCharacteristic(charInput)
+
+        guard let data = DataFormatter.parse(valueStr, as: fmt) else {
+            output.printError("invalid value '\(valueStr)' for format '\(fmt)'")
+            return BlewExitCode.invalidArguments.code
+        }
+
+        do {
+            try BLEPeripheral.shared.updateValue(data, forCharacteristic: charUUID)
+            output.printInfo("set \(BLENames.displayUUID(charUUID, category: .characteristic)) = \(DataFormatter.format(data, as: fmt))")
+        } catch let error as BLEError {
+            output.printError(error.localizedDescription)
+            return error.exitCode
+        } catch {
+            output.printError("\(error)")
+            return BlewExitCode.operationFailed.code
+        }
+        return 0
+    }
+
+    func runPeriphNotify(_ args: [String]) -> Int32 {
+        let positional = positionalArgs(args, optionsWithValue: ["-f", "--format"])
+        guard positional.count >= 2 else {
+            output.printError(positional.isEmpty
+                ? "missing characteristic UUID and value"
+                : "missing value")
+            return BlewExitCode.invalidArguments.code
+        }
+        let charInput = positional[0]
+        let valueStr = positional[1]
+        let fmt = parseStringOption(args, short: "-f", long: "--format") ?? "hex"
+
+        let charUUID = resolvePeriphCharacteristic(charInput)
+
+        guard let data = DataFormatter.parse(valueStr, as: fmt) else {
+            output.printError("invalid value '\(valueStr)' for format '\(fmt)'")
+            return BlewExitCode.invalidArguments.code
+        }
+
+        do {
+            try BLEPeripheral.shared.updateValue(data, forCharacteristic: charUUID)
+            output.printInfo("sent notification on \(BLENames.displayUUID(charUUID, category: .characteristic))")
+        } catch let error as BLEError {
+            output.printError(error.localizedDescription)
+            return error.exitCode
+        } catch {
+            output.printError("\(error)")
+            return BlewExitCode.operationFailed.code
+        }
+        return 0
+    }
+
+    func runPeriphStatus(_ args: [String]) -> Int32 {
+        let status = BLEPeripheral.shared.peripheralStatus()
+        output.printRecord(
+            ("advertising", status.isAdvertising ? "yes" : "no"),
+            ("name", status.advertisedName ?? "(none)"),
+            ("services", "\(status.serviceCount)"),
+            ("characteristics", "\(status.characteristicCount)"),
+            ("subscribers", "\(status.subscriberCount)")
+        )
+        return 0
+    }
+
+    // MARK: - Peripheral output helpers
+
+    private func printPeriphSummary(name: String, services: [ServiceDefinition], serviceUUIDs: [String]) {
+        let displayUUIDs = serviceUUIDs.map { BLENames.displayUUID($0, category: .service) }.joined(separator: ", ")
+        output.print("Advertising \"\(name)\" [\(displayUUIDs)]")
+
+        for svc in services where !svc.characteristics.isEmpty {
+            let svcDisplay = BLENames.displayUUID(svc.uuid, category: .service)
+            output.print("  Service \(svcDisplay)")
+            for char in svc.characteristics {
+                let charDisplay = BLENames.displayUUID(char.uuid, category: .characteristic)
+                let props = char.properties.map { $0.rawValue }.joined(separator: ", ")
+                output.print("  +-- \(charDisplay) [\(props)]")
+            }
+        }
+    }
+
+    private func printPeriphEvent(_ event: PeripheralEvent) {
+        let ts = timeStamp()
+        switch output.format {
+        case .text:
+            switch event {
+            case .stateChanged(let state):
+                output.printInfo("[\(ts)] Bluetooth state: \(state.rawValue)")
+            case .advertisingStarted(let error):
+                if let error = error {
+                    output.printError("[\(ts)] advertising failed: \(error)")
+                }
+            case .serviceAdded(let uuid, let error):
+                if let error = error {
+                    output.printError("[\(ts)] service \(uuid) add failed: \(error)")
+                }
+            case .centralConnected(let id):
+                output.print("[\(ts)] central \(shortId(id)) connected")
+            case .centralDisconnected(let id):
+                output.print("[\(ts)] central \(shortId(id)) disconnected")
+            case .readRequest(let id, let uuid):
+                output.print("[\(ts)] read \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))")
+            case .writeRequest(let id, let uuid, let value):
+                let hex = DataFormatter.format(value, as: "hex")
+                output.print("[\(ts)] write \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id)) <- \(hex)")
+            case .subscribed(let id, let uuid):
+                output.print("[\(ts)] subscribe \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))")
+            case .unsubscribed(let id, let uuid):
+                output.print("[\(ts)] unsubscribe \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))")
+            case .notificationSent(let uuid, let count):
+                output.printInfo("[\(ts)] notification sent on \(uuid) to \(count) subscriber(s)")
+            }
+        case .kv:
+            switch event {
+            case .stateChanged: break
+            case .advertisingStarted: break
+            case .serviceAdded: break
+            case .centralConnected(let id):
+                output.printRecord(("event", "connected"), ("ts", ts), ("central", id))
+            case .centralDisconnected(let id):
+                output.printRecord(("event", "disconnected"), ("ts", ts), ("central", id))
+            case .readRequest(let id, let uuid):
+                output.printRecord(("event", "read"), ("ts", ts), ("central", id), ("char", uuid))
+            case .writeRequest(let id, let uuid, let value):
+                output.printRecord(
+                    ("event", "write"),
+                    ("ts", ts),
+                    ("central", id),
+                    ("char", uuid),
+                    ("value", DataFormatter.format(value, as: "hex"))
+                )
+            case .subscribed(let id, let uuid):
+                output.printRecord(("event", "subscribe"), ("ts", ts), ("central", id), ("char", uuid))
+            case .unsubscribed(let id, let uuid):
+                output.printRecord(("event", "unsubscribe"), ("ts", ts), ("central", id), ("char", uuid))
+            case .notificationSent(let uuid, let count):
+                output.printRecord(("event", "notification"), ("ts", ts), ("char", uuid), ("subscribers", "\(count)"))
+            }
+        }
+    }
+
+    private func timeStamp() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: Date())
+    }
+
+    private func shortId(_ uuidString: String) -> String {
+        String(uuidString.prefix(8))
+    }
+
+    private func resolvePeriphCharacteristic(_ input: String) -> String {
+        let known = BLEPeripheral.shared.knownCharacteristicUUIDs()
+        let lower = input.lowercased()
+        if let exact = known.first(where: { $0.lowercased() == lower }) {
+            return exact
+        }
+        if let prefix = known.first(where: { $0.lowercased().hasPrefix(lower) }) {
+            return prefix
+        }
+        return input.uppercased()
+    }
+
+    private func mapPropertyName(_ prop: String) -> String {
+        switch prop {
+        case "writeNoResp": return "writeWithoutResponse"
+        default: return prop
+        }
     }
 }
 

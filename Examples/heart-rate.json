@@ -1,0 +1,47 @@
+{
+  "name": "Heart Rate Monitor",
+  "services": [
+    {
+      "uuid": "48520000-0000-0000-0000-000000000001",
+      "primary": true,
+      "characteristics": [
+        {
+          "uuid": "48520000-0000-0000-0000-000000000002",
+          "properties": ["notify"],
+          "value": "0048",
+          "format": "hex"
+        },
+        {
+          "uuid": "48520000-0000-0000-0000-000000000003",
+          "properties": ["read"],
+          "value": "0",
+          "format": "uint8"
+        },
+        {
+          "uuid": "48520000-0000-0000-0000-000000000004",
+          "properties": ["write"],
+          "value": "00",
+          "format": "hex"
+        }
+      ]
+    },
+    {
+      "uuid": "44490000-0000-0000-0000-000000000001",
+      "primary": true,
+      "characteristics": [
+        {
+          "uuid": "44490000-0000-0000-0000-000000000002",
+          "properties": ["read"],
+          "value": "blew",
+          "format": "utf8"
+        },
+        {
+          "uuid": "44490000-0000-0000-0000-000000000003",
+          "properties": ["read"],
+          "value": "HR-1",
+          "format": "utf8"
+        }
+      ]
+    }
+  ]
+}

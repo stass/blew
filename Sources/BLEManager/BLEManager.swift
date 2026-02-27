@@ -1,5 +1,5 @@
 import Foundation
-import CoreBluetooth
+@preconcurrency import CoreBluetooth
 
 /// Public facade for BLE central operations.
 /// Owns the CBCentralManager, delegate, event queue, and processor.
@@ -58,9 +58,7 @@ public final class BLECentral: @unchecked Sendable {
     private func waitForPoweredOn(timeout: TimeInterval) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
-            stateLock.lock()
-            let state = cbState
-            stateLock.unlock()
+            let state = stateLock.withLock { cbState }
             if state == .poweredOn { return }
             if Date() > deadline {
                 throw BLEError.bluetoothUnavailable("Timed out waiting for Bluetooth to power on")
@@ -150,10 +148,10 @@ public final class BLECentral: @unchecked Sendable {
             self.processor.cancelConnectContinuation()
         }
 
-        stateLock.lock()
-        connectedPeripheralId = uuid
-        connectedPeripheralName = targetPeripheral.name
-        stateLock.unlock()
+        stateLock.withLock {
+            connectedPeripheralId = uuid
+            connectedPeripheralName = targetPeripheral.name
+        }
 
         // Auto-discover services
         try await discoverAllServices(peripheral: targetPeripheral)
@@ -186,42 +184,39 @@ public final class BLECentral: @unchecked Sendable {
             self.processor.cancelDisconnectContinuation()
         }
 
-        stateLock.lock()
-        connectedPeripheralId = nil
-        connectedPeripheralName = nil
-        discoveredServices = []
-        discoveredCharacteristics = []
-        activeSubscriptions = []
-        stateLock.unlock()
+        stateLock.withLock {
+            connectedPeripheralId = nil
+            connectedPeripheralName = nil
+            discoveredServices = []
+            discoveredCharacteristics = []
+            activeSubscriptions = []
+        }
     }
 
     // MARK: - Status
 
     public func status() async -> ConnectionStatus {
-        stateLock.lock()
-        let s = ConnectionStatus(
-            isConnected: connectedPeripheralId != nil,
-            deviceId: connectedPeripheralId?.uuidString,
-            deviceName: connectedPeripheralName,
-            servicesCount: discoveredServices.count,
-            characteristicsCount: discoveredCharacteristics.count,
-            subscriptionsCount: activeSubscriptions.count,
-            lastError: lastError
-        )
-        stateLock.unlock()
-        return s
+        stateLock.withLock {
+            ConnectionStatus(
+                isConnected: connectedPeripheralId != nil,
+                deviceId: connectedPeripheralId?.uuidString,
+                deviceName: connectedPeripheralName,
+                servicesCount: discoveredServices.count,
+                characteristicsCount: discoveredCharacteristics.count,
+                subscriptionsCount: activeSubscriptions.count,
+                lastError: lastError
+            )
+        }
     }
 
     // MARK: - GATT Discovery
 
     public func discoverServices() async throws -> [ServiceInfo] {
-        guard let peripheral = try getConnectedPeripheral() else {
+        guard try getConnectedPeripheral() != nil else {
             throw BLEError.notConnected
         }
 
-        stateLock.lock()
-        let services = discoveredServices
-        stateLock.unlock()
+        let services = stateLock.withLock { discoveredServices }
 
         return services.map {
             ServiceInfo(uuid: $0.uuid.uuidString, isPrimary: $0.isPrimary)
@@ -233,9 +228,7 @@ public final class BLECentral: @unchecked Sendable {
             throw BLEError.notConnected
         }
 
-        stateLock.lock()
-        let services = discoveredServices
-        stateLock.unlock()
+        let services = stateLock.withLock { discoveredServices }
 
         var tree: [ServiceTree] = []
         for service in services {
@@ -273,11 +266,11 @@ public final class BLECentral: @unchecked Sendable {
     }
 
     public func discoverCharacteristics(forService serviceUUID: String) async throws -> [CharacteristicInfo] {
-        stateLock.lock()
-        let chars = discoveredCharacteristics.filter {
-            $0.service?.uuid.uuidString.lowercased() == serviceUUID.lowercased()
+        let chars = stateLock.withLock {
+            discoveredCharacteristics.filter {
+                $0.service?.uuid.uuidString.lowercased() == serviceUUID.lowercased()
+            }
         }
-        stateLock.unlock()
 
         if chars.isEmpty {
             throw BLEError.serviceNotFound(serviceUUID)
@@ -293,11 +286,11 @@ public final class BLECentral: @unchecked Sendable {
             throw BLEError.notConnected
         }
 
-        stateLock.lock()
-        let char = discoveredCharacteristics.first {
-            $0.uuid.uuidString.lowercased() == charUUID.lowercased()
+        let char = stateLock.withLock {
+            discoveredCharacteristics.first {
+                $0.uuid.uuidString.lowercased() == charUUID.lowercased()
+            }
         }
-        stateLock.unlock()
 
         guard let c = char else {
             throw BLEError.characteristicNotFound(charUUID)
@@ -325,11 +318,11 @@ public final class BLECentral: @unchecked Sendable {
             throw BLEError.notConnected
         }
 
-        stateLock.lock()
-        let char = discoveredCharacteristics.first {
-            $0.uuid.uuidString.lowercased() == charUUID.lowercased()
+        let char = stateLock.withLock {
+            discoveredCharacteristics.first {
+                $0.uuid.uuidString.lowercased() == charUUID.lowercased()
+            }
         }
-        stateLock.unlock()
 
         guard let c = char else {
             throw BLEError.characteristicNotFound(charUUID)
@@ -355,11 +348,11 @@ public final class BLECentral: @unchecked Sendable {
             throw BLEError.notConnected
         }
 
-        stateLock.lock()
-        let char = discoveredCharacteristics.first {
-            $0.uuid.uuidString.lowercased() == charUUID.lowercased()
+        let char = stateLock.withLock {
+            discoveredCharacteristics.first {
+                $0.uuid.uuidString.lowercased() == charUUID.lowercased()
+            }
         }
-        stateLock.unlock()
 
         guard let c = char else {
             throw BLEError.characteristicNotFound(charUUID)
@@ -401,11 +394,11 @@ public final class BLECentral: @unchecked Sendable {
             throw BLEError.notConnected
         }
 
-        stateLock.lock()
-        let char = discoveredCharacteristics.first {
-            $0.uuid.uuidString.lowercased() == charUUID.lowercased()
+        let char = stateLock.withLock {
+            discoveredCharacteristics.first {
+                $0.uuid.uuidString.lowercased() == charUUID.lowercased()
+            }
         }
-        stateLock.unlock()
 
         guard let c = char else {
             throw BLEError.characteristicNotFound(charUUID)
@@ -424,9 +417,7 @@ public final class BLECentral: @unchecked Sendable {
             self.processor.cancelSubscribeContinuation(forChar: subscribeUUID)
         }
 
-        stateLock.lock()
-        activeSubscriptions.insert(charUUID.uppercased())
-        stateLock.unlock()
+        stateLock.withLock { _ = activeSubscriptions.insert(charUUID.uppercased()) }
 
         let stream = AsyncStream<Data> { continuation in
             self.processor.setNotificationContinuation(forChar: c.uuid.uuidString, continuation)
@@ -435,9 +426,7 @@ public final class BLECentral: @unchecked Sendable {
                 self.cbQueue.async {
                     peripheral.setNotifyValue(false, for: c)
                 }
-                self.stateLock.lock()
-                self.activeSubscriptions.remove(charUUID.uppercased())
-                self.stateLock.unlock()
+                self.stateLock.withLock { _ = self.activeSubscriptions.remove(charUUID.uppercased()) }
             }
         }
 
@@ -464,7 +453,7 @@ public final class BLECentral: @unchecked Sendable {
     }
 
     private func discoverAllServices(peripheral: CBPeripheral) async throws {
-        let serviceUUIDs = try await withTaskCancellationHandler {
+        _ = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[String], Error>) in
                 self.processor.setDiscoverServicesContinuation(cont)
                 self.cbQueue.async {
@@ -486,7 +475,7 @@ public final class BLECentral: @unchecked Sendable {
 
         for service in services {
             let svcUUID = service.uuid.uuidString
-            let chars = try await withTaskCancellationHandler {
+            _ = try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[BLEEvent.DiscoveredCharacteristic], Error>) in
                     self.processor.setDiscoverCharsContinuation(forService: svcUUID, cont)
                     self.cbQueue.async {
@@ -501,10 +490,10 @@ public final class BLECentral: @unchecked Sendable {
             }
         }
 
-        stateLock.lock()
-        discoveredServices = allServices
-        discoveredCharacteristics = allChars
-        stateLock.unlock()
+        stateLock.withLock {
+            discoveredServices = allServices
+            discoveredCharacteristics = allChars
+        }
     }
 
     // MARK: - Synchronous accessors for completion

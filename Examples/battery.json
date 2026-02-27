@@ -1,0 +1,17 @@
+{
+  "name": "Battery Monitor",
+  "services": [
+    {
+      "uuid": "BA770000-BA77-BA77-BA77-BA770000BA77",
+      "primary": true,
+      "characteristics": [
+        {
+          "uuid": "BA770001-BA77-BA77-BA77-BA770000BA77",
+          "properties": ["read", "notify"],
+          "value": "64",
+          "format": "uint8"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "name": "Custom Sensor",
+  "services": [
+    {
+      "uuid": "12345678-1234-1234-1234-123456789ABC",
+      "primary": true,
+      "characteristics": [
+        {
+          "uuid": "12345678-1234-1234-1234-123456789AB1",
+          "properties": ["read", "notify"],
+          "value": "0000",
+          "format": "uint16le"
+        },
+        {
+          "uuid": "12345678-1234-1234-1234-123456789AB2",
+          "properties": ["read", "write"],
+          "value": "01",
+          "format": "uint8"
+        },
+        {
+          "uuid": "12345678-1234-1234-1234-123456789AB3",
+          "properties": ["write", "writeWithoutResponse"],
+          "value": "00",
+          "format": "hex"
+        }
+      ]
+    }
+  ]
+}

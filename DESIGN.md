@@ -50,9 +50,11 @@ The two library targets are intentionally decoupled. `BLEManager` has no knowled
 
 ---
 
-## 3. BLEManager target
+## 3. BLEManager target — central and peripheral
 
-### 3.1 Event pipeline
+The target now contains both a central (scanning/connecting) and a peripheral (GATT server) subsystem. They share `BLEError` and value types but are otherwise independent.
+
+### 3.1 Event pipeline (central)
 
 CoreBluetooth is callback-based and runs all its callbacks on a dedicated serial queue. blew's internal architecture converts this into a typed event pipeline:
 
@@ -137,7 +139,7 @@ Runs a permanent `while running` loop on a dedicated `Thread` named `blew.event-
 
 On `didDisconnect`, all active notification streams are finished and any pending continuations are failed.
 
-### 3.5 BLECentral
+### 3.5 BLECentral (central facade)
 
 The public facade and the only exported type. It is a singleton (`BLECentral.shared`).
 
@@ -154,7 +156,46 @@ Key behaviors:
 - **`connect(deviceId:timeout:)`** — looks up the peripheral in the delegate's cache or via `retrievePeripherals(withIdentifiers:)`, connects, then immediately runs full GATT discovery (all services, all characteristics for each service) so subsequent read/write/subscribe calls can proceed without additional discovery round-trips.
 - **`subscribe(characteristicUUID:)`** — enables notifications via `setNotifyValue(true)`, waits for the state-change callback to confirm, then returns `AsyncStream<Data>`. On stream termination, disables notifications and removes the subscription.
 
-### 3.6 Value types (DeviceInfo.swift)
+### 3.6 BLEPeripheral subsystem
+
+The peripheral subsystem exposes the Mac as a GATT server that remote centrals (phones, other computers) can connect to and interact with.
+
+**Architecture:**
+
+```
+CLI / REPL  ──async/await──►  BLEPeripheral (singleton)
+                                   │
+                         ┌─────────┼─────────┐
+                         │         │         │
+                   CBPeripheralManager  GATTStore  BLEPeripheralDelegate
+                         │                   │         │
+                         └───────────────────┘◄────────┘
+                            (delegate callbacks read/write
+                             GATTStore synchronously; events
+                             flow to AsyncStream for logging)
+```
+
+**Key difference from the central path:** Read and write requests from connected centrals must be answered synchronously inside `CBPeripheralManagerDelegate` callbacks. The delegate therefore accesses `GATTStore` directly (under `NSLock`) and calls `respond(to:withResult:)` immediately. Events are emitted to an `AsyncStream<PeripheralEvent>` after responding, purely for logging and REPL feedback. There is no event queue or processor thread on the peripheral side.
+
+**New files:**
+
+| File | Role |
+|------|------|
+| `BLEPeripheral.swift` | Public singleton facade. Owns `CBPeripheralManager`, `GATTStore`, delegate. API: `configure`, `startAdvertising`, `stopAdvertising`, `updateValue`, `events()`, `peripheralStatus()`. |
+| `BLEPeripheralDelegate.swift` | `CBPeripheralManagerDelegate`. Answers read/write requests synchronously via `GATTStore`. Emits `PeripheralEvent` to stream. |
+| `GATTStore.swift` | Thread-safe value map + subscriber map. Accessed from `blew.pm` queue (delegate) and any thread (CLI commands). Guarded by `NSLock`. |
+| `PeripheralTypes.swift` | `ServiceDefinition`, `CharacteristicDefinition`, `CharacteristicProperty`, `PeripheralStatus` — all `Sendable` value types. |
+| `PeripheralEvent.swift` | `PeripheralEvent` enum: `stateChanged`, `advertisingStarted`, `serviceAdded`, `centralConnected`, `centralDisconnected`, `readRequest`, `writeRequest`, `subscribed`, `unsubscribed`, `notificationSent`. |
+
+**CoreBluetooth peripheral limitations:**
+
+- Only `CBAdvertisementDataLocalNameKey` and `CBAdvertisementDataServiceUUIDsKey` are allowed in the advertisement dictionary. Manufacturer data, service data, and other ADV fields are rejected by CoreBluetooth.
+- ADV interval, TX power, and connection parameters are OS-controlled.
+- Clone mode replicates GATT structure and initial values; raw ADV bytes cannot be reproduced.
+- macOS TCC may prompt for Bluetooth permission on first run.
+- On macOS, standard Bluetooth SIG service UUIDs cannot be emulated via `CBPeripheralManager`. The short 16-bit form (e.g. `180F`) is rejected outright with "The specified UUID is not allowed for this operation." The full 128-bit Bluetooth Base UUID form (e.g. `0000180F-0000-1000-8000-00805F9B34FB`) is accepted but is not normalised to the short form internally — it registers as a raw 128-bit UUID, so centrals do not recognise it as the standard service. Only genuinely custom 128-bit UUIDs should be used.
+
+### 3.7 Value types (DeviceInfo.swift)
 
 All data passed between `BLEManager` and the CLI layer uses plain `Sendable` structs:
 
@@ -168,9 +209,13 @@ ConnectionStatus   — isConnected, deviceId?, deviceName?, counts, lastError?
 WriteType          — withResponse | withoutResponse | auto
 ```
 
-### 3.7 BLEError
+### 3.8 BLEError
 
 A `Sendable` enum that maps each failure kind to both a human-readable description and an exit code integer. This makes error-to-exit-code mapping explicit and centralised, rather than scattered across command implementations.
+
+Central errors: `bluetoothUnavailable`, `notConnected`, `deviceNotFound`, `connectionFailed`, `timeout`, `serviceNotFound`, `characteristicNotFound`, `readFailed`, `writeFailed`, `subscribeFailed`, `operationFailed`.
+
+Peripheral errors: `peripheralUnavailable`, `advertisingFailed`, `serviceRegistrationFailed`.
 
 ---
 
@@ -232,6 +277,20 @@ gatt
 read     [-f <fmt>]  <char-uuid>
 write    [-f <fmt>]  [-r|-w]  <char-uuid>  <data>
 sub      [-f <fmt>]  [-d <sec>]  [-c <count>]  <char-uuid>
+periph
+  adv    [-n/--name <n>]  [-S/--service <uuid>...]  [-c/--config <file>]
+  clone  [-o/--save <file>]
+```
+
+`periph adv` starts advertising and hosts a GATT server until Ctrl-C. `-n`/`--name` and `-S`/`--service` are `periph adv`-specific options placed after the subcommand name, not global options. `periph clone` connects to a real device using the standard central mode (global device-targeting options before the subcommand name), snapshots the full GATT tree with initial values, disconnects, then starts advertising as the clone. Both subcommands accept a `--config` / `--save` JSON file for persistence.
+
+Additional `periph` subcommands available in REPL and `--exec` mode only:
+
+```
+periph stop                             — stop advertising
+periph set  [-f <fmt>]  <char>  <val>  — update characteristic value in store
+periph notify [-f <fmt>] <char> <val>  — update value and push notification
+periph status                          — show advertising state
 ```
 
 `gatt info` does not require a connected device. It looks up the UUID in the generated `GATTCharacteristicDB` and prints the Bluetooth SIG specification: name, description, and field structure.
@@ -437,10 +496,14 @@ Thread                  Runs
 Main thread             ArgumentParser, REPL getLine loop,
                         synchronous command dispatch,
                         DispatchSemaphore.wait() during BLE operations
-blew.cb (serial queue)  All CBCentralManager / CBPeripheral calls
+blew.cb (serial queue)  All CBCentralManager / CBPeripheral calls (central)
+blew.pm (serial queue)  All CBPeripheralManager calls + delegate callbacks
+                        GATTStore reads/writes (under NSLock)
 blew.event-processor    BLEEventQueue drain loop, continuation resumes
-Swift cooperative pool  async Task bodies (BLECentral async methods)
+Swift cooperative pool  async Task bodies (BLECentral and BLEPeripheral)
 ```
+
+The `blew.pm` queue is separate from `blew.cb`. Both can coexist during `periph clone` (which temporarily runs in central mode to snapshot a real device, then switches to peripheral mode).
 
 The semaphore-based bridge is the key synchronisation point:
 
@@ -463,6 +526,9 @@ This lets the REPL and `--exec` runner remain purely synchronous while the BLE s
 ```
 blew (executable)
  ├── BLEManager                        (CoreBluetooth, swift-atomics)
+ │     Central: BLECentral, BLEDelegate, BLEEventQueue, BLEEventProcessor
+ │     Peripheral: BLEPeripheral, BLEPeripheralDelegate, GATTStore
+ │     Shared: BLEError, PeripheralTypes, PeripheralEvent, DeviceInfo
  ├── LineNoise                         (system libedit — linenoise Swift implementation)
  ├── ArgumentParser                    (swift-argument-parser)
  └── [build plugin] GenerateBLENames   runs Scripts/generate-all-ble.sh, which invokes:

@@ -1,6 +1,7 @@
 import Foundation
 
 public enum BLEError: Error, Sendable {
+    // Central errors
     case bluetoothUnavailable(String)
     case notConnected
     case deviceNotFound(String)
@@ -13,14 +14,20 @@ public enum BLEError: Error, Sendable {
     case subscribeFailed(String)
     case operationFailed(String)
 
+    // Peripheral errors
+    case peripheralUnavailable(String)
+    case advertisingFailed(String)
+    case serviceRegistrationFailed(String)
+
     public var exitCode: Int32 {
         switch self {
-        case .bluetoothUnavailable: return 3
+        case .bluetoothUnavailable, .peripheralUnavailable: return 3
         case .deviceNotFound: return 2
         case .timeout: return 4
         case .notConnected, .connectionFailed, .serviceNotFound,
              .characteristicNotFound, .readFailed, .writeFailed,
-             .subscribeFailed, .operationFailed: return 5
+             .subscribeFailed, .operationFailed,
+             .advertisingFailed, .serviceRegistrationFailed: return 5
         }
     }
 
@@ -37,6 +44,9 @@ public enum BLEError: Error, Sendable {
         case .writeFailed(let msg): return "Write failed: \(msg)"
         case .subscribeFailed(let msg): return "Subscribe failed: \(msg)"
         case .operationFailed(let msg): return "Operation failed: \(msg)"
+        case .peripheralUnavailable(let msg): return "Peripheral unavailable: \(msg)"
+        case .advertisingFailed(let msg): return "Advertising failed: \(msg)"
+        case .serviceRegistrationFailed(let msg): return "Service registration failed: \(msg)"
         }
     }
 }

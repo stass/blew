@@ -390,6 +390,12 @@ The REPL provides:
 | `read [-f <fmt>] <uuid>` | Read a characteristic |
 | `write [-f <fmt>] [-r\|-w] <uuid> <data>` | Write to a characteristic |
 | `sub [-f <fmt>] [-d <s>] [-c <n>] <uuid>` | Subscribe to notifications (Ctrl-C to stop) |
+| `periph adv [-n <n>] [-S <uuid>] [--config <f>]` | Start advertising as a virtual peripheral |
+| `periph clone [--save <f>]` | Clone a real device's GATT |
+| `periph stop` | Stop advertising |
+| `periph set [-f <fmt>] <uuid> <val>` | Update a characteristic value |
+| `periph notify [-f <fmt>] <uuid> <val>` | Push a notification to subscribers |
+| `periph status` | Show peripheral advertising state |
 | `help` | Show available commands |
 | `quit` / `exit` | Exit the REPL |
 
@@ -506,6 +512,148 @@ blew -n "Thingy" -o kv sub -d 60 fff1 | awk -F'value=' '{print $2}'
 
 ---
 
+### `periph` — Peripheral (GATT server) mode
+
+`periph` turns the Mac into a virtual BLE peripheral that nearby devices can connect to, read/write, and subscribe to.
+
+> **CoreBluetooth peripheral limitations:** Only the local device name and service UUIDs can be advertised. Manufacturer data and other ADV payload fields are not settable from the peripheral API. ADV interval, TX power, and connection parameters are OS-controlled. Standard Bluetooth SIG service UUIDs (e.g. `180F`, `180D`) cannot be emulated on macOS: the short form is rejected by `CBPeripheralManager`, and the full 128-bit Bluetooth Base UUID form is accepted but not normalised internally, so clients do not recognise it as the standard service. Use custom 128-bit UUIDs for all peripheral services.
+
+#### `periph adv` — Advertise and host a GATT server
+
+```
+blew periph adv [-n <name>] [-S <uuid>] [--config <file>]
+```
+
+Starts advertising and runs until interrupted (Ctrl-C). Events (reads, writes, subscriptions) are logged to stdout.
+
+| Flag | Description |
+|------|-------------|
+| `-n, --name <name>` | Advertised device name. Defaults to `blew`. |
+| `-S, --service <uuid>` | Service UUID to advertise, repeatable. |
+| `-c, --config <file>` | JSON config file defining services and characteristics. |
+
+**Config file format:**
+
+```json
+{
+  "name": "My Device",
+  "services": [
+    {
+      "uuid": "180F",
+      "primary": true,
+      "characteristics": [
+        {
+          "uuid": "2A19",
+          "properties": ["read", "notify"],
+          "value": "55",
+          "format": "uint8"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`properties` may contain: `read`, `write`, `writeWithoutResponse`, `notify`, `indicate`.
+`format` accepts the same values as `--format` in `read`/`write`: `hex` (default), `utf8`, `uint8`, `uint16le`, `uint32le`, `float32le`, `base64`, `raw`.
+
+**Examples:**
+
+```bash
+# Advertise a name + service UUID (scanner-visible, no GATT characteristics)
+blew periph adv -n "My Sensor" -S 180F
+
+# Multiple service UUIDs
+blew periph adv -n "My Sensor" -S 180F -S 180A
+
+# Full GATT server from a config file
+blew periph adv --config device.json
+
+# Config file with name override
+blew periph adv -n "Override Name" --config device.json
+```
+
+Example config files are provided in the [`Examples/`](Examples/) directory:
+
+| File | Description |
+|------|-------------|
+| `battery.json` | Battery-like service — readable/notifiable level characteristic, initial value 100% |
+| `heart-rate.json` | Heart-rate-like service — notify measurement, read body sensor location, write control point; plus a device-info service |
+| `custom-sensor.json` | Vendor sensor — read/notify value, read/write config register, write-only command endpoint |
+
+> **Note:** Standard Bluetooth SIG service UUIDs cannot be emulated on macOS — see the peripheral limitations note above. All example files use custom 128-bit UUIDs.
+
+**Output (text mode):**
+
+```
+Advertising "My Sensor" [180F (Battery Service)]
+  Service 180F (Battery Service)
+  +-- 2A19 (Battery Level) [read, notify]
+
+[12:34:56] central A1B2C3D4 connected
+[12:34:56] read 2A19 (Battery Level) by A1B2C3D4
+[12:34:57] subscribe 2A19 (Battery Level) by A1B2C3D4
+[12:35:01] write 2A19 (Battery Level) by A1B2C3D4 <- 2a
+^C
+Stopped advertising.
+```
+
+**Output (kv mode):**
+
+```
+event=connected ts=12:34:56 central=A1B2C3D4-...
+event=read ts=12:34:56 central=A1B2C3D4-... char=2A19
+event=subscribe ts=12:34:57 central=A1B2C3D4-... char=2A19
+event=write ts=12:35:01 central=A1B2C3D4-... char=2A19 value=2a
+```
+
+#### `periph clone` — Clone a real device
+
+```
+blew [device-targeting-options] periph clone [--save <file>]
+```
+
+Connects to a target device, discovers its full GATT tree, reads all readable characteristic values, disconnects, then starts advertising as a clone.
+
+Use the same global device-targeting options (`--id`, `--name`, `--service`, etc.) to specify the target.
+
+| Flag | Description |
+|------|-------------|
+| `-o, --save <file>` | Save the cloned GATT structure to a JSON config file for later reuse. |
+
+**Clone scope:**
+- Cloned: advertised name, service UUIDs, full GATT structure, initial characteristic values (for readable characteristics).
+- Not cloned: manufacturer data, service data in ADV payload, ADV timing.
+
+**Examples:**
+
+```bash
+blew -n "Heart Rate Monitor" periph clone
+blew -i F3C2A1B0-... periph clone --save hr-monitor.json
+```
+
+#### REPL-only periph commands
+
+In the REPL and `--exec` mode, additional `periph` subcommands are available after `periph adv` or `periph clone` has been run:
+
+| Command | Description |
+|---------|-------------|
+| `periph stop` | Stop advertising. |
+| `periph set [-f <fmt>] <char> <val>` | Update a characteristic's stored value. |
+| `periph notify [-f <fmt>] <char> <val>` | Update value and push a notification to all subscribers. |
+| `periph status` | Show advertising state, service/characteristic counts, subscriber count. |
+
+```
+blew> periph adv --config device.json
+Advertising "My Device" [180F]
+[12:34:56] central A1B2C3 connected
+
+blew> periph notify -f uint8 2A19 42
+blew> periph stop
+```
+
+---
+
 ## Recipes
 
 ### Find a device in a crowded environment
@@ -546,6 +694,6 @@ blew -n "Thingy" -p only read -f uint8 2A19
 
 | Version | Highlights |
 |---------|-----------|
-| **v1.0 (current)** | Scan, connect, GATT tree, read, write, subscribe, `--exec` scripting, interactive REPL, Bluetooth SIG UUID human-readable names, `scan --watch` live updates |
+| **v1.0** | Scan, connect, GATT tree, read, write, subscribe, `--exec` scripting, interactive REPL, Bluetooth SIG UUID human-readable names, `scan --watch` live updates |
 | **v1.5** | RSSI monitoring, improved tab completion, custom/vendor UUID name mappings |
-| **v2.0** | Peripheral/virtual device mode — simulate a BLE peripheral and profiles, clone real devices |
+| **v2.0 (current)** | Peripheral mode — `periph adv` GATT server, `periph clone` real device mirroring, interactive REPL peripheral commands |

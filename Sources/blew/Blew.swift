@@ -21,6 +21,7 @@ struct Blew: ParsableCommand {
             ReadCommand.self,
             WriteCommand.self,
             SubCommand.self,
+            PeriphCommand.self,
         ]
     )
 
@@ -48,8 +49,13 @@ struct Blew: ParsableCommand {
     }
 }
 
-/// Best-effort disconnect on process exit.
+/// Best-effort disconnect and stop advertising on process exit.
 private func cleanupBeforeExit() {
+    // Stop advertising if active
+    if BLEPeripheral.shared.isAdvertising() {
+        BLEPeripheral.shared.stopAdvertising()
+    }
+
     let semaphore = DispatchSemaphore(value: 0)
     Task {
         let status = await BLECentral.shared.status()
