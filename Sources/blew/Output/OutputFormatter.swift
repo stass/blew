@@ -69,24 +69,7 @@ struct OutputFormatter {
     func printTable(headers: [String], rows: [[String]]) {
         switch format {
         case .text:
-            guard !rows.isEmpty else { return }
-            var widths = headers.map { $0.count }
-            for row in rows {
-                for (i, cell) in row.enumerated() where i < widths.count {
-                    widths[i] = max(widths[i], cell.count)
-                }
-            }
-            let header = headers.enumerated().map { i, h in
-                bold(h).padding(toLength: widths[i] + boldPadding(h), withPad: " ", startingAt: 0)
-            }.joined(separator: "  ")
-            Swift.print(header)
-            Swift.print(dim(String(repeating: "─", count: widths.reduce(0, +) + max(0, widths.count - 1) * 2)))
-            for row in rows {
-                let line = row.enumerated().map { i, cell in
-                    cell.padding(toLength: i < widths.count ? widths[i] : cell.count, withPad: " ", startingAt: 0)
-                }.joined(separator: "  ")
-                Swift.print(line)
-            }
+            Swift.print(formatTable(headers: headers, rows: rows))
         case .kv:
             let lowerHeaders = headers.map { $0.lowercased().replacingOccurrences(of: " ", with: "_") }
             for row in rows {
@@ -99,6 +82,32 @@ struct OutputFormatter {
                 Swift.print(pairs)
             }
         }
+    }
+
+    /// Build a formatted text table and return it as a string (without printing).
+    /// Only meaningful in text mode; the string includes ANSI bold/dim escapes
+    /// when isTTY is true. Returns an empty string when rows is empty.
+    func formatTable(headers: [String], rows: [[String]]) -> String {
+        guard !rows.isEmpty else { return "" }
+        var widths = headers.map { $0.count }
+        for row in rows {
+            for (i, cell) in row.enumerated() where i < widths.count {
+                widths[i] = max(widths[i], cell.count)
+            }
+        }
+        var lines: [String] = []
+        let header = headers.enumerated().map { i, h in
+            bold(h).padding(toLength: widths[i] + boldPadding(h), withPad: " ", startingAt: 0)
+        }.joined(separator: "  ")
+        lines.append(header)
+        lines.append(dim(String(repeating: "─", count: widths.reduce(0, +) + max(0, widths.count - 1) * 2)))
+        for row in rows {
+            let line = row.enumerated().map { i, cell in
+                cell.padding(toLength: i < widths.count ? widths[i] : cell.count, withPad: " ", startingAt: 0)
+            }.joined(separator: "  ")
+            lines.append(line)
+        }
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - Private helpers

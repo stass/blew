@@ -71,7 +71,7 @@ public final class BLECentral: @unchecked Sendable {
 
     // MARK: - Scan
 
-    public func scan(timeout: TimeInterval = 5.0) async throws -> AsyncStream<DiscoveredDevice> {
+    public func scan(timeout: TimeInterval? = 5.0, allowDuplicates: Bool = false) async throws -> AsyncStream<DiscoveredDevice> {
         try await waitForPoweredOn(timeout: 5.0)
 
         let stream = AsyncStream<DiscoveredDevice> { continuation in
@@ -86,20 +86,24 @@ public final class BLECentral: @unchecked Sendable {
 
         cbQueue.async {
             self.centralManager.scanForPeripherals(withServices: nil, options: [
-                CBCentralManagerScanOptionAllowDuplicatesKey: false,
+                CBCentralManagerScanOptionAllowDuplicatesKey: allowDuplicates,
             ])
         }
 
-        // Schedule scan stop -- stops scanning and finishes the stream
-        Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-            guard let self = self else { return }
-            self.cbQueue.async {
-                self.centralManager.stopScan()
+        // When a timeout is given, schedule a stop after that duration.
+        // When timeout is nil the stream runs until the caller cancels or
+        // calls stopScan externally (watch mode).
+        if let timeout = timeout {
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                guard let self = self else { return }
+                self.cbQueue.async {
+                    self.centralManager.stopScan()
+                }
+                // setScanContinuation(nil) calls finish() on the old continuation,
+                // which terminates the `for await` loop in the caller
+                self.processor.setScanContinuation(nil)
             }
-            // setScanContinuation(nil) calls finish() on the old continuation,
-            // which terminates the `for await` loop in the caller
-            self.processor.setScanContinuation(nil)
         }
 
         return stream

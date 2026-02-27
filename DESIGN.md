@@ -150,7 +150,7 @@ Responsibilities:
 
 Key behaviors:
 
-- **`scan(timeout:)`** — starts `CBCentralManager.scanForPeripherals`, returns `AsyncStream<DiscoveredDevice>`. A background `Task` stops scanning after `timeout` seconds and finishes the stream.
+- **`scan(timeout:allowDuplicates:)`** — starts `CBCentralManager.scanForPeripherals`, returns `AsyncStream<DiscoveredDevice>`. When `timeout` is non-nil, a background `Task` stops scanning after that many seconds and finishes the stream. When `timeout` is `nil` the stream runs until the caller cancels (used by `--watch` mode). `allowDuplicates` maps directly to `CBCentralManagerScanOptionAllowDuplicatesKey`; watch mode passes `true` so RSSI updates arrive continuously.
 - **`connect(deviceId:timeout:)`** — looks up the peripheral in the delegate's cache or via `retrievePeripherals(withIdentifiers:)`, connects, then immediately runs full GATT discovery (all services, all characteristics for each service) so subsequent read/write/subscribe calls can proceed without additional discovery round-trips.
 - **`subscribe(characteristicUUID:)`** — enables notifications via `setNotifyValue(true)`, waits for the state-change callback to confirm, then returns `AsyncStream<Data>`. On stream termination, disables notifications and removes the subscription.
 
@@ -221,7 +221,7 @@ Each subcommand is a thin `ParsableCommand` that:
 The subcommand list:
 
 ```
-scan
+scan  [-w/--watch]
 connect [<device-id>]
 gatt
   svcs
@@ -282,7 +282,7 @@ This semaphore pattern bridges Swift's structured concurrency into the synchrono
 
 **Scan results cache** — `lastScanResults: [DiscoveredDevice]` is updated after every successful scan. Used for device resolution in `connect` and for REPL tab completion.
 
-**Text output** — uses the `ScanSpinner` (a `DispatchSourceTimer`-based braille spinner on stderr) when stdout is a TTY and a scan is running.
+**Text output** — uses the `ScanSpinner` (a `DispatchSourceTimer`-based braille spinner on stderr) when stdout is a TTY and a scan is running. In `--watch` mode, uses `ScanWatchDisplay` instead — a timer-based renderer that redraws the device table in-place on stderr every 250 ms using ANSI cursor movement. When the watch loop exits (Ctrl-C or timeout), the final table is printed once to stdout so it persists in scroll history.
 
 ### 4.6 OutputFormatter
 
@@ -297,8 +297,8 @@ Wraps `OutputFormat` (text|kv) and `verbosity` (0/1/2). All output goes through 
 | `printRecord(_:)` | stdout | always |
 | `printTable(headers:rows:)` | stdout | always |
 
-`printRecord` and `printTable` adapt their output to the selected format:
-- **text**: `key: value` pairs (record) or auto-padded aligned columns (table)
+`printRecord`, `printTable`, and `formatTable` adapt their output to the selected format:
+- **text**: `key: value` pairs (record) or auto-padded aligned columns (table). `formatTable` returns the table as a `String` without printing; `printTable` calls it and writes to stdout. `ScanWatchDisplay` uses `formatTable` to compose the in-place redraw buffer.
 - **kv**: space-separated `key=value` on one line; values with spaces or quotes are double-quoted
 
 **ANSI formatting** — `OutputFormatter` detects whether stdout is a TTY at init time (`isatty(fileno(stdout))`). When in text mode with a TTY, two helpers apply ANSI escape sequences:

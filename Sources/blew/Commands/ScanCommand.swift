@@ -9,13 +9,17 @@ struct ScanCommand: ParsableCommand {
         discussion: "Device targeting and output options are global options; pass them before the subcommand name (see blew --help)."
     )
 
+    @Flag(name: [.customShort("w"), .long], help: "Continuously scan and show a live-updating device list (Ctrl-C to stop).")
+    var watch: Bool = false
+
     mutating func run() throws {
         let globals = GlobalOptions.current!
-        let scanTimeout = globals.timeout ?? 5.0
         let router = CommandRouter(globals: globals)
-        var args: [String] = ["-t", "\(scanTimeout)"]
+        var args: [String] = []
+        if let timeout = globals.timeout { args += ["-t", "\(timeout)"] }
         if let name = globals.name { args += ["-n", name] }
         if let rssi = globals.rssiMin { args += ["-r", "\(rssi)"] }
+        if watch { args.append("--watch") }
         let code = router.runScan(args)
         if code != 0 { throw BlewExitCode(code) }
     }

@@ -126,9 +126,15 @@ final class CommandRouter {
     // MARK: - Command runners (called from REPL/exec)
 
     func runScan(_ args: [String]) -> Int32 {
-        let scanTimeout = parseDoubleOption(args, short: "-t", long: "--timeout") ?? globals.timeout ?? 5.0
+        let watchMode = args.contains("--watch") || args.contains("-w")
         let nameFilter = parseStringOption(args, short: "-n", long: "--name") ?? globals.name
         let rssiMin = parseIntOption(args, short: "-r", long: "--rssi-min") ?? globals.rssiMin
+
+        if watchMode {
+            return runScanWatch(nameFilter: nameFilter, rssiMin: rssiMin)
+        }
+
+        let scanTimeout = parseDoubleOption(args, short: "-t", long: "--timeout") ?? globals.timeout ?? 5.0
 
         let interactive = isatty(fileno(stderr)) != 0
         let spinner: ScanSpinner? = interactive ? ScanSpinner(timeout: scanTimeout) : nil
@@ -219,6 +225,162 @@ final class CommandRouter {
             output.printTable(headers: headers, rows: rows)
         }
         return 0
+    }
+
+    private func runScanWatch(nameFilter: String?, rssiMin: Int?) -> Int32 {
+        // KV mode: stream a line per update to stdout without any terminal control.
+        if output.format == .kv {
+            return runScanWatchKV(nameFilter: nameFilter, rssiMin: rssiMin)
+        }
+
+        // Text mode requires a TTY for in-place redraw.
+        guard isatty(fileno(stdout)) != 0 else {
+            output.printError("scan --watch in text mode requires an interactive terminal; use -o kv for piped output")
+            return BlewExitCode.invalidArguments.code
+        }
+
+        let watchTimeout: TimeInterval? = globals.timeout
+
+        let display = ScanWatchDisplay(formatter: output)
+        display.start()
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var scanError: Int32 = 0
+        var deviceMap: [String: DiscoveredDevice] = [:]
+
+        let task = Task {
+            defer { semaphore.signal() }
+            do {
+                let stream = try await manager.scan(timeout: watchTimeout, allowDuplicates: true)
+                for await device in stream {
+                    if let nameFilter = nameFilter {
+                        guard let dName = device.name, dName.localizedCaseInsensitiveContains(nameFilter) else { continue }
+                    }
+                    if let rssiMin = rssiMin {
+                        guard device.rssi >= rssiMin else { continue }
+                    }
+                    // Merge: preserve name/services/manufacturer seen in earlier advertisements.
+                    if let existing = deviceMap[device.identifier] {
+                        var updated = device
+                        if updated.name == nil && existing.name != nil {
+                            updated = DiscoveredDevice(
+                                identifier: updated.identifier,
+                                name: existing.name,
+                                rssi: updated.rssi,
+                                serviceUUIDs: updated.serviceUUIDs.isEmpty ? existing.serviceUUIDs : updated.serviceUUIDs,
+                                manufacturerData: updated.manufacturerData ?? existing.manufacturerData
+                            )
+                        }
+                        deviceMap[device.identifier] = updated
+                    } else {
+                        deviceMap[device.identifier] = device
+                    }
+                    let sorted = deviceMap.values.sorted { $0.rssi > $1.rssi }
+                    display.update(devices: sorted)
+                }
+            } catch is CancellationError {
+                // normal exit path
+            } catch {
+                output.printError("\(error)")
+                scanError = BlewExitCode.operationFailed.code
+            }
+        }
+
+        let outcome = waitInterruptible(task, semaphore: semaphore)
+        display.stop()
+
+        if case .interrupted = outcome {
+            // Print final table to stdout so it persists in scroll history.
+            let sorted = deviceMap.values.sorted { $0.rssi > $1.rssi }
+            lastScanResults = sorted
+            printScanTable(sorted)
+            return 130
+        }
+
+        if scanError != 0 { return scanError }
+
+        let sorted = deviceMap.values.sorted { $0.rssi > $1.rssi }
+        lastScanResults = sorted
+        if sorted.isEmpty {
+            output.printError("no devices found")
+            return BlewExitCode.notFound.code
+        }
+        printScanTable(sorted)
+        return 0
+    }
+
+    private func runScanWatchKV(nameFilter: String?, rssiMin: Int?) -> Int32 {
+        let watchTimeout: TimeInterval? = globals.timeout
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var scanError: Int32 = 0
+        var deviceMap: [String: DiscoveredDevice] = [:]
+
+        let task = Task {
+            defer { semaphore.signal() }
+            do {
+                let stream = try await manager.scan(timeout: watchTimeout, allowDuplicates: true)
+                for await device in stream {
+                    if let nameFilter = nameFilter {
+                        guard let dName = device.name, dName.localizedCaseInsensitiveContains(nameFilter) else { continue }
+                    }
+                    if let rssiMin = rssiMin {
+                        guard device.rssi >= rssiMin else { continue }
+                    }
+                    if let existing = deviceMap[device.identifier] {
+                        var updated = device
+                        if updated.name == nil && existing.name != nil {
+                            updated = DiscoveredDevice(
+                                identifier: updated.identifier,
+                                name: existing.name,
+                                rssi: updated.rssi,
+                                serviceUUIDs: updated.serviceUUIDs.isEmpty ? existing.serviceUUIDs : updated.serviceUUIDs,
+                                manufacturerData: updated.manufacturerData ?? existing.manufacturerData
+                            )
+                        }
+                        deviceMap[device.identifier] = updated
+                    } else {
+                        deviceMap[device.identifier] = device
+                    }
+                    let d = deviceMap[device.identifier]!
+                    output.printRecord(
+                        ("id", d.identifier),
+                        ("name", d.name ?? ""),
+                        ("rssi", "\(d.rssi)"),
+                        ("services", d.serviceUUIDs.joined(separator: ","))
+                    )
+                }
+            } catch is CancellationError {
+                // normal exit
+            } catch {
+                output.printError("\(error)")
+                scanError = BlewExitCode.operationFailed.code
+            }
+        }
+
+        let outcome = waitInterruptible(task, semaphore: semaphore)
+        if case .interrupted = outcome {
+            lastScanResults = deviceMap.values.sorted { $0.rssi > $1.rssi }
+            return 130
+        }
+        if scanError != 0 { return scanError }
+        lastScanResults = deviceMap.values.sorted { $0.rssi > $1.rssi }
+        return 0
+    }
+
+    private func printScanTable(_ sorted: [DiscoveredDevice]) {
+        guard !sorted.isEmpty else { return }
+        let headers = ["ID", "Name", "RSSI", "Signal", "Services"]
+        let rows: [[String]] = sorted.map { d in
+            [
+                d.identifier,
+                d.name ?? "(unknown)",
+                "\(d.rssi)",
+                Self.rssiBar(d.rssi),
+                d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) }.joined(separator: ", "),
+            ]
+        }
+        output.printTable(headers: headers, rows: rows)
     }
 
     func runConnect(_ args: [String]) -> Int32 {
@@ -1048,6 +1210,98 @@ private final class ScanSpinner {
         timer?.cancel()
         timer = nil
         FileHandle.standardError.write(Data("\r\u{1B}[K".utf8))
+    }
+}
+
+// MARK: - Watch display
+
+/// Renders a live-updating BLE device table in the terminal using ANSI in-place redraws.
+/// The table is written to stderr (to keep stdout clean for the final snapshot).
+/// A 250 ms timer fires the redraw; device data is updated from the scan Task via `update(devices:)`.
+private final class ScanWatchDisplay {
+    private static let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    private let formatter: OutputFormatter
+    private let startTime = Date()
+    private let lock = NSLock()
+    private var _devices: [DiscoveredDevice] = []
+    private var frameIndex = 0
+    private var timer: DispatchSourceTimer?
+    /// Number of lines written to stderr on the previous draw cycle.
+    private var previousLineCount = 0
+
+    init(formatter: OutputFormatter) {
+        self.formatter = formatter
+    }
+
+    func update(devices: [DiscoveredDevice]) {
+        lock.lock()
+        _devices = devices
+        lock.unlock()
+    }
+
+    func start() {
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .userInteractive))
+        t.schedule(deadline: .now(), repeating: .milliseconds(250))
+        t.setEventHandler { [weak self] in self?.tick() }
+        timer = t
+        t.resume()
+    }
+
+    func stop() {
+        timer?.cancel()
+        timer = nil
+        // Erase the in-place content from stderr so the caller can print the final
+        // table cleanly to stdout.
+        eraseLines(previousLineCount)
+    }
+
+    // MARK: - Private
+
+    private func tick() {
+        lock.lock()
+        let devices = _devices
+        lock.unlock()
+
+        let frame = Self.frames[frameIndex % Self.frames.count]
+        frameIndex += 1
+
+        let elapsed = Date().timeIntervalSince(startTime)
+        let count = devices.count
+        let countStr = count == 0 ? "no devices yet" : "\(count) device\(count == 1 ? "" : "s")"
+        let header = "\(frame) Scanning \(String(format: "%.0f", elapsed))s  \(countStr)  (Ctrl-C to stop)"
+
+        var lines: [String] = [header]
+        if !devices.isEmpty {
+            let tableHeaders = ["ID", "Name", "RSSI", "Signal", "Services"]
+            let rows: [[String]] = devices.map { d in
+                [
+                    d.identifier,
+                    d.name ?? "(unknown)",
+                    "\(d.rssi)",
+                    CommandRouter.rssiBar(d.rssi),
+                    d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) }.joined(separator: ", "),
+                ]
+            }
+            let table = formatter.formatTable(headers: tableHeaders, rows: rows)
+            lines.append(contentsOf: table.components(separatedBy: "\n"))
+        }
+
+        let newLineCount = lines.count
+
+        // Move cursor up by the number of lines drawn previously and clear to end of screen.
+        eraseLines(previousLineCount)
+        previousLineCount = newLineCount
+
+        let output = lines.joined(separator: "\n") + "\n"
+        FileHandle.standardError.write(Data(output.utf8))
+    }
+
+    private func eraseLines(_ count: Int) {
+        guard count > 0 else { return }
+        // Move up `count` lines then clear from cursor to end of screen.
+        let escape = "\u{1B}[\(count)A\u{1B}[J"
+        FileHandle.standardError.write(Data(escape.utf8))
     }
 }
 

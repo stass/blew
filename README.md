@@ -104,6 +104,12 @@ Scans for advertising BLE peripherals and prints a table of discovered devices. 
 
 **Relevant global options:** `-t`, `-n`, `-S`, `-m`, `-r`, `-o`, `-v`
 
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-w, --watch` | Continuously scan and show a live-updating device list. Runs until Ctrl-C or `-t` expires. Requires a TTY in text mode; use `-o kv` for piped output. |
+
 **Output columns (text):** ID, Name, RSSI, Signal (visual bar), Services
 
 Standard Bluetooth SIG service UUIDs in the Services column are shown with their human-readable name: e.g. `180F (Battery Service), 180A (Device Information)`.
@@ -112,9 +118,12 @@ Standard Bluetooth SIG service UUIDs in the Services column are shown with their
 ```bash
 blew scan                          # Scan for 5 seconds
 blew -t 10 scan                    # Scan for 10 seconds
-blew -n "Heart" scan               # Filter by name
+blew scan --watch                  # Continuously scan until Ctrl-C
+blew -t 30 scan --watch            # Watch for 30 seconds then stop
+blew -n "Heart" scan --watch       # Watch for Heart Rate devices
 blew -S 180D -r -65 scan           # Heart Rate service, RSSI ≥ -65 dBm
 blew -o kv scan                    # Machine-readable output
+blew -o kv scan --watch            # Stream device updates (piping-friendly)
 ```
 
 ---
@@ -550,6 +559,6 @@ blew -n "Thingy" -p only read -c 2A19 -F uint8
 
 | Version | Highlights |
 |---------|-----------|
-| **v1.0 (current)** | Scan, connect, GATT tree, read, write, subscribe, `--exec` scripting, interactive REPL, Bluetooth SIG UUID human-readable names |
-| **v1.5** | `scan --watch` live updates, RSSI monitoring, improved tab completion, custom/vendor UUID name mappings |
+| **v1.0 (current)** | Scan, connect, GATT tree, read, write, subscribe, `--exec` scripting, interactive REPL, Bluetooth SIG UUID human-readable names, `scan --watch` live updates |
+| **v1.5** | RSSI monitoring, improved tab completion, custom/vendor UUID name mappings |
 | **v2.0** | Peripheral/virtual device mode — simulate a BLE peripheral and profiles, clone real devices |
