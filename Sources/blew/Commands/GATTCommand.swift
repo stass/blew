@@ -40,14 +40,14 @@ struct GATTTreeCommand: ParsableCommand {
     @Flag(name: [.short, .long], help: "Include descriptors.")
     var descriptors: Bool = false
 
-    @Flag(name: .customShort("V"), help: "Read and display values for readable characteristics.")
-    var values: Bool = false
+    @Flag(name: [.customShort("r"), .customLong("read")], help: "Read and display values for readable characteristics.")
+    var readValues: Bool = false
 
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
         var args: [String] = ["tree"]
         if descriptors { args.append("-d") }
-        if values { args.append("-V") }
+        if readValues { args.append("-r") }
         let code = router.runGATT(args)
         if code != 0 { throw BlewExitCode(code) }
     }
@@ -60,16 +60,16 @@ struct GATTCharsCommand: ParsableCommand {
         discussion: "Device targeting and output options are global options; pass them before the subcommand name (see blew --help)."
     )
 
-    @Option(name: [.customShort("S"), .long], help: "Service UUID.")
-    var service: String
+    @Flag(name: [.customShort("r"), .customLong("read")], help: "Read and display values for readable characteristics.")
+    var readValues: Bool = false
 
-    @Flag(name: .customShort("V"), help: "Read and display values for readable characteristics.")
-    var values: Bool = false
+    @Argument(help: "Service UUID.")
+    var service: String
 
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
-        var args: [String] = ["chars", "-S", service]
-        if values { args.append("-V") }
+        var args: [String] = ["chars", service]
+        if readValues { args.append("-r") }
         let code = router.runGATT(args)
         if code != 0 { throw BlewExitCode(code) }
     }
@@ -82,12 +82,12 @@ struct GATTDescCommand: ParsableCommand {
         discussion: "Device targeting and output options are global options; pass them before the subcommand name (see blew --help)."
     )
 
-    @Option(name: [.customShort("c"), .long], help: "Characteristic UUID.")
+    @Argument(help: "Characteristic UUID.")
     var char: String
 
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
-        let code = router.runGATT(["desc", "-c", char])
+        let code = router.runGATT(["desc", char])
         if code != 0 { throw BlewExitCode(code) }
     }
 }
@@ -99,12 +99,12 @@ struct GATTInfoCommand: ParsableCommand {
         discussion: "Does not require a connected device. Shows the characteristic name, description, and field structure from the Bluetooth SIG specification."
     )
 
-    @Option(name: [.customShort("c"), .long], help: "Characteristic UUID (4-char or full form).")
+    @Argument(help: "Characteristic UUID (4-char or full form).")
     var char: String
 
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
-        let code = router.runGATT(["info", "-c", char])
+        let code = router.runGATT(["info", char])
         if code != 0 { throw BlewExitCode(code) }
     }
 }

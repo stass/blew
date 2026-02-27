@@ -73,21 +73,20 @@ final class CommandRouter {
         func cmd(_ name: String) -> String { output.bold(name) }
         let lines = [
             "Available commands:",
-            "  \(cmd("scan"))        Scan for BLE devices",
-            "  \(cmd("connect"))     Connect to a device",
-            "  \(cmd("disconnect"))  Disconnect from current device",
-            "  \(cmd("status"))      Show connection status",
-            "  \(cmd("gatt"))        Inspect GATT services/characteristics",
-            "                \(cmd("svcs"))             List services",
-            "                \(cmd("tree")) [-d] [-V]   Full GATT tree",
-            "                \(cmd("chars")) -S <uuid>  List characteristics for a service",
-            "                \(cmd("desc")) -c <uuid>   List descriptors for a characteristic",
-            "                \(cmd("info")) -c <uuid>   Show SIG specification for a characteristic",
-            "  \(cmd("read"))        Read a characteristic value",
-            "  \(cmd("write"))       Write to a characteristic",
-            "  \(cmd("sub"))         Subscribe to notifications/indications",
-            "  \(cmd("help"))        Show this help",
-            "  \(cmd("quit"))/\(cmd("exit"))   Exit the REPL",
+            "  \(cmd("scan")) [-w]",
+            "  \(cmd("connect")) [<id>]",
+            "  \(cmd("disconnect"))",
+            "  \(cmd("status"))",
+            "  \(cmd("gatt")) \(cmd("svcs"))",
+            "  \(cmd("gatt")) \(cmd("tree")) [-d] [-r]",
+            "  \(cmd("gatt")) \(cmd("chars")) [-r] <service>",
+            "  \(cmd("gatt")) \(cmd("desc")) <char>",
+            "  \(cmd("gatt")) \(cmd("info")) <char>",
+            "  \(cmd("read")) [-f <fmt>] <char>",
+            "  \(cmd("write")) [-f <fmt>] [-r|-w] <char> <data>",
+            "  \(cmd("sub")) [-f <fmt>] [-d <sec>] [-c <n>] <char>",
+            "  \(cmd("help"))",
+            "  \(cmd("quit"))/\(cmd("exit"))",
         ]
         print(lines.joined(separator: "\n"))
     }
@@ -507,6 +506,7 @@ final class CommandRouter {
             return runGATTInfo(Array(args.dropFirst()))
         }
 
+
         let connectCode = ensureConnected()
         guard connectCode == 0 else { return connectCode }
 
@@ -528,7 +528,7 @@ final class CommandRouter {
 
                 case "tree":
                     let includeDescriptors = args.contains("-d") || args.contains("--descriptors")
-                    let includeValues = args.contains("-V") || args.contains("--values")
+                    let includeValues = args.contains("-r") || args.contains("--read")
                     let tree = try await manager.discoverTree(includeDescriptors: includeDescriptors)
                     for (svcIdx, service) in tree.enumerated() {
                         let svcName = BLENames.name(for: service.uuid, category: .service)
@@ -589,8 +589,9 @@ final class CommandRouter {
                     }
 
                 case "chars":
-                    guard let svcInput = parseStringOption(Array(args.dropFirst()), short: "-S", long: "--service") else {
-                        output.printError("missing --service UUID")
+                    let charsPositional = positionalArgs(Array(args.dropFirst()), optionsWithValue: [])
+                    guard let svcInput = charsPositional.first else {
+                        output.printError("missing service UUID")
                         exitCode = BlewExitCode.invalidArguments.code
                         return
                     }
@@ -603,7 +604,7 @@ final class CommandRouter {
                         return
                     case .notFound: svcUUID = svcInput
                     }
-                    let includeValues = args.contains("-V") || args.contains("--values")
+                    let includeValues = args.contains("-r") || args.contains("--read")
                     let chars = try await manager.discoverCharacteristics(forService: svcUUID)
                     if includeValues {
                         var rows: [[String]] = []
@@ -633,8 +634,9 @@ final class CommandRouter {
                     }
 
                 case "desc":
-                    guard let charInput = parseStringOption(Array(args.dropFirst()), short: "-c", long: "--char") else {
-                        output.printError("missing --char UUID")
+                    let descPositional = positionalArgs(Array(args.dropFirst()), optionsWithValue: [])
+                    guard let charInput = descPositional.first else {
+                        output.printError("missing characteristic UUID")
                         exitCode = BlewExitCode.invalidArguments.code
                         return
                     }
@@ -682,8 +684,8 @@ final class CommandRouter {
     }
 
     private func runGATTInfo(_ args: [String]) -> Int32 {
-        guard let charInput = parseStringOption(args, short: "-c", long: "--char") else {
-            output.printError("missing --char UUID")
+        guard let charInput = positionalArgs(args, optionsWithValue: []).first else {
+            output.printError("missing characteristic UUID")
             return BlewExitCode.invalidArguments.code
         }
 
@@ -733,8 +735,8 @@ final class CommandRouter {
         let connectCode = ensureConnected()
         guard connectCode == 0 else { return connectCode }
 
-        guard let charInput = parseStringOption(args, short: "-c", long: "--char") else {
-            output.printError("missing --char UUID")
+        guard let charInput = positionalArgs(args, optionsWithValue: ["-f", "--format"]).first else {
+            output.printError("missing characteristic UUID")
             return BlewExitCode.invalidArguments.code
         }
         let charUUID: String
@@ -745,7 +747,7 @@ final class CommandRouter {
             return BlewExitCode.invalidArguments.code
         case .notFound: charUUID = charInput
         }
-        let fmt = parseStringOption(args, short: "-F", long: "--format") ?? "hex"
+        let fmt = parseStringOption(args, short: "-f", long: "--format") ?? "hex"
 
         let semaphore = DispatchSemaphore(value: 0)
         var exitCode: Int32 = 0
@@ -790,10 +792,17 @@ final class CommandRouter {
         let connectCode = ensureConnected()
         guard connectCode == 0 else { return connectCode }
 
-        guard let charInput = parseStringOption(args, short: "-c", long: "--char") else {
-            output.printError("missing --char UUID")
+        let positional = positionalArgs(args, optionsWithValue: ["-f", "--format"])
+        guard positional.count >= 2 else {
+            if positional.isEmpty {
+                output.printError("missing characteristic UUID and data")
+            } else {
+                output.printError("missing data to write")
+            }
             return BlewExitCode.invalidArguments.code
         }
+        let charInput = positional[0]
+        let dataStr = positional[1]
         let charUUID: String
         switch resolveCharacteristic(charInput) {
         case .resolved(let uuid): charUUID = uuid
@@ -802,13 +811,9 @@ final class CommandRouter {
             return BlewExitCode.invalidArguments.code
         case .notFound: charUUID = charInput
         }
-        guard let dataStr = parseStringOption(args, short: "-d", long: "--data") else {
-            output.printError("missing --data value")
-            return BlewExitCode.invalidArguments.code
-        }
-        let fmt = parseStringOption(args, short: "-F", long: "--format") ?? "hex"
-        let withResponse = args.contains("-R") || args.contains("--with-response")
-        let withoutResponse = args.contains("-W") || args.contains("--without-response")
+        let fmt = parseStringOption(args, short: "-f", long: "--format") ?? "hex"
+        let withResponse = args.contains("-r") || args.contains("--with-response")
+        let withoutResponse = args.contains("-w") || args.contains("--without-response")
 
         guard let data = DataFormatter.parse(dataStr, as: fmt) else {
             output.printError("invalid data '\(dataStr)' for format '\(fmt)'")
@@ -857,8 +862,8 @@ final class CommandRouter {
         let connectCode = ensureConnected()
         guard connectCode == 0 else { return connectCode }
 
-        guard let charInput = parseStringOption(args, short: "-c", long: "--char") else {
-            output.printError("missing --char UUID")
+        guard let charInput = positionalArgs(args, optionsWithValue: ["-f", "--format", "-d", "--duration", "-c", "--count"]).first else {
+            output.printError("missing characteristic UUID")
             return BlewExitCode.invalidArguments.code
         }
         let charUUID: String
@@ -869,9 +874,9 @@ final class CommandRouter {
             return BlewExitCode.invalidArguments.code
         case .notFound: charUUID = charInput
         }
-        let fmt = parseStringOption(args, short: "-F", long: "--format") ?? "hex"
-        let duration = parseDoubleOption(args, short: "-D", long: "--duration")
-        let maxCount = parseIntOption(args, short: "-C", long: "--count")
+        let fmt = parseStringOption(args, short: "-f", long: "--format") ?? "hex"
+        let duration = parseDoubleOption(args, short: "-d", long: "--duration")
+        let maxCount = parseIntOption(args, short: "-c", long: "--count")
 
         let semaphore = DispatchSemaphore(value: 0)
         var exitCode: Int32 = 0
@@ -1025,6 +1030,22 @@ final class CommandRouter {
     }
 
     // MARK: - Argument parsing helpers
+
+    /// Collect non-flag positional tokens from args. Options listed in
+    /// `optionsWithValue` consume their following token and are skipped.
+    private func positionalArgs(_ args: [String], optionsWithValue: Set<String>) -> [String] {
+        var result: [String] = []
+        var skipNext = false
+        for arg in args {
+            if skipNext { skipNext = false; continue }
+            if arg.hasPrefix("-") {
+                if optionsWithValue.contains(arg) { skipNext = true }
+            } else {
+                result.append(arg)
+            }
+        }
+        return result
+    }
 
     private func parseStringOption(_ args: [String], short: String, long: String) -> String? {
         for (i, arg) in args.enumerated() {

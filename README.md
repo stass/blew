@@ -37,13 +37,13 @@ blew scan
 blew -n "Thingy" gatt tree
 
 # Read a characteristic (battery level)
-blew -n "Thingy" read -c 2A19 -F uint8
+blew -n "Thingy" read -f uint8 2A19
 
 # Subscribe to notifications for 10 seconds
-blew -n "Thingy" sub -c fff1 -D 10
+blew -n "Thingy" sub -d 10 fff1
 
 # Run a multi-step procedure in one invocation
-blew -n "Thingy" -x "gatt tree; read -c 2A19 -F uint8"
+blew -n "Thingy" -x "gatt tree; read -f uint8 2A19"
 
 # Start the interactive REPL
 blew
@@ -174,7 +174,7 @@ FFF0                         yes
 #### `gatt tree` — Show full GATT tree
 
 ```
-blew [global-options] gatt tree [-d] [-V]
+blew [global-options] gatt tree [-d] [-r]
 ```
 
 Prints services and their characteristics with properties (read / write / notify / indicate). Standard UUIDs show their human-readable name alongside.
@@ -192,9 +192,9 @@ Service FFF0
 | Flag | Description |
 |------|-------------|
 | `-d, --descriptors` | Also show descriptors for each characteristic. |
-| `-V` | Read and display values for all readable characteristics inline. Well-known Bluetooth SIG characteristics are decoded to their natural type (e.g. battery level as an integer, manufacturer name as a string); others are shown as hex. |
+| `-r, --read` | Read and display values for all readable characteristics inline. Well-known Bluetooth SIG characteristics are decoded to their natural type (e.g. battery level as an integer, manufacturer name as a string); others are shown as hex. |
 
-With `-V`:
+With `-r`:
 ```
 Service 180F  Battery Service
 └── 2A19  Battery Level  [read, notify]  = 85
@@ -207,42 +207,33 @@ Service 180A  Device Information
 #### `gatt chars` — List characteristics for a service
 
 ```
-blew [global-options] gatt chars -S <service-uuid> [-V]
+blew [global-options] gatt chars [-r] <service-uuid>
 ```
 
 Output columns: UUID, Name, Properties.
 
 | Flag | Description |
 |------|-------------|
-| `-S, --service <uuid>` | Service UUID to inspect. Required. |
-| `-V` | Read and display values for all readable characteristics. Adds a Value column to the table; non-readable characteristics get an empty cell. |
+| `-r, --read` | Read and display values for all readable characteristics. Adds a Value column to the table; non-readable characteristics get an empty cell. |
 
 #### `gatt desc` — List descriptors for a characteristic
 
 ```
-blew [global-options] gatt desc -c <char-uuid>
+blew [global-options] gatt desc <char-uuid>
 ```
 
 Output columns: UUID, Name.
 
-| Flag | Description |
-|------|-------------|
-| `-c, --char <uuid>` | Characteristic UUID to inspect. Required. |
-
 #### `gatt info` — Show Bluetooth SIG specification for a characteristic
 
 ```
-blew gatt info -c <char-uuid>
+blew gatt info <char-uuid>
 ```
 
 Displays the Bluetooth SIG name, description, and field-level structure for any standard characteristic UUID. Does **not** require a connected device — it reads directly from the generated characteristic database.
 
-| Flag | Description |
-|------|-------------|
-| `-c, --char <uuid>` | Characteristic UUID to look up (4-char short form or full 128-bit). Required. |
-
 ```
-$ blew gatt info -c 2A37
+$ blew gatt info 2A37
 Heart Rate Measurement (2A37)
 
 The Heart Rate Measurement characteristic is used to represent data related to a heart rate measurement.
@@ -258,7 +249,7 @@ Structure:
 Struct-typed fields (such as an embedded `Date Time`) are recursively inlined with dot-separated names:
 
 ```
-$ blew gatt info -c 2A0A
+$ blew gatt info 2A0A
 Day Date Time (2A0A)
 
 The Day Date Time characteristic is used to represent weekday, date, and time.
@@ -279,11 +270,11 @@ With `-o kv`, one record per field is emitted (for scripting).
 ```bash
 blew -n "Thingy" gatt tree
 blew -n "Thingy" gatt tree -d        # Include descriptors
-blew -n "Thingy" gatt tree -V        # Show values for readable characteristics
-blew -n "Thingy" gatt tree -dV       # Descriptors + values
-blew -n "Thingy" gatt chars -S 180F
-blew -n "Thingy" gatt chars -S 180A -V  # Show values for Device Information
-blew -n "Thingy" gatt desc -c 2A19
+blew -n "Thingy" gatt tree -r        # Read values for readable characteristics
+blew -n "Thingy" gatt tree -dr       # Descriptors + values
+blew -n "Thingy" gatt chars 180F
+blew -n "Thingy" gatt chars -r 180A  # Read values for Device Information
+blew -n "Thingy" gatt desc 2A19
 ```
 
 ---
@@ -291,15 +282,14 @@ blew -n "Thingy" gatt desc -c 2A19
 ### `read` — Read a characteristic value
 
 ```
-blew [global-options] read -c <char-uuid> [-F <format>]
+blew [global-options] read [-f <format>] <char-uuid>
 ```
 
 Reads the value of a characteristic and prints it in the requested format. Connects automatically if no connection is active.
 
 | Flag | Description |
 |------|-------------|
-| `-c, --char <uuid>` | Characteristic UUID to read. Required. |
-| `-F, --format <fmt>` | Output format (see table below). Default: `hex`. |
+| `-f, --format <fmt>` | Output format (see table below). Default: `hex`. |
 
 **Formats:**
 
@@ -316,9 +306,9 @@ Reads the value of a characteristic and prints it in the requested format. Conne
 
 **Examples:**
 ```bash
-blew -n "Thingy" read -c 2A19 -F uint8     # Battery level as integer
-blew -n "Thingy" read -c 2A29 -F utf8      # Manufacturer name string
-blew -n "Thingy" read -c fff1              # Raw characteristic as hex
+blew -n "Thingy" read -f uint8 2A19     # Battery level as integer
+blew -n "Thingy" read -f utf8 2A29      # Manufacturer name string
+blew -n "Thingy" read fff1              # Raw characteristic as hex
 ```
 
 ---
@@ -326,24 +316,22 @@ blew -n "Thingy" read -c fff1              # Raw characteristic as hex
 ### `write` — Write to a characteristic
 
 ```
-blew [global-options] write -c <char-uuid> -d <data> [-F <format>] [-R|-W]
+blew [global-options] write [-f <format>] [-r|-w] <char-uuid> <data>
 ```
 
 Writes data to a characteristic. Connects automatically if no connection is active. Write mode (with or without response) is auto-selected based on the characteristic's properties unless overridden.
 
 | Flag | Description |
 |------|-------------|
-| `-c, --char <uuid>` | Characteristic UUID to write. Required. |
-| `-d, --data <value>` | Data to write. Required. |
-| `-F, --format <fmt>` | Data format (same values as `read`). Default: `hex`. |
-| `-R, --with-response` | Force write-with-response. |
-| `-W, --without-response` | Force write-without-response. |
+| `-f, --format <fmt>` | Data format (same values as `read`). Default: `hex`. |
+| `-r, --with-response` | Force write-with-response. |
+| `-w, --without-response` | Force write-without-response. |
 
 **Examples:**
 ```bash
-blew -n "Thingy" write -c fff1 -d "deadbeef"         # Write hex bytes
-blew -n "Thingy" write -c 2A06 -d 1 -F uint8 -R      # Write uint8 with response
-blew -n "Thingy" write -c fff2 -d "hello" -F utf8    # Write a UTF-8 string
+blew -n "Thingy" write fff1 "deadbeef"           # Write hex bytes
+blew -n "Thingy" write -f uint8 -r 2A06 1        # Write uint8 with response
+blew -n "Thingy" write -f utf8 fff2 "hello"      # Write a UTF-8 string
 ```
 
 ---
@@ -351,17 +339,16 @@ blew -n "Thingy" write -c fff2 -d "hello" -F utf8    # Write a UTF-8 string
 ### `sub` — Subscribe to notifications or indications
 
 ```
-blew [global-options] sub -c <char-uuid> [-F <format>] [-D <sec>] [-C <count>] [--notify|--indicate]
+blew [global-options] sub [-f <format>] [-d <sec>] [-c <count>] [--notify|--indicate] <char-uuid>
 ```
 
 Subscribes to a characteristic and streams received values to stdout, one event per line. Connects automatically if no connection is active. Stops on `Ctrl-C`, or when a duration/count limit is reached.
 
 | Flag | Description |
 |------|-------------|
-| `-c, --char <uuid>` | Characteristic UUID to subscribe to. Required. |
-| `-F, --format <fmt>` | Value format (same values as `read`). Default: `hex`. |
-| `-D, --duration <sec>` | Stop after this many seconds. |
-| `-C, --count <n>` | Stop after receiving this many notifications. |
+| `-f, --format <fmt>` | Value format (same values as `read`). Default: `hex`. |
+| `-d, --duration <sec>` | Stop after this many seconds. |
+| `-c, --count <n>` | Stop after receiving this many notifications. |
 | `--notify` | Force notify mode. (Defined; not yet wired through — auto mode is used.) |
 | `--indicate` | Force indicate mode. (Defined; not yet wired through — auto mode is used.) |
 
@@ -369,10 +356,10 @@ With `--out kv`, each line includes `ts=`, `char=`, and `value=` fields.
 
 **Examples:**
 ```bash
-blew -n "Thingy" sub -c fff1                      # Stream indefinitely (Ctrl-C to stop)
-blew -n "Thingy" sub -c fff1 -F uint16le -D 30   # 30-second capture as uint16
-blew -n "Thingy" -o kv sub -c 2A37 -C 100        # Capture 100 events, kv output
-blew -n "Thingy" -o kv sub -c fff1 >> data.log   # Append to a log file
+blew -n "Thingy" sub fff1                        # Stream indefinitely (Ctrl-C to stop)
+blew -n "Thingy" sub -f uint16le -d 30 fff1      # 30-second capture as uint16
+blew -n "Thingy" -o kv sub -c 100 2A37           # Capture 100 events, kv output
+blew -n "Thingy" -o kv sub fff1 >> data.log      # Append to a log file
 ```
 
 ---
@@ -399,10 +386,10 @@ The REPL provides:
 | `connect [<id>]` | Connect to a device |
 | `disconnect` | Disconnect |
 | `status` | Show connection status |
-| `gatt svcs\|tree\|chars\|desc` | GATT inspection |
-| `read -c <uuid> [-F <fmt>]` | Read a characteristic |
-| `write -c <uuid> -d <data> [-F <fmt>]` | Write to a characteristic |
-| `sub -c <uuid> [options]` | Subscribe to notifications (Ctrl-C to stop) |
+| `gatt svcs\|tree\|chars\|desc\|info` | GATT inspection |
+| `read [-f <fmt>] <uuid>` | Read a characteristic |
+| `write [-f <fmt>] [-r\|-w] <uuid> <data>` | Write to a characteristic |
+| `sub [-f <fmt>] [-d <s>] [-c <n>] <uuid>` | Subscribe to notifications (Ctrl-C to stop) |
 | `help` | Show available commands |
 | `quit` / `exit` | Exit the REPL |
 
@@ -422,10 +409,10 @@ Service 180F  Battery Service
 Service 180A  Device Information
 └── 2A29  Manufacturer Name String  [read]
 
-blew> read -c 2A19 -F uint8
+blew> read -f uint8 2A19
 87
 
-blew> sub -c 2A19 -F uint8 -C 5
+blew> sub -f uint8 -c 5 2A19
 87
 86
 86
@@ -442,7 +429,7 @@ blew> quit
 The `-x` / `--exec` flag runs a semicolon-separated sequence of commands in a single process, sharing one connection lifecycle. Commands are parsed identically to the REPL. The first command that requires a connection triggers an automatic connect; subsequent commands reuse it.
 
 ```bash
-blew -n "Thingy" -x "gatt tree; read -c 2A19 -F uint8"
+blew -n "Thingy" -x "gatt tree; read -f uint8 2A19"
 ```
 
 **Error handling:**
@@ -452,10 +439,10 @@ blew -n "Thingy" -x "gatt tree; read -c 2A19 -F uint8"
 
 ```bash
 # Keep going after errors, collect exit code
-blew -n "Thingy" -k -x "read -c fff1; read -c fff9"
+blew -n "Thingy" -k -x "read fff1; read fff9"
 
 # Preview what would run
-blew -n "Thingy" --dry-run -x "gatt tree; read -c 2A19 -F uint8"
+blew -n "Thingy" --dry-run -x "gatt tree; read -f uint8 2A19"
 ```
 
 ---
@@ -501,7 +488,7 @@ ts=2026-02-21T12:34:56.789Z char=fff1 value=deadbeef
 The `name=` field is included when the UUID is a known Bluetooth SIG UUID. It is omitted for custom or vendor UUIDs.
 
 ```bash
-blew -n "Thingy" -o kv sub -c fff1 -D 60 | awk -F'value=' '{print $2}'
+blew -n "Thingy" -o kv sub -d 60 fff1 | awk -F'value=' '{print $2}'
 ```
 
 ---
@@ -528,7 +515,7 @@ blew -n "Sensor" -S 180F -r -65 -t 10 scan
 
 ### Capture sensor data to a file
 ```bash
-blew -n "Sensor" -o kv sub -c fff1 -F uint16le -D 300 >> sensor.log
+blew -n "Sensor" -o kv sub -f uint16le -d 300 fff1 >> sensor.log
 ```
 
 ### Quick GATT audit in one line
@@ -538,18 +525,18 @@ blew -n "Thingy" gatt tree -d
 
 ### Inspect device info characteristics with values
 ```bash
-blew -n "Thingy" gatt chars -S 180A -V
+blew -n "Thingy" gatt chars -r 180A
 ```
 
 ### Read with scripting
 ```bash
-value=$(blew -n "Thingy" read -c 2A19 -F uint8)
+value=$(blew -n "Thingy" read -f uint8 2A19)
 echo "Battery: ${value}%"
 ```
 
 ### Use `--pick only` to guard against accidental multi-match
 ```bash
-blew -n "Thingy" -p only read -c 2A19 -F uint8
+blew -n "Thingy" -p only read -f uint8 2A19
 # Errors out if more than one "Thingy" is nearby
 ```
 

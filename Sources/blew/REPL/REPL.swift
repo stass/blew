@@ -68,7 +68,7 @@ final class REPL {
             "gatt", "read", "write", "sub",
             "help", "quit", "exit",
         ]
-        let gattSubs = ["svcs", "tree", "chars", "desc"]
+        let gattSubs = ["svcs", "tree", "chars", "desc", "info"]
         let formats = ["hex", "utf8", "base64", "uint8", "uint16le", "uint32le", "float32le", "raw"]
 
         ln.setCompletionCallback { [weak self] buffer in
@@ -121,50 +121,69 @@ final class REPL {
                         .map { "gatt \($0) " }
                 }
 
-                // gatt chars -S <service-uuid>
+                // gatt chars [-V] <service-uuid>: complete service UUID positionally
                 if sub == "chars" {
-                    if buffer.hasSuffix("-S ") || buffer.hasSuffix("--service ") {
+                    let afterSub = gattParts.count > 1 ? String(gattParts[1]) : ""
+                    // Find last non-flag token (the partial service UUID)
+                    let tokens = afterSub.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+                    // Skip -V flag, look for first non-flag token
+                    let partial = tokens.last.flatMap { $0.hasPrefix("-") ? nil : $0 } ?? ""
+                    if partial.isEmpty && buffer.hasSuffix(" ") {
                         return self.router.manager.knownServiceUUIDs()
                             .map { "\(buffer)\($0)" }
                     }
-                    let flagPrefix = self.completionUUIDAfterFlag(
-                        buffer: buffer,
-                        flags: ["-S", "--service"],
-                        candidates: self.router.manager.knownServiceUUIDs()
-                    )
-                    return flagPrefix
+                    if !partial.isEmpty {
+                        let prefix = String(buffer.dropLast(partial.count))
+                        return self.router.manager.knownServiceUUIDs()
+                            .filter { $0.lowercased().hasPrefix(partial.lowercased()) }
+                            .map { "\(prefix)\($0)" }
+                    }
+                    return []
                 }
 
-                // gatt desc -c <char-uuid>
+                // gatt desc <char-uuid>: complete characteristic UUID positionally
                 if sub == "desc" {
-                    if buffer.hasSuffix("-c ") || buffer.hasSuffix("--char ") {
+                    let afterSub = gattParts.count > 1 ? String(gattParts[1]) : ""
+                    let tokens = afterSub.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+                    let partial = tokens.last.flatMap { $0.hasPrefix("-") ? nil : $0 } ?? ""
+                    if partial.isEmpty && buffer.hasSuffix(" ") {
                         return self.router.manager.knownCharacteristicUUIDs()
                             .map { "\(buffer)\($0)" }
                     }
-                    return self.completionUUIDAfterFlag(
-                        buffer: buffer,
-                        flags: ["-c", "--char"],
-                        candidates: self.router.manager.knownCharacteristicUUIDs()
-                    )
+                    if !partial.isEmpty {
+                        let prefix = String(buffer.dropLast(partial.count))
+                        return self.router.manager.knownCharacteristicUUIDs()
+                            .filter { $0.lowercased().hasPrefix(partial.lowercased()) }
+                            .map { "\(prefix)\($0)" }
+                    }
+                    return []
                 }
 
+                // gatt info <char-uuid>: no runtime UUIDs needed, return nothing
                 return []
             }
 
-            // --- format completion ---
-            if ["-F", "--format"].contains(where: { buffer.hasSuffix($0 + " ") }) {
+            // --- format completion after -f ---
+            if ["-f", "--format"].contains(where: { buffer.hasSuffix($0 + " ") }) {
                 return formats.map { "\(buffer)\($0)" }
             }
 
-            // --- read / write / sub: complete -c <char-uuid> ---
-            if ["read", "write", "sub"].contains(cmd) {
-                if buffer.hasSuffix("-c ") || buffer.hasSuffix("--char ") {
-                    return self.router.manager.knownCharacteristicUUIDs()
-                        .map { "\(buffer)\($0)" }
-                }
-                return self.completionUUIDAfterFlag(
+            // --- read / write / sub: complete positional char UUID ---
+            if ["read", "sub"].contains(cmd) {
+                return self.completionPositionalUUID(
                     buffer: buffer,
-                    flags: ["-c", "--char"],
+                    rest: rest,
+                    optionsWithValue: ["-f", "--format"],
+                    candidates: self.router.manager.knownCharacteristicUUIDs()
+                )
+            }
+
+            if cmd == "write" {
+                // First positional is char, second is data — complete char UUID
+                return self.completionPositionalUUID(
+                    buffer: buffer,
+                    rest: rest,
+                    optionsWithValue: ["-f", "--format"],
                     candidates: self.router.manager.knownCharacteristicUUIDs()
                 )
             }
@@ -173,18 +192,46 @@ final class REPL {
         }
     }
 
-    /// Given a buffer like `read -c 2A0` and a list of UUID candidates,
-    /// returns completions where the last token (after one of the given flags) is
-    /// extended to full matching UUIDs.
-    private func completionUUIDAfterFlag(buffer: String, flags: [String], candidates: [String]) -> [String] {
-        let tokens = buffer.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-        guard tokens.count >= 2 else { return [] }
-        let lastFlag = tokens[tokens.count - 2]
-        guard flags.contains(lastFlag) else { return [] }
-        let partial = tokens.last!.lowercased()
-        let prefix = buffer.hasSuffix(partial) ? String(buffer.dropLast(partial.count)) : buffer + " "
-        return candidates
-            .filter { $0.lowercased().hasPrefix(partial) }
-            .map { "\(prefix)\($0)" }
+    /// Complete the first positional (non-flag) argument in a command.
+    /// Flags listed in `optionsWithValue` and their following token are skipped.
+    private func completionPositionalUUID(
+        buffer: String,
+        rest: String,
+        optionsWithValue: Set<String>,
+        candidates: [String]
+    ) -> [String] {
+        let tokens = rest.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+
+        // Collect positional tokens (skip flags and their values)
+        var positionals: [String] = []
+        var skipNext = false
+        for token in tokens {
+            if skipNext { skipNext = false; continue }
+            if token.hasPrefix("-") {
+                if optionsWithValue.contains(token) { skipNext = true }
+            } else {
+                positionals.append(token)
+            }
+        }
+
+        // If buffer ends with a space we're starting a new token — offer candidates
+        // only if no positional has been given yet
+        if buffer.hasSuffix(" ") {
+            if positionals.isEmpty {
+                return candidates.map { "\(buffer)\($0)" }
+            }
+            return []
+        }
+
+        // Otherwise, the last positional is partial — complete it
+        if positionals.count == 1 {
+            let partial = positionals[0]
+            let prefix = String(buffer.dropLast(partial.count))
+            return candidates
+                .filter { $0.lowercased().hasPrefix(partial.lowercased()) }
+                .map { "\(prefix)\($0)" }
+        }
+
+        return []
     }
 }

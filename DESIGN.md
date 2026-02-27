@@ -221,17 +221,17 @@ Each subcommand is a thin `ParsableCommand` that:
 The subcommand list:
 
 ```
-scan  [-w/--watch]
+scan    [-w/--watch]
 connect [<device-id>]
 gatt
   svcs
-  tree   [-d/--descriptors]  [-V]
-  chars  -S <service-uuid>   [-V]
-  desc   -c <char-uuid>
-  info   -c <char-uuid>
-read     -c <char-uuid>  [-F <fmt>]
-write    -c <char-uuid>  -d <data>  [-F <fmt>]  [-R|-W]
-sub      -c <char-uuid>  [-F <fmt>] [-D <sec>]  [-C <count>]
+  tree   [-d/--descriptors]  [-r/--read]
+  chars  [-r/--read]  <service-uuid>
+  desc   <char-uuid>
+  info   <char-uuid>
+read     [-f <fmt>]  <char-uuid>
+write    [-f <fmt>]  [-r|-w]  <char-uuid>  <data>
+sub      [-f <fmt>]  [-d <sec>]  [-c <count>]  <char-uuid>
 ```
 
 `gatt info` does not require a connected device. It looks up the UUID in the generated `GATTCharacteristicDB` and prints the Bluetooth SIG specification: name, description, and field structure.
@@ -333,11 +333,11 @@ Tab completion is registered via `LineNoise.setCompletionCallback`. The callback
 |---------|-------------|
 | First word | All command names |
 | `connect <partial>` | Matching device IDs from last scan (by name or UUID substring) |
-| `gatt <partial>` | `svcs`, `tree`, `chars`, `desc` |
-| `gatt chars -S <partial>` | Known service UUIDs (prefix match) |
-| `gatt desc -c <partial>` | Known characteristic UUIDs (prefix match) |
-| `read/write/sub -c <partial>` | Known characteristic UUIDs (prefix match) |
-| After `-F`/`--format` | All format names |
+| `gatt <partial>` | `svcs`, `tree`, `chars`, `desc`, `info` |
+| `gatt chars [flags] <partial>` | Known service UUIDs (prefix match on first positional) |
+| `gatt desc <partial>` | Known characteristic UUIDs (prefix match on first positional) |
+| `read/write/sub [flags] <partial>` | Known characteristic UUIDs (prefix match on first positional) |
+| After `-f`/`--format` | All format names |
 
 ### 4.9 GATTDecoder and GATTCharacteristicDB
 
