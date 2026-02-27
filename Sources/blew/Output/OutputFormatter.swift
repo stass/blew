@@ -110,14 +110,16 @@ struct OutputFormatter {
         return lines.joined(separator: "\n")
     }
 
-    // MARK: - Private helpers
+    // MARK: - Helpers
 
     // When we bold a header string, we add ANSI escape sequences that are invisible
     // but take up bytes. padding(toLength:) counts bytes, not visible characters,
     // so we need to widen the target length by the number of escape bytes added.
-    private func boldPadding(_ text: String) -> Int {
+    // bold() wraps with \e[1m (4 bytes) + \e[0m (4 bytes) = 8 extra bytes.
+    var boldPaddingWidth: Int {
         guard isTTY && format == .text else { return 0 }
-        // bold() wraps with \e[1m (4 bytes) + \e[0m (4 bytes) = 8 extra bytes
         return 8
     }
+
+    private func boldPadding(_ text: String) -> Int { boldPaddingWidth }
 }

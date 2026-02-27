@@ -607,7 +607,13 @@ final class CommandRouter {
                     let includeValues = args.contains("-r") || args.contains("--read")
                     let chars = try await manager.discoverCharacteristics(forService: svcUUID)
                     if includeValues {
-                        var rows: [[String]] = []
+                        struct CharRow {
+                            let uuid: String
+                            let name: String
+                            let properties: String
+                            let value: String
+                        }
+                        var charRows: [CharRow] = []
                         for char in chars {
                             let name = BLENames.name(for: char.uuid, category: .characteristic) ?? ""
                             var value = ""
@@ -622,9 +628,48 @@ final class CommandRouter {
                                     value = "(read error)"
                                 }
                             }
-                            rows.append([char.uuid, name, char.properties.joined(separator: ","), value])
+                            charRows.append(CharRow(uuid: char.uuid, name: name, properties: char.properties.joined(separator: ","), value: value))
                         }
-                        output.printTable(headers: ["UUID", "Name", "Properties", "Value"], rows: rows)
+                        if output.format == .kv {
+                            output.printTable(
+                                headers: ["UUID", "Name", "Properties", "Value"],
+                                rows: charRows.map { [$0.uuid, $0.name, $0.properties, $0.value] }
+                            )
+                        } else {
+                            let headers = ["UUID", "Name", "Properties", "Value"]
+                            let uuidW  = charRows.map { $0.uuid.count }.max().map { max($0, headers[0].count) } ?? headers[0].count
+                            let nameW  = charRows.map { $0.name.count }.max().map { max($0, headers[1].count) } ?? headers[1].count
+                            let propsW = charRows.map { $0.properties.count }.max().map { max($0, headers[2].count) } ?? headers[2].count
+                            let headerLine = [
+                                output.bold(headers[0]).padding(toLength: uuidW  + output.boldPaddingWidth, withPad: " ", startingAt: 0),
+                                output.bold(headers[1]).padding(toLength: nameW  + output.boldPaddingWidth, withPad: " ", startingAt: 0),
+                                output.bold(headers[2]).padding(toLength: propsW + output.boldPaddingWidth, withPad: " ", startingAt: 0),
+                                output.bold(headers[3]),
+                            ].joined(separator: "  ")
+                            let sepWidth = uuidW + 2 + nameW + 2 + propsW + 2 + headers[3].count
+                            output.print(headerLine)
+                            output.print(output.dim(String(repeating: "─", count: sepWidth)))
+                            let valueIndent = String(repeating: " ", count: uuidW + 2 + nameW + 2 + propsW + 2)
+                            for row in charRows {
+                                let parts = row.value.components(separatedBy: " | ")
+                                let rowLine = [
+                                    row.uuid.padding(toLength: uuidW,  withPad: " ", startingAt: 0),
+                                    row.name.padding(toLength: nameW,  withPad: " ", startingAt: 0),
+                                    row.properties.padding(toLength: propsW, withPad: " ", startingAt: 0),
+                                ].joined(separator: "  ")
+                                if parts.count > 1 {
+                                    output.print(rowLine)
+                                    for part in parts {
+                                        let (label, val) = Self.splitFieldPart(part)
+                                        output.print(output.dim(valueIndent + label + ": ") + val)
+                                    }
+                                } else {
+                                    output.print(parts.count == 1 && !row.value.isEmpty
+                                        ? rowLine + "  " + row.value
+                                        : rowLine)
+                                }
+                            }
+                        }
                     } else {
                         let rows = chars.map { char -> [String] in
                             let name = BLENames.name(for: char.uuid, category: .characteristic) ?? ""
