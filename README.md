@@ -635,11 +635,11 @@ blew -i F3C2A1B0-... periph clone --save hr-monitor.json
 
 #### REPL-only periph commands
 
-In the REPL and `--exec` mode, additional `periph` subcommands are available after `periph adv` or `periph clone` has been run:
+In REPL and `--exec` mode, `periph adv` and `periph clone` run in two phases. The startup phase (configure + start advertising) is synchronous and confirms the peripheral came up. Once advertising is confirmed, the event loop runs as a background task and the prompt is returned immediately. This makes `periph stop`, `periph set`, and `periph notify` usable in the same session:
 
 | Command | Description |
 |---------|-------------|
-| `periph stop` | Stop advertising. |
+| `periph stop` | Stop advertising and cancel the background event task. |
 | `periph set [-f <fmt>] <char> <val>` | Update a characteristic's stored value. |
 | `periph notify [-f <fmt>] <char> <val>` | Update value and push a notification to all subscribers. |
 | `periph status` | Show advertising state, service/characteristic counts, subscriber count. |
@@ -647,10 +647,16 @@ In the REPL and `--exec` mode, additional `periph` subcommands are available aft
 ```
 blew> periph adv --config device.json
 Advertising "My Device" [180F]
-[12:34:56] central A1B2C3 connected
-
+Advertising in background. Use 'periph stop' to stop.
 blew> periph notify -f uint8 2A19 42
 blew> periph stop
+Stopped advertising.
+```
+
+In `--exec` mode the same non-blocking behaviour applies, enabling scripts like:
+
+```bash
+blew --name "My Device" --exec "periph adv --config device.json; periph set 2A19 ff; periph notify 2A19 ff"
 ```
 
 ---
@@ -689,12 +695,3 @@ blew -n "Thingy" -p only read -f uint8 2A19
 # Errors out if more than one "Thingy" is nearby
 ```
 
----
-
-## Roadmap
-
-| Version | Highlights |
-|---------|-----------|
-| **v1.0** | Scan, connect, GATT tree, read, write, subscribe, `--exec` scripting, interactive REPL, Bluetooth SIG UUID human-readable names, `scan --watch` live updates |
-| **v1.5** | RSSI monitoring, improved tab completion, custom/vendor UUID name mappings |
-| **v2.0 (current)** | Peripheral mode — `periph adv` GATT server, `periph clone` real device mirroring, interactive REPL peripheral commands |

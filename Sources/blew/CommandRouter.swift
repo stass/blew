@@ -5,12 +5,15 @@ final class CommandRouter {
     let globals: GlobalOptions
     let manager: BLECentral
     let output: OutputFormatter
+    let isInteractiveMode: Bool
     private(set) var lastScanResults: [DiscoveredDevice] = []
+    private var backgroundPeriphTask: Task<Void, Never>?
 
-    init(globals: GlobalOptions, manager: BLECentral? = nil) {
+    init(globals: GlobalOptions, manager: BLECentral? = nil, isInteractiveMode: Bool = false) {
         self.globals = globals
         self.manager = manager ?? BLECentral.shared
         self.output = OutputFormatter(format: globals.out, verbosity: globals.verbose)
+        self.isInteractiveMode = isInteractiveMode
     }
 
     /// Execute a semicolon-separated script string. Returns exit code.
@@ -1313,18 +1316,21 @@ extension CommandRouter {
         }
 
         let peripheral = BLEPeripheral.shared
-        let semaphore = DispatchSemaphore(value: 0)
-        var exitCode: Int32 = 0
+        backgroundPeriphTask?.cancel()
+        backgroundPeriphTask = nil
 
-        let task = Task {
-            defer { semaphore.signal() }
+        // Phase 1: configure + startAdvertising — always blocking to confirm success.
+        let startSemaphore = DispatchSemaphore(value: 0)
+        var startExitCode: Int32 = 0
+
+        let startTask = Task {
+            defer { startSemaphore.signal() }
             do {
                 let servicesWithChars = services.filter { !$0.characteristics.isEmpty }
                 if !servicesWithChars.isEmpty {
                     output.printInfo("configuring \(servicesWithChars.count) service(s)...")
                     try await peripheral.configure(services: servicesWithChars)
 
-                    // Apply initial values from config
                     for (uuid, data) in initialValues {
                         try? peripheral.updateValue(data, forCharacteristic: uuid)
                     }
@@ -1332,33 +1338,55 @@ extension CommandRouter {
 
                 output.printInfo("starting advertising as \"\(advName)\"...")
                 try await peripheral.startAdvertising(name: advName, serviceUUIDs: serviceUUIDs)
-
-                // Print summary
                 printPeriphSummary(name: advName, services: services, serviceUUIDs: serviceUUIDs)
+            } catch is CancellationError {
+                // handled below
+            } catch let error as BLEError {
+                output.printError(error.localizedDescription)
+                startExitCode = error.exitCode
+            } catch {
+                output.printError("\(error)")
+                startExitCode = BlewExitCode.operationFailed.code
+            }
+        }
 
-                // Stream events until cancelled
+        switch waitInterruptible(startTask, semaphore: startSemaphore, timeout: globals.timeout ?? 15.0) {
+        case .interrupted:
+            peripheral.stopAdvertising()
+            return 130
+        case .timedOut:
+            output.printError("advertising failed to start (timed out)")
+            return BlewExitCode.timeout.code
+        case .completed:
+            if startExitCode != 0 { return startExitCode }
+        }
+
+        // Phase 2: event loop — background in interactive mode, blocking in CLI mode.
+        if isInteractiveMode {
+            backgroundPeriphTask = Task {
+                let eventStream = peripheral.events()
+                for await event in eventStream {
+                    printPeriphEvent(event)
+                }
+            }
+            output.print("Advertising in background. Use 'periph stop' to stop.")
+            return 0
+        } else {
+            let semaphore = DispatchSemaphore(value: 0)
+            let eventTask = Task {
+                defer { semaphore.signal() }
                 let eventStream = peripheral.events()
                 for await event in eventStream {
                     printPeriphEvent(event)
                     if Task.isCancelled { break }
                 }
-            } catch is CancellationError {
-                // handled below
-            } catch let error as BLEError {
-                output.printError(error.localizedDescription)
-                exitCode = error.exitCode
-            } catch {
-                output.printError("\(error)")
-                exitCode = BlewExitCode.operationFailed.code
             }
+            if case .interrupted = waitInterruptible(eventTask, semaphore: semaphore) {
+                peripheral.stopAdvertising()
+                output.print("Stopped advertising.")
+            }
+            return 0
         }
-
-        if case .interrupted = waitInterruptible(task, semaphore: semaphore) {
-            peripheral.stopAdvertising()
-            output.print("Stopped advertising.")
-            exitCode = 0
-        }
-        return exitCode
     }
 
     func runPeriphClone(_ args: [String]) -> Int32 {
@@ -1454,11 +1482,15 @@ extension CommandRouter {
         // Now advertise as the clone
         let serviceUUIDs = clonedServices.map { $0.uuid }
         let peripheral = BLEPeripheral.shared
-        let semaphore = DispatchSemaphore(value: 0)
-        var exitCode: Int32 = 0
+        backgroundPeriphTask?.cancel()
+        backgroundPeriphTask = nil
 
-        let task = Task {
-            defer { semaphore.signal() }
+        // Phase 1: configure + startAdvertising — always blocking to confirm success.
+        let startSemaphore = DispatchSemaphore(value: 0)
+        var startExitCode: Int32 = 0
+
+        let startTask = Task {
+            defer { startSemaphore.signal() }
             do {
                 output.printInfo("configuring \(clonedServices.count) cloned service(s)...")
                 try await peripheral.configure(services: clonedServices)
@@ -1469,34 +1501,61 @@ extension CommandRouter {
 
                 try await peripheral.startAdvertising(name: clonedName, serviceUUIDs: serviceUUIDs)
                 printPeriphSummary(name: clonedName, services: clonedServices, serviceUUIDs: serviceUUIDs)
+            } catch is CancellationError {
+                // handled below
+            } catch let error as BLEError {
+                output.printError(error.localizedDescription)
+                startExitCode = error.exitCode
+            } catch {
+                output.printError("\(error)")
+                startExitCode = BlewExitCode.operationFailed.code
+            }
+        }
 
+        switch waitInterruptible(startTask, semaphore: startSemaphore, timeout: globals.timeout ?? 15.0) {
+        case .interrupted:
+            peripheral.stopAdvertising()
+            return 130
+        case .timedOut:
+            output.printError("advertising failed to start (timed out)")
+            return BlewExitCode.timeout.code
+        case .completed:
+            if startExitCode != 0 { return startExitCode }
+        }
+
+        // Phase 2: event loop — background in interactive mode, blocking in CLI mode.
+        if isInteractiveMode {
+            backgroundPeriphTask = Task {
+                let eventStream = peripheral.events()
+                for await event in eventStream {
+                    printPeriphEvent(event)
+                }
+            }
+            output.print("Advertising in background. Use 'periph stop' to stop.")
+            return 0
+        } else {
+            let semaphore = DispatchSemaphore(value: 0)
+            let eventTask = Task {
+                defer { semaphore.signal() }
                 let eventStream = peripheral.events()
                 for await event in eventStream {
                     printPeriphEvent(event)
                     if Task.isCancelled { break }
                 }
-            } catch is CancellationError {
-                // handled
-            } catch let error as BLEError {
-                output.printError(error.localizedDescription)
-                exitCode = error.exitCode
-            } catch {
-                output.printError("\(error)")
-                exitCode = BlewExitCode.operationFailed.code
             }
+            if case .interrupted = waitInterruptible(eventTask, semaphore: semaphore) {
+                peripheral.stopAdvertising()
+                output.print("Stopped advertising.")
+            }
+            return 0
         }
-
-        if case .interrupted = waitInterruptible(task, semaphore: semaphore) {
-            peripheral.stopAdvertising()
-            output.print("Stopped advertising.")
-            exitCode = 0
-        }
-        return exitCode
     }
 
     func runPeriphStop(_ args: [String]) -> Int32 {
+        backgroundPeriphTask?.cancel()
+        backgroundPeriphTask = nil
         BLEPeripheral.shared.stopAdvertising()
-        output.printInfo("advertising stopped")
+        output.print("Stopped advertising.")
         return 0
     }
 
@@ -1593,6 +1652,13 @@ extension CommandRouter {
         }
     }
 
+    /// Write an event line that is safe to call while the terminal may be in raw mode
+    /// (OPOST disabled by LineNoise). \r moves to column 0, \033[K erases any partial
+    /// prompt or typed input on that line, and \r\n ends with a proper newline.
+    private func printLive(_ text: String) {
+        FileHandle.standardError.write(Data("\r\u{1B}[K\(text)\r\n".utf8))
+    }
+
     private func printPeriphEvent(_ event: PeripheralEvent) {
         let ts = timeStamp()
         switch output.format {
@@ -1609,18 +1675,24 @@ extension CommandRouter {
                     output.printError("[\(ts)] service \(uuid) add failed: \(error)")
                 }
             case .centralConnected(let id):
-                output.print("[\(ts)] central \(shortId(id)) connected")
+                let line = "[\(ts)] central \(shortId(id)) connected"
+                isInteractiveMode ? printLive(line) : output.print(line)
             case .centralDisconnected(let id):
-                output.print("[\(ts)] central \(shortId(id)) disconnected")
+                let line = "[\(ts)] central \(shortId(id)) disconnected"
+                isInteractiveMode ? printLive(line) : output.print(line)
             case .readRequest(let id, let uuid):
-                output.print("[\(ts)] read \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))")
+                let line = "[\(ts)] read \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))"
+                isInteractiveMode ? printLive(line) : output.print(line)
             case .writeRequest(let id, let uuid, let value):
                 let hex = DataFormatter.format(value, as: "hex")
-                output.print("[\(ts)] write \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id)) <- \(hex)")
+                let line = "[\(ts)] write \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id)) <- \(hex)"
+                isInteractiveMode ? printLive(line) : output.print(line)
             case .subscribed(let id, let uuid):
-                output.print("[\(ts)] subscribe \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))")
+                let line = "[\(ts)] subscribe \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))"
+                isInteractiveMode ? printLive(line) : output.print(line)
             case .unsubscribed(let id, let uuid):
-                output.print("[\(ts)] unsubscribe \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))")
+                let line = "[\(ts)] unsubscribe \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))"
+                isInteractiveMode ? printLive(line) : output.print(line)
             case .notificationSent(let uuid, let count):
                 output.printInfo("[\(ts)] notification sent on \(uuid) to \(count) subscriber(s)")
             }

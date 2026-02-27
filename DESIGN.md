@@ -282,14 +282,21 @@ periph
   clone  [-o/--save <file>]
 ```
 
-`periph adv` starts advertising and hosts a GATT server until Ctrl-C. `-n`/`--name` and `-S`/`--service` are `periph adv`-specific options placed after the subcommand name, not global options. `periph clone` connects to a real device using the standard central mode (global device-targeting options before the subcommand name), snapshots the full GATT tree with initial values, disconnects, then starts advertising as the clone. Both subcommands accept a `--config` / `--save` JSON file for persistence.
+`periph adv` and `periph clone` each run in two phases:
 
-Additional `periph` subcommands available in REPL and `--exec` mode only:
+1. **Startup phase** (always blocking): configure the GATT server and call `startAdvertising`. Waits synchronously to confirm the peripheral came up successfully.
+2. **Event-loop phase**: stream read/write/subscription events to stdout.
+
+In CLI mode (ArgumentParser subcommand), phase 2 blocks until Ctrl-C — the process exits when advertising stops. In REPL and `--exec` mode (`isInteractiveMode == true`), phase 2 runs as a stored background `Task` and the prompt (or script) continues immediately. `periph stop` cancels that task and stops advertising.
+
+`-n`/`--name` and `-S`/`--service` are `periph adv`-specific options placed after the subcommand name, not global options. `periph clone` uses global device-targeting options (`--id`, `--name`, `--service`) to identify the target device. Both subcommands accept a `--config` / `--save` JSON file for persistence.
+
+Additional `periph` subcommands available in REPL and `--exec` mode (usable after `periph adv` or `periph clone` returns the prompt):
 
 ```
-periph stop                             — stop advertising
+periph stop                             — cancel background event task, stop advertising
 periph set  [-f <fmt>]  <char>  <val>  — update characteristic value in store
-periph notify [-f <fmt>] <char> <val>  — update value and push notification
+periph notify [-f <fmt>] <char> <val>  — update value and push notification to subscribers
 periph status                          — show advertising state
 ```
 

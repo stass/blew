@@ -10,7 +10,7 @@ final class REPL {
 
     init(globals: GlobalOptions) {
         self.globals = globals
-        self.router = CommandRouter(globals: globals)
+        self.router = CommandRouter(globals: globals, isInteractiveMode: true)
         self.ln = LineNoise()
         let configDir = NSHomeDirectory() + "/.config/blew"
         self.historyPath = configDir + "/history"
@@ -26,14 +26,15 @@ final class REPL {
         while true {
             do {
                 let line = try ln.getLine(prompt: "blew> ")
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                guard !trimmed.isEmpty else { continue }
 
                 // linenoise-swift doesn't write a newline when Enter is pressed (OPOST
                 // is disabled in raw mode, so \n ≠ \r\n). Write one now while the
                 // terminal is back in cooked mode so the cursor lands on a fresh line
                 // before any command output (or the next prompt) is printed.
                 FileHandle.standardOutput.write(Data("\n".utf8))
+
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty else { continue }
 
                 ln.addHistory(trimmed)
 

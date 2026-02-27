@@ -35,7 +35,7 @@ struct Blew: ParsableCommand {
         installSignalHandlers()
 
         if let execString = globals.exec {
-            let router = CommandRouter(globals: globals)
+            let router = CommandRouter(globals: globals, isInteractiveMode: true)
             let code = router.executeScript(execString)
             cleanupBeforeExit()
             if code != 0 {
