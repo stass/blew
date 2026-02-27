@@ -516,7 +516,9 @@ blew -n "Thingy" -o kv sub -d 60 fff1 | awk -F'value=' '{print $2}'
 
 `periph` turns the Mac into a virtual BLE peripheral that nearby devices can connect to, read/write, and subscribe to.
 
-> **CoreBluetooth peripheral limitations:** Only the local device name and service UUIDs can be advertised. Manufacturer data and other ADV payload fields are not settable from the peripheral API. ADV interval, TX power, and connection parameters are OS-controlled. Standard Bluetooth SIG service UUIDs (e.g. `180F`, `180D`) cannot be emulated on macOS: the short form is rejected by `CBPeripheralManager`, and the full 128-bit Bluetooth Base UUID form is accepted but not normalised internally, so clients do not recognise it as the standard service. Use custom 128-bit UUIDs for all peripheral services.
+> **CoreBluetooth peripheral limitations:** Only the local device name and service UUIDs can be advertised. Manufacturer data and other ADV payload fields are not settable from the peripheral API. ADV interval, TX power, and connection parameters are OS-controlled.
+>
+> Most standard Bluetooth SIG service UUIDs work in short form (e.g. `180D`, `1809`, `181A`). However, services that macOS itself exposes as a peripheral are blocked in short form — `CBPeripheralManager` rejects `1800` (Generic Access), `1801` (Generic Attribute), `1805` (Current Time), `180A` (Device Information), `180F` (Battery), `1812` (HID), and `181E` (Bond Management) with "The specified UUID is not allowed for this operation." The full 128-bit Bluetooth Base UUID form (e.g. `0000180F-0000-1000-8000-00805F9B34FB`) bypasses the check but registers as a raw 128-bit UUID, so centrals will not recognise it as the standard service.
 
 #### `periph adv` — Advertise and host a GATT server
 
@@ -577,11 +579,10 @@ Example config files are provided in the [`Examples/`](Examples/) directory:
 
 | File | Description |
 |------|-------------|
-| `battery.json` | Battery-like service — readable/notifiable level characteristic, initial value 100% |
-| `heart-rate.json` | Heart-rate-like service — notify measurement, read body sensor location, write control point; plus a device-info service |
-| `custom-sensor.json` | Vendor sensor — read/notify value, read/write config register, write-only command endpoint |
-
-> **Note:** Standard Bluetooth SIG service UUIDs cannot be emulated on macOS — see the peripheral limitations note above. All example files use custom 128-bit UUIDs.
+| `health-thermometer.json` | Health Thermometer (`1809`) — indicate temperature measurement (2A1C), read temperature type (2A1D), read/write/notify measurement interval (2A21) |
+| `environmental-sensing.json` | Environmental Sensing (`181A`) — read/notify temperature (2A6E), humidity (2A6F), and pressure (2A6D) |
+| `blood-pressure.json` | Blood Pressure (`1810`) — indicate measurement (2A35), read feature flags (2A49) |
+| `custom-sensor.json` | Fully custom vendor service with 128-bit UUIDs — read/notify value, read/write config register, write-only command endpoint |
 
 **Output (text mode):**
 

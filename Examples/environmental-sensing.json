@@ -1,0 +1,29 @@
+{
+  "name": "Env Sensor",
+  "services": [
+    {
+      "uuid": "181A",
+      "primary": true,
+      "characteristics": [
+        {
+          "uuid": "2A6E",
+          "properties": ["read", "notify"],
+          "value": "2409",
+          "format": "hex"
+        },
+        {
+          "uuid": "2A6F",
+          "properties": ["read", "notify"],
+          "value": "B416",
+          "format": "hex"
+        },
+        {
+          "uuid": "2A6D",
+          "properties": ["read", "notify"],
+          "value": "24461000",
+          "format": "hex"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "Blood Pressure",
+  "services": [
+    {
+      "uuid": "1810",
+      "primary": true,
+      "characteristics": [
+        {
+          "uuid": "2A35",
+          "properties": ["indicate"],
+          "value": "1670005000",
+          "format": "hex"
+        },
+        {
+          "uuid": "2A49",
+          "properties": ["read"],
+          "value": "03",
+          "format": "hex"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "name": "Thermometer",
+  "services": [
+    {
+      "uuid": "1809",
+      "primary": true,
+      "characteristics": [
+        {
+          "uuid": "2A1C",
+          "properties": ["indicate"],
+          "value": "0006CF0FFE",
+          "format": "hex"
+        },
+        {
+          "uuid": "2A1D",
+          "properties": ["read"],
+          "value": "2",
+          "format": "uint8"
+        },
+        {
+          "uuid": "2A21",
+          "properties": ["read", "write", "notify"],
+          "value": "1",
+          "format": "uint16le"
+        }
+      ]
+    }
+  ]
+}
