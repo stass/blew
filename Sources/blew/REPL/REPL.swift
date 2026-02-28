@@ -72,6 +72,7 @@ final class REPL {
         ]
         let gattSubs = ["svcs", "tree", "chars", "desc", "info"]
         let periphSubs = ["adv", "clone", "stop", "set", "notify", "status"]
+        let subSubs = ["stop", "status"]
         let formats = ["hex", "utf8", "base64", "uint8", "uint16le", "uint32le", "float32le", "raw"]
 
         ln.setCompletionCallback { [weak self] buffer in
@@ -203,8 +204,51 @@ final class REPL {
                 return formats.map { "\(buffer)\($0)" }
             }
 
-            // --- read / write / sub: complete positional char UUID ---
-            if ["read", "sub"].contains(cmd) {
+            // --- sub: complete subcommands (stop/status) or positional char UUID ---
+            if cmd == "sub" {
+                let subParts = rest.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
+                let firstToken = subParts.isEmpty ? "" : String(subParts[0])
+
+                // Offer subcommand completions when still typing the first token and it
+                // matches "stop" or "status" (but not when it looks like a UUID/flag).
+                if subParts.count <= 1 && !rest.hasSuffix(" ") {
+                    let subMatches = subSubs.filter { $0.hasPrefix(firstToken) }
+                    if !subMatches.isEmpty {
+                        return subMatches.map { "sub \($0) " }
+                    }
+                }
+
+                // sub stop <char-uuid>: complete characteristic UUID
+                if firstToken == "stop" {
+                    let afterSub = subParts.count > 1 ? String(subParts[1]) : ""
+                    let partial = afterSub.trimmingCharacters(in: .whitespaces)
+                    let candidates = self.router.manager.knownCharacteristicUUIDs()
+                    if partial.isEmpty && buffer.hasSuffix(" ") {
+                        return candidates.map { "\(buffer)\($0)" }
+                    }
+                    if !partial.isEmpty {
+                        let prefix = String(buffer.dropLast(partial.count))
+                        return candidates
+                            .filter { $0.lowercased().hasPrefix(partial.lowercased()) }
+                            .map { "\(prefix)\($0)" }
+                    }
+                    return []
+                }
+
+                // sub status: no further arguments
+                if firstToken == "status" { return [] }
+
+                // Default: complete positional char UUID
+                return self.completionPositionalUUID(
+                    buffer: buffer,
+                    rest: rest,
+                    optionsWithValue: ["-f", "--format", "-d", "--duration", "-c", "--count"],
+                    candidates: self.router.manager.knownCharacteristicUUIDs()
+                )
+            }
+
+            // --- read: complete positional char UUID ---
+            if cmd == "read" {
                 return self.completionPositionalUUID(
                     buffer: buffer,
                     rest: rest,

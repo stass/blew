@@ -335,7 +335,7 @@ blew write -n "Thingy" -f utf8 fff2 "hello"      # Write a UTF-8 string
 ### `sub` — Subscribe to notifications or indications
 
 ```
-blew sub [-n <name>] [-i <id>] [-f <format>] [-d <sec>] [-c <count>] [--notify|--indicate] <char-uuid>
+blew sub [-n <name>] [-i <id>] [-f <format>] [-d <sec>] [-c <count>] [-b] <char-uuid>
 ```
 
 Subscribes to a characteristic and streams received values to stdout, one event per line. Connects automatically if no connection is active. Stops on `Ctrl-C`, or when a duration/count limit is reached.
@@ -345,8 +345,26 @@ Subscribes to a characteristic and streams received values to stdout, one event 
 | `-f, --format <fmt>` | Value format (same values as `read`). Default: `hex`. |
 | `-d, --duration <sec>` | Stop after this many seconds. |
 | `-c, --count <n>` | Stop after receiving this many notifications. |
+| `-b, --bg` | Run in background (REPL and `exec` mode only). Returns the prompt immediately; notifications are printed as they arrive. Use `sub stop` to cancel. |
 
 With `--out kv`, each line includes `ts=`, `char=`, and `value=` fields.
+
+**Background mode** (`-b`) is available in the REPL and `exec` scripts. Multiple characteristics can be subscribed simultaneously. Background notifications are printed to stderr with ANSI cursor control so they appear cleanly over the prompt:
+
+```
+blew> sub -b -f uint8 2A19
+Subscribing to 2A19 (Battery Level) in background. Use 'sub stop 2A19' to stop.
+blew> sub -b fff1
+Subscribing to fff1 in background. Use 'sub stop fff1' to stop.
+blew> sub status
+Active background subscriptions:
+  2A19 (Battery Level)
+  fff1
+blew> sub stop 2A19
+Stopped subscription for 2A19 (Battery Level).
+blew> sub stop
+Stopped all background subscriptions.
+```
 
 **Examples:**
 ```bash
@@ -384,6 +402,9 @@ The REPL provides:
 | `read [-f <fmt>] <uuid>` | Read a characteristic |
 | `write [-f <fmt>] [-r\|-w] <uuid> <data>` | Write to a characteristic |
 | `sub [-f <fmt>] [-d <s>] [-c <n>] <uuid>` | Subscribe to notifications (Ctrl-C to stop) |
+| `sub [-b] [-f <fmt>] [-d <s>] [-c <n>] <uuid>` | Subscribe in background; prompt remains available |
+| `sub stop [<uuid>]` | Stop one or all background subscriptions |
+| `sub status` | List active background subscriptions |
 | `periph adv [-n <n>] [-S <uuid>] [--config <f>]` | Start advertising as a virtual peripheral |
 | `periph clone [--save <f>]` | Clone a real device's GATT |
 | `periph stop` | Stop advertising |

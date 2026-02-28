@@ -8,6 +8,7 @@ final class CommandRouter {
     let isInteractiveMode: Bool
     private(set) var lastScanResults: [DiscoveredDevice] = []
     private var backgroundPeriphTask: Task<Void, Never>?
+    private var backgroundSubTasks: [String: Task<Void, Never>] = [:]
 
     init(globals: GlobalOptions, manager: BLECentral? = nil, isInteractiveMode: Bool = false) {
         self.globals = globals
@@ -90,7 +91,9 @@ final class CommandRouter {
             "  \(cmd("gatt")) \(cmd("info")) <char>",
             "  \(cmd("read")) \(targeting) [-f <fmt>] <char>",
             "  \(cmd("write")) \(targeting) [-f <fmt>] [-r|-w] <char> <data>",
-            "  \(cmd("sub")) \(targeting) [-f <fmt>] [-d <sec>] [-c <n>] <char>",
+            "  \(cmd("sub")) \(targeting) [-f <fmt>] [-d <sec>] [-c <n>] [-b] <char>",
+            "  \(cmd("sub")) \(cmd("stop")) [<char>]",
+            "  \(cmd("sub")) \(cmd("status"))",
             "  \(cmd("periph")) \(cmd("adv")) [-n <name>] [-S <uuid>] [--config <file>]",
             "  \(cmd("periph")) \(cmd("clone")) \(targeting) [--save <file>]",
             "  \(cmd("periph")) \(cmd("stop"))",
@@ -923,11 +926,22 @@ final class CommandRouter {
     }
 
     func runSub(_ args: [String]) -> Int32 {
+        // Route sub-subcommands before connecting.
+        if let first = args.first {
+            switch first {
+            case "stop":   return runSubStop(Array(args.dropFirst()))
+            case "status": return runSubStatus(Array(args.dropFirst()))
+            default: break
+            }
+        }
+
         let connectCode = ensureConnected(args: args)
         guard connectCode == 0 else { return connectCode }
 
         let subOpts: Set<String> = ["-f", "--format", "-d", "--duration", "-c", "--count", "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
-        guard let charInput = positionalArgs(args, optionsWithValue: subOpts).first else {
+        let background = args.contains("--bg") || args.contains("-b")
+        let positionals = positionalArgs(args.filter { $0 != "--bg" && $0 != "-b" }, optionsWithValue: subOpts)
+        guard let charInput = positionals.first else {
             output.printError("missing characteristic UUID")
             return BlewExitCode.invalidArguments.code
         }
@@ -942,6 +956,52 @@ final class CommandRouter {
         let fmt = parseStringOption(args, short: "-f", long: "--format") ?? "hex"
         let duration = parseDoubleOption(args, short: "-d", long: "--duration")
         let maxCount = parseIntOption(args, short: "-c", long: "--count")
+
+        if background {
+            guard isInteractiveMode else {
+                output.printError("-b is only available in interactive mode")
+                return BlewExitCode.invalidArguments.code
+            }
+            // Cancel any existing background sub for the same characteristic.
+            backgroundSubTasks[charUUID]?.cancel()
+            backgroundSubTasks[charUUID] = Task {
+                do {
+                    let stream = try await manager.subscribe(characteristicUUID: charUUID)
+                    var count = 0
+                    let startTime = Date()
+                    let charName = BLENames.name(for: charUUID, category: .characteristic)
+                    for await data in stream {
+                        let formatted = DataFormatter.format(data, as: fmt)
+                        let line: String
+                        switch output.format {
+                        case .text:
+                            line = "[\(charUUID)] \(formatted)"
+                        case .kv:
+                            let ts = ISO8601DateFormatter.shared.string(from: Date())
+                            if let name = charName {
+                                line = "ts=\(ts) char=\(charUUID) name=\(name) value=\(formatted)"
+                            } else {
+                                line = "ts=\(ts) char=\(charUUID) value=\(formatted)"
+                            }
+                        }
+                        printLive(line)
+                        count += 1
+                        if let maxCount = maxCount, count >= maxCount { break }
+                        if let duration = duration, Date().timeIntervalSince(startTime) >= duration { break }
+                    }
+                } catch is CancellationError {
+                    // stopped
+                } catch let error as BLEError {
+                    printLive("sub error [\(charUUID)]: \(error.localizedDescription)")
+                } catch {
+                    printLive("sub error [\(charUUID)]: \(error)")
+                }
+                backgroundSubTasks.removeValue(forKey: charUUID)
+            }
+            let displayUUID = BLENames.displayUUID(charUUID, category: .characteristic)
+            output.print("Subscribing to \(displayUUID) in background. Use 'sub stop \(charUUID)' to stop.")
+            return 0
+        }
 
         let semaphore = DispatchSemaphore(value: 0)
         var exitCode: Int32 = 0
@@ -988,6 +1048,47 @@ final class CommandRouter {
             exitCode = 130
         }
         return exitCode
+    }
+
+    func runSubStop(_ args: [String]) -> Int32 {
+        if let charInput = args.first {
+            let charUUID: String
+            switch resolveCharacteristic(charInput) {
+            case .resolved(let uuid): charUUID = uuid
+            case .ambiguous(let uuids):
+                output.printError("ambiguous characteristic '\(charInput)' — matches: \(uuids.joined(separator: ", "))")
+                return BlewExitCode.invalidArguments.code
+            case .notFound: charUUID = charInput
+            }
+            guard backgroundSubTasks[charUUID] != nil else {
+                output.printError("no background subscription for '\(charUUID)'")
+                return BlewExitCode.notFound.code
+            }
+            backgroundSubTasks[charUUID]?.cancel()
+            backgroundSubTasks.removeValue(forKey: charUUID)
+            output.print("Stopped subscription for \(BLENames.displayUUID(charUUID, category: .characteristic)).")
+        } else {
+            guard !backgroundSubTasks.isEmpty else {
+                output.print("No active background subscriptions.")
+                return 0
+            }
+            for (_, task) in backgroundSubTasks { task.cancel() }
+            backgroundSubTasks.removeAll()
+            output.print("Stopped all background subscriptions.")
+        }
+        return 0
+    }
+
+    func runSubStatus(_ args: [String]) -> Int32 {
+        guard !backgroundSubTasks.isEmpty else {
+            output.print("No active background subscriptions.")
+            return 0
+        }
+        output.print("Active background subscriptions:")
+        for uuid in backgroundSubTasks.keys.sorted() {
+            output.print("  \(BLENames.displayUUID(uuid, category: .characteristic))")
+        }
+        return 0
     }
 
     // MARK: - Interrupt-aware wait

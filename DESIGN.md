@@ -278,7 +278,7 @@ gatt
   info  <char-uuid>                           (no device required)
 read    [-n/-S/-i/-m/-p] [-f <fmt>] <char-uuid>
 write   [-n/-S/-i/-m/-p] [-f <fmt>] [-r|-w] <char-uuid> <data>
-sub     [-n/-S/-i/-m/-p] [-f <fmt>] [-d <sec>] [-c <count>] <char-uuid>
+sub     [-n/-S/-i/-m/-p] [-f <fmt>] [-d <sec>] [-c <count>] [-b] <char-uuid>
 periph
   adv   [-n <name>] [-S <uuid>...] [-c/--config <file>]
   clone [-n/-S/-i/-m/-p] [-o/--save <file>]
@@ -309,6 +309,15 @@ periph status                          — show advertising state
 `gatt info` does not require a connected device. It looks up the UUID in the generated `GATTCharacteristicDB` and prints the Bluetooth SIG specification: name, description, and field structure.
 
 `disconnect` and `status` are available in REPL and `exec` mode but are not exposed as CLI subcommands — they carry no value when the process starts fresh with no persistent state.
+
+`sub` supports a `-b` (`--bg`) flag in REPL and `exec` mode that runs the subscription as a stored background `Task`, printing each notification via `printLive()` (stderr with ANSI cursor control) while the prompt remains available. Multiple simultaneous background subscriptions are supported, keyed by characteristic UUID. Two additional REPL/exec-only sub-subcommands manage them:
+
+```
+sub stop [<char-uuid>]   — cancel one (or all) background subscriptions
+sub status               — list active background subscriptions
+```
+
+Background sub tasks are stored in `CommandRouter.backgroundSubTasks: [String: Task<Void, Never>]`, following the same pattern as `backgroundPeriphTask`. Starting a new `-b` sub on an already-subscribed UUID cancels and replaces the previous task. Background tasks are implicitly cleaned up when the notification stream ends (e.g. on disconnect).
 
 ### 4.4 Implicit auto-connect
 
