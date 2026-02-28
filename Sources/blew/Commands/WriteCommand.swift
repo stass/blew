@@ -5,9 +5,10 @@ import BLEManager
 struct WriteCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "write",
-        abstract: "Write to a characteristic",
-        discussion: "Device targeting and output options are global options; pass them before the subcommand name (see blew --help)."
+        abstract: "Write to a characteristic"
     )
+
+    @OptionGroup var targeting: DeviceTargetingOptions
 
     @Option(name: [.customShort("f"), .long], help: "Data format: hex, utf8, base64, uint8, uint16le, uint32le, float32le.")
     var format: String = "hex"
@@ -26,7 +27,8 @@ struct WriteCommand: ParsableCommand {
 
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
-        var args = ["-f", format, char, data]
+        var args = targeting.toArgs()
+        args += ["-f", format, char, data]
         if withResponse { args.append("-r") }
         if withoutResponse { args.append("-w") }
         let code = router.runWrite(args)

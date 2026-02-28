@@ -22,6 +22,7 @@ struct Blew: ParsableCommand {
             WriteCommand.self,
             SubCommand.self,
             PeriphCommand.self,
+            ExecCommand.self,
         ]
     )
 
@@ -33,25 +34,14 @@ struct Blew: ParsableCommand {
 
     mutating func run() throws {
         installSignalHandlers()
-
-        if let execString = globals.exec {
-            let router = CommandRouter(globals: globals, isInteractiveMode: true)
-            let code = router.executeScript(execString)
-            cleanupBeforeExit()
-            if code != 0 {
-                throw BlewExitCode(code)
-            }
-        } else {
-            let repl = REPL(globals: globals)
-            repl.run()
-            cleanupBeforeExit()
-        }
+        let repl = REPL(globals: globals)
+        repl.run()
+        cleanupBeforeExit()
     }
 }
 
 /// Best-effort disconnect and stop advertising on process exit.
-private func cleanupBeforeExit() {
-    // Stop advertising if active
+func cleanupBeforeExit() {
     if BLEPeripheral.shared.isAdvertising() {
         BLEPeripheral.shared.stopAdvertising()
     }

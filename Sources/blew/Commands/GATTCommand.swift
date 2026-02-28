@@ -19,13 +19,16 @@ struct GATTCommand: ParsableCommand {
 struct GATTSvcsCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "svcs",
-        abstract: "List discovered services",
-        discussion: "Device targeting and output options are global options; pass them before the subcommand name (see blew --help)."
+        abstract: "List discovered services"
     )
+
+    @OptionGroup var targeting: DeviceTargetingOptions
 
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
-        let code = router.runGATT(["svcs"])
+        var args = targeting.toArgs()
+        args.append("svcs")
+        let code = router.runGATT(args)
         if code != 0 { throw BlewExitCode(code) }
     }
 }
@@ -33,9 +36,10 @@ struct GATTSvcsCommand: ParsableCommand {
 struct GATTTreeCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tree",
-        abstract: "Show full GATT tree",
-        discussion: "Device targeting and output options are global options; pass them before the subcommand name (see blew --help)."
+        abstract: "Show full GATT tree"
     )
+
+    @OptionGroup var targeting: DeviceTargetingOptions
 
     @Flag(name: [.short, .long], help: "Include descriptors.")
     var descriptors: Bool = false
@@ -45,7 +49,8 @@ struct GATTTreeCommand: ParsableCommand {
 
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
-        var args: [String] = ["tree"]
+        var args = targeting.toArgs()
+        args.append("tree")
         if descriptors { args.append("-d") }
         if readValues { args.append("-r") }
         let code = router.runGATT(args)
@@ -56,9 +61,10 @@ struct GATTTreeCommand: ParsableCommand {
 struct GATTCharsCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "chars",
-        abstract: "List characteristics for a service",
-        discussion: "Device targeting and output options are global options; pass them before the subcommand name (see blew --help)."
+        abstract: "List characteristics for a service"
     )
+
+    @OptionGroup var targeting: DeviceTargetingOptions
 
     @Flag(name: [.customShort("r"), .customLong("read")], help: "Read and display values for readable characteristics.")
     var readValues: Bool = false
@@ -68,7 +74,8 @@ struct GATTCharsCommand: ParsableCommand {
 
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
-        var args: [String] = ["chars", service]
+        var args = targeting.toArgs()
+        args += ["chars", service]
         if readValues { args.append("-r") }
         let code = router.runGATT(args)
         if code != 0 { throw BlewExitCode(code) }
@@ -78,16 +85,19 @@ struct GATTCharsCommand: ParsableCommand {
 struct GATTDescCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "desc",
-        abstract: "List descriptors for a characteristic",
-        discussion: "Device targeting and output options are global options; pass them before the subcommand name (see blew --help)."
+        abstract: "List descriptors for a characteristic"
     )
+
+    @OptionGroup var targeting: DeviceTargetingOptions
 
     @Argument(help: "Characteristic UUID.")
     var char: String
 
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
-        let code = router.runGATT(["desc", char])
+        var args = targeting.toArgs()
+        args += ["desc", char]
+        let code = router.runGATT(args)
         if code != 0 { throw BlewExitCode(code) }
     }
 }

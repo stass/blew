@@ -12,9 +12,11 @@ struct GlobalOptions: ParsableArguments {
 
     @Option(name: [.short, .long], help: "Output format: text or kv.")
     var out: OutputFormat = .text
+}
 
-    // Device targeting
-    @Option(name: [.short, .customLong("id")], help: "Explicit device identifier.")
+/// Device targeting options shared across all commands that need to locate a device.
+struct DeviceTargetingOptions: ParsableArguments {
+    @Option(name: [.customShort("i"), .customLong("id")], help: "Explicit device identifier.")
     var id: String?
 
     @Option(name: [.short, .long], help: "Filter by device name substring.")
@@ -26,21 +28,23 @@ struct GlobalOptions: ParsableArguments {
     @Option(name: [.short, .long], help: "Filter by manufacturer ID.")
     var manufacturer: Int?
 
-    @Option(name: [.customShort("r"), .customLong("rssi-min")], help: "Minimum RSSI in dBm.")
+    @Option(name: [.customShort("R"), .customLong("rssi-min")], help: "Minimum RSSI in dBm.")
     var rssiMin: Int?
 
     @Option(name: [.short, .long], help: "Device pick strategy: strongest, first, or only.")
     var pick: PickStrategy = .strongest
 
-    // Script execution
-    @Option(name: [.customShort("x"), .customLong("exec")], help: "Execute semicolon-separated commands.")
-    var exec: String?
-
-    @Flag(name: [.customShort("k"), .customLong("keep-going")], help: "Continue after command errors in --exec.")
-    var keepGoing: Bool = false
-
-    @Flag(name: .customLong("dry-run"), help: "Print parsed steps without executing.")
-    var dryRun: Bool = false
+    /// Serialize non-nil targeting values into a flat string array suitable for passing to CommandRouter run* methods.
+    func toArgs() -> [String] {
+        var args: [String] = []
+        if let id = id { args += ["-i", id] }
+        if let name = name { args += ["-n", name] }
+        for uuid in service { args += ["-S", uuid] }
+        if let m = manufacturer { args += ["-m", "\(m)"] }
+        if let r = rssiMin { args += ["-R", "\(r)"] }
+        if pick != .strongest { args += ["-p", pick.rawValue] }
+        return args
+    }
 }
 
 enum OutputFormat: String, ExpressibleByArgument, Sendable {

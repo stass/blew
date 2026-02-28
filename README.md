@@ -53,13 +53,11 @@ blew
 
 ## Global options
 
-These options apply to all commands and control device targeting, output, and behavior. They must be placed **before** the subcommand name:
+These options apply to all commands and must be placed **before** the subcommand name:
 
 ```bash
 blew [global-options] <command> [command-options]
 ```
-
-### Output and verbosity
 
 | Flag | Description |
 |------|-------------|
@@ -69,7 +67,9 @@ blew [global-options] <command> [command-options]
 | `-h, --help` | Show help and exit. |
 | `--version` | Show version and exit. |
 
-### Device targeting
+## Device targeting options
+
+Commands that connect to a device (`scan`, `connect`, `gatt`, `read`, `write`, `sub`, `periph clone`) accept these options to identify the target. Pass them after the subcommand name.
 
 Use `--id` to target an explicit device, or combine selectors to let blew find a match automatically.
 
@@ -79,16 +79,8 @@ Use `--id` to target an explicit device, or combine selectors to let blew find a
 | `-n, --name <substring>` | Filter by device name (substring match). |
 | `-S, --service <uuid>` | Filter by advertised service UUID. Repeatable. |
 | `-m, --manufacturer <id>` | Filter by manufacturer ID. |
-| `-r, --rssi-min <dBm>` | Minimum RSSI threshold (e.g. `-r -70`). |
+| `-R, --rssi-min <dBm>` | Minimum RSSI threshold (e.g. `-R -70`). |
 | `-p, --pick <strategy>` | How to pick when multiple devices match: `strongest` (default, highest RSSI), `first` (first seen), `only` (error if multiple match). |
-
-### Script execution
-
-| Flag | Description |
-|------|-------------|
-| `-x, --exec "<commands>"` | Run a semicolon-separated sequence of commands within a single connection lifecycle. |
-| `-k, --keep-going` | With `--exec`: continue after a command error; exit with the first non-zero code seen. |
-| `--dry-run` | With `--exec`: print parsed steps without executing them. |
 
 ---
 
@@ -97,17 +89,21 @@ Use `--id` to target an explicit device, or combine selectors to let blew find a
 ### `scan` — Scan for BLE devices
 
 ```
-blew [global-options] scan
+blew scan [-n <name>] [-S <uuid>] [-R <dBm>] [-i <id>] [-m <id>] [-p <strategy>] [-w]
 ```
 
 Scans for advertising BLE peripherals and prints a table of discovered devices. Timeout defaults to 5 seconds.
-
-**Relevant global options:** `-t`, `-n`, `-S`, `-m`, `-r`, `-o`, `-v`
 
 **Flags:**
 
 | Flag | Description |
 |------|-------------|
+| `-n, --name` | Filter results by device name substring. |
+| `-S, --service` | Filter by advertised service UUID. Repeatable. |
+| `-R, --rssi-min` | Minimum RSSI threshold (e.g. `-R -70`). |
+| `-i, --id` | Show only the device with this identifier. |
+| `-m, --manufacturer` | Filter by manufacturer ID. |
+| `-p, --pick` | Pick strategy: `strongest`, `first`, `only`. |
 | `-w, --watch` | Continuously scan and show a live-updating device list. Runs until Ctrl-C or `-t` expires. Requires a TTY in text mode; use `-o kv` for piped output. |
 
 **Output columns (text):** ID, Name, RSSI, Signal (visual bar), Services
@@ -118,12 +114,12 @@ Standard Bluetooth SIG service UUIDs in the Services column are shown with their
 ```bash
 blew scan                          # Scan for 5 seconds
 blew -t 10 scan                    # Scan for 10 seconds
-blew scan --watch                  # Continuously scan until Ctrl-C
-blew -t 30 scan --watch            # Watch for 30 seconds then stop
-blew -n "Heart" scan --watch       # Watch for Heart Rate devices
-blew -S 180D -r -65 scan           # Heart Rate service, RSSI ≥ -65 dBm
+blew scan -w                       # Continuously scan until Ctrl-C
+blew -t 30 scan -w                 # Watch for 30 seconds then stop
+blew scan -n "Heart" -w            # Watch for Heart Rate devices
+blew scan -S 180D -R -65           # Heart Rate service, RSSI ≥ -65 dBm
 blew -o kv scan                    # Machine-readable output
-blew -o kv scan --watch            # Stream device updates (piping-friendly)
+blew -o kv scan -w                 # Stream device updates (piping-friendly)
 ```
 
 ---
@@ -131,10 +127,10 @@ blew -o kv scan --watch            # Stream device updates (piping-friendly)
 ### `connect` — Connect to a device
 
 ```
-blew [global-options] connect [<device-id>]
+blew connect [-n <name>] [-S <uuid>] [-i <id>] [<device-id>]
 ```
 
-Explicitly connects to a BLE device and exits. Useful for testing connectivity or pre-warming a connection in `--exec` scripts. The device can be specified by positional argument, `--id`, or device-targeting selectors (the tool will scan briefly to resolve them).
+Explicitly connects to a BLE device and exits. Useful for testing connectivity or pre-warming a connection in `exec` scripts. The device can be specified by positional argument, `--id`, or device-targeting selectors (the tool will scan briefly to resolve them).
 
 For `gatt`, `read`, `write`, and `sub` you do not need to run `connect` first — those commands connect automatically using the same device-targeting options.
 
@@ -143,8 +139,8 @@ The connection is automatically closed on exit.
 **Examples:**
 ```bash
 blew connect F3C2A1B0-...          # Test connectivity to an explicit ID
-blew -n "Thingy" connect           # Test connectivity by name
-blew -S 180F connect               # Connect to device advertising Battery Service
+blew connect -n "Thingy"           # Test connectivity by name
+blew connect -S 180F               # Connect to device advertising Battery Service
 ```
 
 ---
@@ -158,7 +154,7 @@ All UUID outputs include human-readable names for standard Bluetooth SIG UUIDs. 
 #### `gatt svcs` — List services
 
 ```
-blew [global-options] gatt svcs
+blew gatt svcs [-n <name>] [-i <id>]
 ```
 
 Lists all discovered services. Output columns: UUID, Name, Primary.
@@ -174,7 +170,7 @@ FFF0                         yes
 #### `gatt tree` — Show full GATT tree
 
 ```
-blew [global-options] gatt tree [-d] [-r]
+blew gatt tree [-n <name>] [-i <id>] [-d] [-r]
 ```
 
 Prints services and their characteristics with properties (read / write / notify / indicate). Standard UUIDs show their human-readable name alongside.
@@ -207,7 +203,7 @@ Service 180A  Device Information
 #### `gatt chars` — List characteristics for a service
 
 ```
-blew [global-options] gatt chars [-r] <service-uuid>
+blew gatt chars [-n <name>] [-i <id>] [-r] <service-uuid>
 ```
 
 Output columns: UUID, Name, Properties.
@@ -219,7 +215,7 @@ Output columns: UUID, Name, Properties.
 #### `gatt desc` — List descriptors for a characteristic
 
 ```
-blew [global-options] gatt desc <char-uuid>
+blew gatt desc [-n <name>] [-i <id>] <char-uuid>
 ```
 
 Output columns: UUID, Name.
@@ -268,13 +264,13 @@ With `-o kv`, one record per field is emitted (for scripting).
 
 **Examples:**
 ```bash
-blew -n "Thingy" gatt tree
-blew -n "Thingy" gatt tree -d        # Include descriptors
-blew -n "Thingy" gatt tree -r        # Read values for readable characteristics
-blew -n "Thingy" gatt tree -dr       # Descriptors + values
-blew -n "Thingy" gatt chars 180F
-blew -n "Thingy" gatt chars -r 180A  # Read values for Device Information
-blew -n "Thingy" gatt desc 2A19
+blew gatt tree -n "Thingy"
+blew gatt tree -n "Thingy" -d        # Include descriptors
+blew gatt tree -n "Thingy" -r        # Read values for readable characteristics
+blew gatt tree -n "Thingy" -dr       # Descriptors + values
+blew gatt chars -n "Thingy" 180F
+blew gatt chars -n "Thingy" -r 180A  # Read values for Device Information
+blew gatt desc -n "Thingy" 2A19
 ```
 
 ---
@@ -282,7 +278,7 @@ blew -n "Thingy" gatt desc 2A19
 ### `read` — Read a characteristic value
 
 ```
-blew [global-options] read [-f <format>] <char-uuid>
+blew read [-n <name>] [-i <id>] [-f <format>] <char-uuid>
 ```
 
 Reads the value of a characteristic and prints it in the requested format. Connects automatically if no connection is active.
@@ -306,9 +302,9 @@ Reads the value of a characteristic and prints it in the requested format. Conne
 
 **Examples:**
 ```bash
-blew -n "Thingy" read -f uint8 2A19     # Battery level as integer
-blew -n "Thingy" read -f utf8 2A29      # Manufacturer name string
-blew -n "Thingy" read fff1              # Raw characteristic as hex
+blew read -n "Thingy" -f uint8 2A19     # Battery level as integer
+blew read -n "Thingy" -f utf8 2A29      # Manufacturer name string
+blew read -n "Thingy" fff1              # Raw characteristic as hex
 ```
 
 ---
@@ -316,7 +312,7 @@ blew -n "Thingy" read fff1              # Raw characteristic as hex
 ### `write` — Write to a characteristic
 
 ```
-blew [global-options] write [-f <format>] [-r|-w] <char-uuid> <data>
+blew write [-n <name>] [-i <id>] [-f <format>] [-r|-w] <char-uuid> <data>
 ```
 
 Writes data to a characteristic. Connects automatically if no connection is active. Write mode (with or without response) is auto-selected based on the characteristic's properties unless overridden.
@@ -329,9 +325,9 @@ Writes data to a characteristic. Connects automatically if no connection is acti
 
 **Examples:**
 ```bash
-blew -n "Thingy" write fff1 "deadbeef"           # Write hex bytes
-blew -n "Thingy" write -f uint8 -r 2A06 1        # Write uint8 with response
-blew -n "Thingy" write -f utf8 fff2 "hello"      # Write a UTF-8 string
+blew write -n "Thingy" fff1 "deadbeef"           # Write hex bytes
+blew write -n "Thingy" -f uint8 -r 2A06 1        # Write uint8 with response
+blew write -n "Thingy" -f utf8 fff2 "hello"      # Write a UTF-8 string
 ```
 
 ---
@@ -339,7 +335,7 @@ blew -n "Thingy" write -f utf8 fff2 "hello"      # Write a UTF-8 string
 ### `sub` — Subscribe to notifications or indications
 
 ```
-blew [global-options] sub [-f <format>] [-d <sec>] [-c <count>] [--notify|--indicate] <char-uuid>
+blew sub [-n <name>] [-i <id>] [-f <format>] [-d <sec>] [-c <count>] [--notify|--indicate] <char-uuid>
 ```
 
 Subscribes to a characteristic and streams received values to stdout, one event per line. Connects automatically if no connection is active. Stops on `Ctrl-C`, or when a duration/count limit is reached.
@@ -356,10 +352,10 @@ With `--out kv`, each line includes `ts=`, `char=`, and `value=` fields.
 
 **Examples:**
 ```bash
-blew -n "Thingy" sub fff1                        # Stream indefinitely (Ctrl-C to stop)
-blew -n "Thingy" sub -f uint16le -d 30 fff1      # 30-second capture as uint16
-blew -n "Thingy" -o kv sub -c 100 2A37           # Capture 100 events, kv output
-blew -n "Thingy" -o kv sub fff1 >> data.log      # Append to a log file
+blew sub -n "Thingy" fff1                        # Stream indefinitely (Ctrl-C to stop)
+blew sub -n "Thingy" -f uint16le -d 30 fff1      # 30-second capture as uint16
+blew -o kv sub -n "Thingy" -c 100 2A37           # Capture 100 events, kv output
+blew -o kv sub -n "Thingy" fff1 >> data.log      # Append to a log file
 ```
 
 ---
@@ -430,25 +426,31 @@ blew> quit
 
 ---
 
-## Script execution (`--exec`)
+## Script execution (`exec`)
 
-The `-x` / `--exec` flag runs a semicolon-separated sequence of commands in a single process, sharing one connection lifecycle. Commands are parsed identically to the REPL. The first command that requires a connection triggers an automatic connect; subsequent commands reuse it.
+The `exec` subcommand runs a semicolon-separated sequence of commands in a single process, sharing one connection lifecycle. Commands are parsed identically to the REPL. The first command that requires a connection triggers an automatic connect; subsequent commands reuse it.
 
 ```bash
-blew -n "Thingy" -x "gatt tree; read -f uint8 2A19"
+blew exec "connect -n Thingy; gatt tree; read -f uint8 2A19"
 ```
 
-**Error handling:**
-- By default, execution stops at the first failing command and exits with that command's exit code.
-- `--keep-going` continues past errors; exits with the first non-zero code seen.
-- `--dry-run` prints the parsed command sequence without executing anything.
+**Flags:**
 
+| Flag | Description |
+|------|-------------|
+| `-k, --keep-going` | Continue after a command error; exit with the first non-zero code seen. |
+| `--dry-run` | Print parsed steps without executing them. |
+
+**Examples:**
 ```bash
-# Keep going after errors, collect exit code
-blew -n "Thingy" -k -x "read fff1; read fff9"
+# Connect by name, read a value
+blew exec "connect -n Thingy; read -f uint8 2A19"
+
+# Keep going after errors
+blew exec -k "read fff1; read fff9"
 
 # Preview what would run
-blew -n "Thingy" --dry-run -x "gatt tree; read -f uint8 2A19"
+blew exec --dry-run "connect -n Thingy; gatt tree; read -f uint8 2A19"
 ```
 
 ---
@@ -517,6 +519,8 @@ blew -n "Thingy" -o kv sub -d 60 fff1 | awk -F'value=' '{print $2}'
 `periph` turns the Mac into a virtual BLE peripheral that nearby devices can connect to, read/write, and subscribe to.
 
 > **CoreBluetooth peripheral limitations:** Only the local device name and service UUIDs can be advertised. Manufacturer data and other ADV payload fields are not settable from the peripheral API. ADV interval, TX power, and connection parameters are OS-controlled.
+>
+> **Advertised name vs hostname:** macOS always uses the computer hostname as the GAP (Generic Access Profile) device name. iOS scanners that have previously connected to the Mac will show the cached GAP name (hostname) in their device list, not the advertising name set via `-n`. The advertising name is still present in the raw advertisement data (`kCBAdvDataLocalName`) and is visible in tools like LightBlue under "Advertisement Data" after tapping the device.
 >
 > Most standard Bluetooth SIG service UUIDs work in short form (e.g. `180D`, `1809`, `181A`). However, services that macOS itself exposes as a peripheral are blocked in short form — `CBPeripheralManager` rejects `1800` (Generic Access), `1801` (Generic Attribute), `1805` (Current Time), `180A` (Device Information), `180F` (Battery), `1812` (HID), and `181E` (Bond Management) with "The specified UUID is not allowed for this operation." The full 128-bit Bluetooth Base UUID form (e.g. `0000180F-0000-1000-8000-00805F9B34FB`) bypasses the check but registers as a raw 128-bit UUID, so centrals will not recognise it as the standard service.
 
@@ -611,15 +615,15 @@ event=write ts=12:35:01 central=A1B2C3D4-... char=2A19 value=2a
 #### `periph clone` — Clone a real device
 
 ```
-blew [device-targeting-options] periph clone [--save <file>]
+blew periph clone [-n <name>] [-i <id>] [--save <file>]
 ```
 
 Connects to a target device, discovers its full GATT tree, reads all readable characteristic values, disconnects, then starts advertising as a clone.
 
-Use the same global device-targeting options (`--id`, `--name`, `--service`, etc.) to specify the target.
-
 | Flag | Description |
 |------|-------------|
+| `-n, --name` | Target device name filter. |
+| `-i, --id` | Target device identifier. |
 | `-o, --save <file>` | Save the cloned GATT structure to a JSON config file for later reuse. |
 
 **Clone scope:**
@@ -629,13 +633,13 @@ Use the same global device-targeting options (`--id`, `--name`, `--service`, etc
 **Examples:**
 
 ```bash
-blew -n "Heart Rate Monitor" periph clone
-blew -i F3C2A1B0-... periph clone --save hr-monitor.json
+blew periph clone -n "Heart Rate Monitor"
+blew periph clone -i F3C2A1B0-... --save hr-monitor.json
 ```
 
 #### REPL-only periph commands
 
-In REPL and `--exec` mode, `periph adv` and `periph clone` run in two phases. The startup phase (configure + start advertising) is synchronous and confirms the peripheral came up. Once advertising is confirmed, the event loop runs as a background task and the prompt is returned immediately. This makes `periph stop`, `periph set`, and `periph notify` usable in the same session:
+In REPL and `exec` mode, `periph adv` and `periph clone` run in two phases. The startup phase (configure + start advertising) is synchronous and confirms the peripheral came up. Once advertising is confirmed, the event loop runs as a background task and the prompt is returned immediately. This makes `periph stop`, `periph set`, and `periph notify` usable in the same session:
 
 | Command | Description |
 |---------|-------------|
@@ -653,10 +657,10 @@ blew> periph stop
 Stopped advertising.
 ```
 
-In `--exec` mode the same non-blocking behaviour applies, enabling scripts like:
+In `exec` mode the same non-blocking behaviour applies, enabling scripts like:
 
 ```bash
-blew --name "My Device" --exec "periph adv --config device.json; periph set 2A19 ff; periph notify 2A19 ff"
+blew exec "periph adv -n 'My Device' --config device.json; periph set 2A19 ff; periph notify 2A19 ff"
 ```
 
 ---
@@ -665,33 +669,33 @@ blew --name "My Device" --exec "periph adv --config device.json; periph set 2A19
 
 ### Find a device in a crowded environment
 ```bash
-blew -n "Sensor" -S 180F -r -65 -t 10 scan
+blew scan -n "Sensor" -S 180F -R -65 -t 10
 ```
 
 ### Capture sensor data to a file
 ```bash
-blew -n "Sensor" -o kv sub -f uint16le -d 300 fff1 >> sensor.log
+blew -o kv sub -n "Sensor" -f uint16le -d 300 fff1 >> sensor.log
 ```
 
 ### Quick GATT audit in one line
 ```bash
-blew -n "Thingy" gatt tree -d
+blew gatt tree -n "Thingy" -d
 ```
 
 ### Inspect device info characteristics with values
 ```bash
-blew -n "Thingy" gatt chars -r 180A
+blew gatt chars -n "Thingy" -r 180A
 ```
 
 ### Read with scripting
 ```bash
-value=$(blew -n "Thingy" read -f uint8 2A19)
+value=$(blew read -n "Thingy" -f uint8 2A19)
 echo "Battery: ${value}%"
 ```
 
 ### Use `--pick only` to guard against accidental multi-match
 ```bash
-blew -n "Thingy" -p only read -f uint8 2A19
+blew read -n "Thingy" -p only -f uint8 2A19
 # Errors out if more than one "Thingy" is nearby
 ```
 

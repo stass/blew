@@ -17,11 +17,11 @@ final class CommandRouter {
     }
 
     /// Execute a semicolon-separated script string. Returns exit code.
-    func executeScript(_ script: String) -> Int32 {
+    func executeScript(_ script: String, keepGoing: Bool = false, dryRun: Bool = false) -> Int32 {
         let segments = script.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }
         let commands = segments.filter { !$0.isEmpty }
 
-        if globals.dryRun {
+        if dryRun {
             for (i, cmd) in commands.enumerated() {
                 print("[\(i + 1)] \(cmd)")
             }
@@ -33,7 +33,7 @@ final class CommandRouter {
             let code = dispatch(cmd)
             if code != 0 {
                 if firstError == 0 { firstError = code }
-                if !globals.keepGoing {
+                if !keepGoing {
                     return code
                 }
             }
@@ -76,22 +76,23 @@ final class CommandRouter {
 
     func printHelp() {
         func cmd(_ name: String) -> String { output.bold(name) }
+        let targeting = "[-n <name>] [-S <uuid>] [-i <id>]"
         let lines = [
             "Available commands:",
-            "  \(cmd("scan")) [-w]",
-            "  \(cmd("connect")) [<id>]",
+            "  \(cmd("scan")) \(targeting) [-R <dBm>] [-m <mfr>] [-p <strategy>] [-w]",
+            "  \(cmd("connect")) \(targeting) [<id>]",
             "  \(cmd("disconnect"))",
             "  \(cmd("status"))",
-            "  \(cmd("gatt")) \(cmd("svcs"))",
-            "  \(cmd("gatt")) \(cmd("tree")) [-d] [-r]",
-            "  \(cmd("gatt")) \(cmd("chars")) [-r] <service>",
-            "  \(cmd("gatt")) \(cmd("desc")) <char>",
+            "  \(cmd("gatt")) \(cmd("svcs")) \(targeting)",
+            "  \(cmd("gatt")) \(cmd("tree")) \(targeting) [-d] [-r]",
+            "  \(cmd("gatt")) \(cmd("chars")) \(targeting) [-r] <service>",
+            "  \(cmd("gatt")) \(cmd("desc")) \(targeting) <char>",
             "  \(cmd("gatt")) \(cmd("info")) <char>",
-            "  \(cmd("read")) [-f <fmt>] <char>",
-            "  \(cmd("write")) [-f <fmt>] [-r|-w] <char> <data>",
-            "  \(cmd("sub")) [-f <fmt>] [-d <sec>] [-c <n>] <char>",
+            "  \(cmd("read")) \(targeting) [-f <fmt>] <char>",
+            "  \(cmd("write")) \(targeting) [-f <fmt>] [-r|-w] <char> <data>",
+            "  \(cmd("sub")) \(targeting) [-f <fmt>] [-d <sec>] [-c <n>] <char>",
             "  \(cmd("periph")) \(cmd("adv")) [-n <name>] [-S <uuid>] [--config <file>]",
-            "  \(cmd("periph")) \(cmd("clone")) [--save <file>]",
+            "  \(cmd("periph")) \(cmd("clone")) \(targeting) [--save <file>]",
             "  \(cmd("periph")) \(cmd("stop"))",
             "  \(cmd("periph")) \(cmd("set")) [-f <fmt>] <char> <value>",
             "  \(cmd("periph")) \(cmd("notify")) [-f <fmt>] <char> <value>",
@@ -136,8 +137,8 @@ final class CommandRouter {
 
     func runScan(_ args: [String]) -> Int32 {
         let watchMode = args.contains("--watch") || args.contains("-w")
-        let nameFilter = parseStringOption(args, short: "-n", long: "--name") ?? globals.name
-        let rssiMin = parseIntOption(args, short: "-r", long: "--rssi-min") ?? globals.rssiMin
+        let nameFilter = parseStringOption(args, short: "-n", long: "--name")
+        let rssiMin = parseIntOption(args, short: "-R", long: "--rssi-min")
 
         if watchMode {
             return runScanWatch(nameFilter: nameFilter, rssiMin: rssiMin)
@@ -393,12 +394,14 @@ final class CommandRouter {
     }
 
     func runConnect(_ args: [String]) -> Int32 {
-        let deviceId = args.first ?? globals.id
+        // An explicit positional UUID takes priority; -i/--id is the option form.
+        let positional = positionalArgs(args, optionsWithValue: ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"])
+        let deviceId = positional.first ?? parseStringOption(args, short: "-i", long: "--id")
         let connectTimeout = globals.timeout ?? 10.0
 
         guard let rawInput = deviceId else {
-            output.printError("missing device identifier")
-            return BlewExitCode.invalidArguments.code
+            // No explicit device — try auto-connect via targeting options.
+            return ensureConnected(args: args)
         }
 
         let resolved = resolveDevice(rawInput)
@@ -505,7 +508,9 @@ final class CommandRouter {
     }
 
     func runGATT(_ args: [String]) -> Int32 {
-        guard let sub = args.first else {
+        // The subcommand is the first positional token (skip option flags and their values).
+        let targetingOpts: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+        guard let sub = positionalArgs(args, optionsWithValue: targetingOpts).first else {
             output.printError("missing subcommand")
             print("Usage: gatt <svcs|tree|chars|desc|info>")
             return BlewExitCode.invalidArguments.code
@@ -513,11 +518,10 @@ final class CommandRouter {
 
         // info does not require a connected device
         if sub == "info" {
-            return runGATTInfo(Array(args.dropFirst()))
+            return runGATTInfo(args.filter { !targetingOpts.contains($0) })
         }
 
-
-        let connectCode = ensureConnected()
+        let connectCode = ensureConnected(args: args)
         guard connectCode == 0 else { return connectCode }
 
         let semaphore = DispatchSemaphore(value: 0)
@@ -599,7 +603,9 @@ final class CommandRouter {
                     }
 
                 case "chars":
-                    let charsPositional = positionalArgs(Array(args.dropFirst()), optionsWithValue: [])
+                    let charsOpts: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+                    // positionals are [subcommand, service-uuid]; skip the subcommand
+                    let charsPositional = positionalArgs(args, optionsWithValue: charsOpts).dropFirst()
                     guard let svcInput = charsPositional.first else {
                         output.printError("missing service UUID")
                         exitCode = BlewExitCode.invalidArguments.code
@@ -689,7 +695,8 @@ final class CommandRouter {
                     }
 
                 case "desc":
-                    let descPositional = positionalArgs(Array(args.dropFirst()), optionsWithValue: [])
+                    let descOpts: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+                    let descPositional = positionalArgs(args, optionsWithValue: descOpts).dropFirst()
                     guard let charInput = descPositional.first else {
                         output.printError("missing characteristic UUID")
                         exitCode = BlewExitCode.invalidArguments.code
@@ -787,10 +794,11 @@ final class CommandRouter {
     }
 
     func runRead(_ args: [String]) -> Int32 {
-        let connectCode = ensureConnected()
+        let connectCode = ensureConnected(args: args)
         guard connectCode == 0 else { return connectCode }
 
-        guard let charInput = positionalArgs(args, optionsWithValue: ["-f", "--format"]).first else {
+        let readOpts: Set<String> = ["-f", "--format", "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+        guard let charInput = positionalArgs(args, optionsWithValue: readOpts).first else {
             output.printError("missing characteristic UUID")
             return BlewExitCode.invalidArguments.code
         }
@@ -844,10 +852,11 @@ final class CommandRouter {
     }
 
     func runWrite(_ args: [String]) -> Int32 {
-        let connectCode = ensureConnected()
+        let connectCode = ensureConnected(args: args)
         guard connectCode == 0 else { return connectCode }
 
-        let positional = positionalArgs(args, optionsWithValue: ["-f", "--format"])
+        let writeOpts: Set<String> = ["-f", "--format", "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+        let positional = positionalArgs(args, optionsWithValue: writeOpts)
         guard positional.count >= 2 else {
             if positional.isEmpty {
                 output.printError("missing characteristic UUID and data")
@@ -914,10 +923,11 @@ final class CommandRouter {
     }
 
     func runSub(_ args: [String]) -> Int32 {
-        let connectCode = ensureConnected()
+        let connectCode = ensureConnected(args: args)
         guard connectCode == 0 else { return connectCode }
 
-        guard let charInput = positionalArgs(args, optionsWithValue: ["-f", "--format", "-d", "--duration", "-c", "--count"]).first else {
+        let subOpts: Set<String> = ["-f", "--format", "-d", "--duration", "-c", "--count", "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+        guard let charInput = positionalArgs(args, optionsWithValue: subOpts).first else {
             output.printError("missing characteristic UUID")
             return BlewExitCode.invalidArguments.code
         }
@@ -1019,11 +1029,11 @@ final class CommandRouter {
     /// Ensure a BLE device is connected before running an operation.
     ///
     /// If already connected, returns immediately. Otherwise resolves a target
-    /// device from GlobalOptions and connects:
-    ///   - `--id`  → direct connect (no scan needed)
-    ///   - `--name` / `--service` / `--manufacturer` / `--rssi-min` → scan then pick and connect
+    /// device from the args array and connects:
+    ///   - `-i`/`--id`  → direct connect (no scan needed)
+    ///   - `-n`/`--name` / `-S`/`--service` / `-m`/`--manufacturer` / `-R`/`--rssi-min` → scan then pick and connect
     ///   - none of the above → error
-    func ensureConnected() -> Int32 {
+    func ensureConnected(args: [String] = []) -> Int32 {
         var isConnected = false
         let statusSem = DispatchSemaphore(value: 0)
         Task {
@@ -1034,33 +1044,42 @@ final class CommandRouter {
         statusSem.wait()
         if isConnected { return 0 }
 
-        if let id = globals.id {
+        if let id = parseStringOption(args, short: "-i", long: "--id") {
             return runConnect([id])
         }
 
-        let hasFilters = globals.name != nil
-            || !globals.service.isEmpty
-            || globals.manufacturer != nil
-            || globals.rssiMin != nil
+        let name = parseStringOption(args, short: "-n", long: "--name")
+        let services = parseAllStringOptions(args, short: "-S", long: "--service")
+        let manufacturer = parseIntOption(args, short: "-m", long: "--manufacturer")
+        let rssiMin = parseIntOption(args, short: "-R", long: "--rssi-min")
+
+        let hasFilters = name != nil || !services.isEmpty || manufacturer != nil || rssiMin != nil
         guard hasFilters else {
             output.printError("not connected — specify a device with --id or --name")
             return BlewExitCode.invalidArguments.code
         }
 
         let timeout = globals.timeout ?? 5.0
-        let code = runScan(["-t", "\(timeout)"])
+        var scanArgs = ["-t", "\(timeout)"]
+        if let n = name { scanArgs += ["-n", n] }
+        for s in services { scanArgs += ["-S", s] }
+        if let m = manufacturer { scanArgs += ["-m", "\(m)"] }
+        if let r = rssiMin { scanArgs += ["-R", "\(r)"] }
+
+        let code = runScan(scanArgs)
         if code != 0 { return code }
 
-        guard let device = pickDevice(from: lastScanResults) else {
+        let pick = parsePickStrategy(args)
+        guard let device = pickDevice(from: lastScanResults, pick: pick) else {
             return BlewExitCode.notFound.code
         }
         return runConnect([device.identifier])
     }
 
-    /// Pick a single device from candidates according to `globals.pick`.
+    /// Pick a single device from candidates according to the given strategy.
     /// Returns `nil` (and prints an appropriate error) if the strategy cannot be satisfied.
-    private func pickDevice(from candidates: [DiscoveredDevice]) -> DiscoveredDevice? {
-        switch globals.pick {
+    private func pickDevice(from candidates: [DiscoveredDevice], pick: PickStrategy = .strongest) -> DiscoveredDevice? {
+        switch pick {
         case .strongest, .first:
             guard let device = candidates.first else {
                 output.printError("no devices found")
@@ -1082,6 +1101,11 @@ final class CommandRouter {
             }
             return candidates[0]
         }
+    }
+
+    private func parsePickStrategy(_ args: [String]) -> PickStrategy {
+        guard let raw = parseStringOption(args, short: "-p", long: "--pick") else { return .strongest }
+        return PickStrategy(rawValue: raw) ?? .strongest
     }
 
     // MARK: - Argument parsing helpers
@@ -1122,6 +1146,21 @@ final class CommandRouter {
     private func parseIntOption(_ args: [String], short: String, long: String) -> Int? {
         guard let str = parseStringOption(args, short: short, long: long) else { return nil }
         return Int(str)
+    }
+
+    /// Collect all values for a repeatable option (e.g. `-S uuid1 -S uuid2`).
+    private func parseAllStringOptions(_ args: [String], short: String, long: String) -> [String] {
+        var results: [String] = []
+        var i = 0
+        while i < args.count {
+            if (args[i] == short || args[i] == long) && i + 1 < args.count {
+                results.append(args[i + 1])
+                i += 2
+            } else {
+                i += 1
+            }
+        }
+        return results
     }
 }
 
@@ -1393,7 +1432,7 @@ extension CommandRouter {
         let savePath = parseStringOption(args, short: "-o", long: "--save")
 
         // First, connect to the target device using central mode
-        let connectCode = ensureConnected()
+        let connectCode = ensureConnected(args: args)
         guard connectCode == 0 else { return connectCode }
 
         output.printInfo("snapshotting GATT tree...")

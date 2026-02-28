@@ -227,71 +227,77 @@ Peripheral errors: `peripheralUnavailable`, `advertisingFailed`, `serviceRegistr
 
 ```
 blew [global-options] <subcommand> [command-options]  →  subcommand's own run() is called by ArgumentParser
-blew [global-options] --exec                          →  CommandRouter.executeScript()
 blew [global-options]                                 →  REPL.run()
 ```
 
 Before any mode exits, `cleanupBeforeExit()` performs a best-effort disconnect (waits up to 2 seconds for the disconnect to complete). SIGINT and SIGTERM both call this function before exiting.
 
-### 4.2 GlobalOptions
+### 4.2 GlobalOptions and DeviceTargetingOptions
 
-A `ParsableArguments` struct included via `@OptionGroup` in the root `Blew` command only. Global options are parsed exclusively at the root level — they must appear before the subcommand name on the command line. Subcommands access the parsed values via `GlobalOptions.current`, a static property set in `Blew.validate()` (which ArgumentParser calls before dispatching to the subcommand).
+`GlobalOptions` is a `ParsableArguments` struct included via `@OptionGroup` in the root `Blew` command only. Global options must appear before the subcommand name. Subcommands access them via `GlobalOptions.current`, a static property set in `Blew.validate()`.
 
 ```
 --verbose (-v)       flag count (0 / 1 / 2)
 --timeout (-t)       Double? — BLE operation timeout
 --out (-o)           OutputFormat: text | kv
---id (-i)            explicit device UUID
---name (-n)          device name filter
---service (-S)       [String] — service UUID filter, repeatable
---manufacturer (-m)  Int? — manufacturer ID filter
---rssi-min (-r)      Int? — minimum RSSI
---pick (-p)          PickStrategy: strongest | first | only
---exec (-x)          String? — semicolon-separated script
---keep-going (-k)    Bool — continue past errors in --exec
---dry-run            Bool — print parsed steps, don't run
 ```
 
-This design keeps global options out of each subcommand's `--help` output and prevents them from being supplied after the subcommand name.
+`DeviceTargetingOptions` is a `ParsableArguments` struct included via `@OptionGroup` in each subcommand that connects to a device. These options appear after the subcommand name.
+
+```
+--id (-i)            String? — explicit device UUID
+--name (-n)          String? — device name filter (substring)
+--service (-S)       [String] — service UUID filter, repeatable
+--manufacturer (-m)  Int? — manufacturer ID filter
+--rssi-min (-R)      Int? — minimum RSSI (uppercase -R to avoid conflict with -r/--read, -r/--with-response)
+--pick (-p)          PickStrategy: strongest | first | only
+```
+
+`DeviceTargetingOptions.toArgs()` serializes non-nil values into a flat string array passed to `CommandRouter.run*()` methods.
 
 ### 4.3 Subcommands
 
 Each subcommand is a thin `ParsableCommand` that:
-1. Validates/collects its own flags (e.g. `-c`, `-F`, `-d`)
-2. Creates a `CommandRouter` with `GlobalOptions.current` (set by `Blew.validate()`)
-3. Translates its parsed arguments into a string token array
+1. Validates/collects its own flags and an `@OptionGroup var targeting: DeviceTargetingOptions` where applicable
+2. Creates a `CommandRouter` with `GlobalOptions.current`
+3. Builds an args array via `targeting.toArgs()` + its own flags
 4. Calls the matching `CommandRouter.run*()` method
 5. Throws `BlewExitCode` if the result is non-zero
 
 The subcommand list:
 
 ```
-scan    [-w/--watch]
-connect [<device-id>]
+scan    [-n/-S/-R/-i/-m/-p] [-w/--watch]
+connect [-n/-S/-i/-m/-p] [<device-id>]
+exec    <script> [-k/--keep-going] [--dry-run]
 gatt
-  svcs
-  tree   [-d/--descriptors]  [-r/--read]
-  chars  [-r/--read]  <service-uuid>
-  desc   <char-uuid>
-  info   <char-uuid>
-read     [-f <fmt>]  <char-uuid>
-write    [-f <fmt>]  [-r|-w]  <char-uuid>  <data>
-sub      [-f <fmt>]  [-d <sec>]  [-c <count>]  <char-uuid>
+  svcs  [-n/-S/-i/-m/-p]
+  tree  [-n/-S/-i/-m/-p] [-d/--descriptors] [-r/--read]
+  chars [-n/-S/-i/-m/-p] [-r/--read] <service-uuid>
+  desc  [-n/-S/-i/-m/-p] <char-uuid>
+  info  <char-uuid>                           (no device required)
+read    [-n/-S/-i/-m/-p] [-f <fmt>] <char-uuid>
+write   [-n/-S/-i/-m/-p] [-f <fmt>] [-r|-w] <char-uuid> <data>
+sub     [-n/-S/-i/-m/-p] [-f <fmt>] [-d <sec>] [-c <count>] <char-uuid>
 periph
-  adv    [-n/--name <n>]  [-S/--service <uuid>...]  [-c/--config <file>]
-  clone  [-o/--save <file>]
+  adv   [-n <name>] [-S <uuid>...] [-c/--config <file>]
+  clone [-n/-S/-i/-m/-p] [-o/--save <file>]
 ```
+
+`ExecCommand` replaces the old `--exec` global flag. It calls `CommandRouter.executeScript(_:keepGoing:dryRun:)` directly.
+
+`PeriphCommand` is a normal subcommand container with two CLI-exposed nested subcommands: `AdvCommand` and `CloneCommand`. `AdvCommand` owns `-n`/`--name`, `-S`/`--service`, and `-c`/`--config`; `CloneCommand` uses `@OptionGroup var targeting: DeviceTargetingOptions` plus `--save`. Both serialize their parsed values into a string array and forward to `CommandRouter.runPeriphAdv()` / `runPeriphClone()`. The REPL-only periph commands (`stop`, `set`, `notify`, `status`) exist only in `CommandRouter.runPeriph()` and are not exposed as ArgumentParser subcommands.
 
 `periph adv` and `periph clone` each run in two phases:
 
 1. **Startup phase** (always blocking): configure the GATT server and call `startAdvertising`. Waits synchronously to confirm the peripheral came up successfully.
 2. **Event-loop phase**: stream read/write/subscription events to stdout.
 
-In CLI mode (ArgumentParser subcommand), phase 2 blocks until Ctrl-C — the process exits when advertising stops. In REPL and `--exec` mode (`isInteractiveMode == true`), phase 2 runs as a stored background `Task` and the prompt (or script) continues immediately. `periph stop` cancels that task and stops advertising.
+In CLI mode (ArgumentParser subcommand), phase 2 blocks until Ctrl-C — the process exits when advertising stops. In REPL and `exec` mode (`isInteractiveMode == true`), phase 2 runs as a stored background `Task` and the prompt (or script) continues immediately. `periph stop` cancels that task and stops advertising.
 
-`-n`/`--name` and `-S`/`--service` are `periph adv`-specific options placed after the subcommand name, not global options. `periph clone` uses global device-targeting options (`--id`, `--name`, `--service`) to identify the target device. Both subcommands accept a `--config` / `--save` JSON file for persistence.
+**macOS GAP name limitation:** `CBAdvertisementDataLocalNameKey` sets the advertising local name in the BLE advertisement data, but macOS always uses the computer hostname as the GAP (Generic Access Profile) device name. iOS scanners that have previously connected to the Mac will show the cached GAP name (hostname) in their device list instead of the advertising name. The advertising name is still accessible in the raw advertisement data (`kCBAdvDataLocalName`).
 
-Additional `periph` subcommands available in REPL and `--exec` mode (usable after `periph adv` or `periph clone` returns the prompt):
+Additional `periph` subcommands available in REPL and `exec` mode (usable after `periph adv` or `periph clone` returns the prompt):
 
 ```
 periph stop                             — cancel background event task, stop advertising
@@ -302,37 +308,37 @@ periph status                          — show advertising state
 
 `gatt info` does not require a connected device. It looks up the UUID in the generated `GATTCharacteristicDB` and prints the Bluetooth SIG specification: name, description, and field structure.
 
-`disconnect` and `status` are available in REPL and `--exec` mode but are not exposed as CLI subcommands — they carry no value when the process starts fresh with no persistent state.
+`disconnect` and `status` are available in REPL and `exec` mode but are not exposed as CLI subcommands — they carry no value when the process starts fresh with no persistent state.
 
 ### 4.4 Implicit auto-connect
 
-`gatt`, `read`, `write`, and `sub` call `CommandRouter.ensureConnected()` before executing. This means operations can be used directly from the CLI without a separate `connect` step:
+`gatt`, `read`, `write`, and `sub` call `CommandRouter.ensureConnected(args:)` before executing. This means operations can be used directly from the CLI without a separate `connect` step:
 
 ```
-blew --id <uuid> gatt tree
-blew --name "My Device" read -c 2A19
+blew gatt tree -i <uuid>
+blew read -n "My Device" 2A19
 ```
 
-`ensureConnected()` is a no-op when a connection is already established (REPL / `--exec` after an explicit `connect`). When not connected it resolves the target device using `GlobalOptions`:
+`ensureConnected(args:)` is a no-op when a connection is already established (REPL / `exec` after an explicit `connect`). When not connected it resolves the target device from the args array:
 
-1. `--id` present → connect directly
-2. Any scan filter present (`--name`, `--service`, `--manufacturer`, `--rssi-min`) → run a scan, apply `--pick` strategy to select one device, then connect
+1. `-i`/`--id` present → connect directly
+2. Any scan filter present (`-n`, `-S`, `-m`, `-R`) → build scan args, run a scan, apply `-p` pick strategy to select one device, then connect
 3. Neither → error: user must specify a device
 
-The `pickDevice(from:)` helper applies `globals.pick`:
+The `pickDevice(from:pick:)` helper applies the pick parameter:
 - `strongest` / `first` → first element of the RSSI-sorted scan results
 - `only` → the single result, or an error listing all candidates if more than one was found
 
 ### 4.5 CommandRouter
 
-The central command dispatcher. It is the shared implementation used by all three entry paths (ArgumentParser subcommands, `--exec`, and REPL).
+The central command dispatcher. It is the shared implementation used by all three entry paths (ArgumentParser subcommands, `exec`, and REPL).
 
 **`dispatch(_:)`** — tokenizes a single command-line string (with basic single/double-quote handling) and routes to the appropriate `run*()` method.
 
-**`executeScript(_:)`** — splits the `--exec` string on `;`, strips whitespace and empty segments, calls `dispatch` on each. With `--dry-run`, prints numbered steps instead. With `--keep-going`, records first error but continues.
+**`executeScript(_:keepGoing:dryRun:)`** — splits the script string on `;`, strips whitespace and empty segments, calls `dispatch` on each. With `dryRun: true`, prints numbered steps instead. With `keepGoing: true`, records first error but continues.
 
 **`run*()` methods** — each is a synchronous function that:
-1. Parses its args from the token array via private `parseStringOption`/`parseIntOption`/`parseDoubleOption` helpers
+1. Parses its args from the token array via private helpers: `parseStringOption`, `parseIntOption`, `parseDoubleOption`, `parseAllStringOptions`
 2. Creates a `DispatchSemaphore`
 3. Launches a `Task` calling the appropriate `BLECentral.shared` async method
 4. Signals the semaphore on completion (success or error)
