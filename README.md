@@ -345,8 +345,6 @@ Subscribes to a characteristic and streams received values to stdout, one event 
 | `-f, --format <fmt>` | Value format (same values as `read`). Default: `hex`. |
 | `-d, --duration <sec>` | Stop after this many seconds. |
 | `-c, --count <n>` | Stop after receiving this many notifications. |
-| `--notify` | Force notify mode. (Defined; not yet wired through — auto mode is used.) |
-| `--indicate` | Force indicate mode. (Defined; not yet wired through — auto mode is used.) |
 
 With `--out kv`, each line includes `ts=`, `char=`, and `value=` fields.
 

@@ -19,12 +19,6 @@ struct SubCommand: ParsableCommand {
     @Option(name: [.customShort("c"), .long], help: "Stop after this many notifications.")
     var count: Int?
 
-    @Flag(name: .customLong("notify"), help: "Force notify mode.")
-    var forceNotify: Bool = false
-
-    @Flag(name: .customLong("indicate"), help: "Force indicate mode.")
-    var forceIndicate: Bool = false
-
     @Argument(help: "Characteristic UUID to subscribe.")
     var char: String
 
