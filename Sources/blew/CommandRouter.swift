@@ -554,13 +554,10 @@ final class CommandRouter {
             return BlewExitCode.invalidArguments.code
         }
 
-        // info does not require a connected device
-        if sub == "info" {
-            return runGATTInfo(args.filter { !targetingOpts.contains($0) })
+        if sub != "info" {
+            let connectCode = ensureConnected(args: args)
+            guard connectCode == 0 else { return connectCode }
         }
-
-        let connectCode = ensureConnected(args: args)
-        guard connectCode == 0 else { return connectCode }
 
         let semaphore = DispatchSemaphore(value: 0)
         var exitCode: Int32 = 0
@@ -757,6 +754,15 @@ final class CommandRouter {
                     }
                     output.printTable(headers: headers, rows: rows)
 
+                case "info":
+                    let positionals = positionalArgs(args, optionsWithValue: targetingOpts).dropFirst()
+                    guard let charInput = positionals.first else {
+                        output.printError("missing characteristic UUID")
+                        exitCode = BlewExitCode.invalidArguments.code
+                        return
+                    }
+                    exitCode = runGATTInfo(charInput)
+
                 default:
                     output.printError("unknown gatt subcommand '\(sub)'")
                     print("Usage: gatt <svcs|tree|chars|desc|info>")
@@ -783,12 +789,7 @@ final class CommandRouter {
         return exitCode
     }
 
-    private func runGATTInfo(_ args: [String]) -> Int32 {
-        guard let charInput = positionalArgs(args, optionsWithValue: []).first else {
-            output.printError("missing characteristic UUID")
-            return BlewExitCode.invalidArguments.code
-        }
-
+    private func runGATTInfo(_ charInput: String) -> Int32 {
         guard let info = GATTDecoder.info(for: charInput) else {
             output.printError("no Bluetooth SIG definition found for '\(charInput)'")
             return BlewExitCode.notFound.code
