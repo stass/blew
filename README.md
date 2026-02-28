@@ -1,13 +1,67 @@
-# blew — macOS BLE CLI Workbench
+# blew — the OS X BLE toolkit for your terminal
 
-A macOS command-line tool for debugging and working with Bluetooth Low Energy (BLE) devices. Scan for peripherals, connect, inspect GATT services, read/write characteristics, and stream notifications — all from the terminal.
+Stop fumbling with GUI apps to debug Bluetooth Low Energy devices. `blew` gives you full BLE control from the macOS command line: scan the airwaves, drill into any device's GATT tree, read and write characteristics, stream live notifications, and even spin up a virtual peripheral that other devices can connect to.
 
-Works in two modes:
+### Why blew
 
-- **Command mode** — run a single command, then exit: `blew [global-options] <command> [command-options]`
-- **Interactive REPL** — run `blew` with no command for a readline-style shell with history and tab completion
+- **One tool, zero ceremony.** Scan, connect, inspect, read, write, subscribe -- each is a single command. Auto-connect means you never have to manually pair before doing real work.
+- **Interactive when you want it.** Launch the REPL for an exploratory session with tab completion, persistent history, and background subscriptions that print while you keep typing.
+- **Scriptable when you need it.** Chain commands with `exec`, pipe machine-readable `kv` output into `awk` or a log file, and use deterministic exit codes in CI or monitoring scripts.
+- **Full GATT visibility.** Print the service/characteristic tree of any device in one shot. Read all values inline. Look up any Bluetooth SIG characteristic's field-level spec without even connecting.
+- **Peripheral mode.** Turn your Mac into a virtual BLE device. Define a GATT server from a JSON config, or clone a real device's entire service tree and replay it.
+- **Human-readable by default.** Standard Bluetooth SIG UUIDs are resolved to their names everywhere -- scan results, GATT trees, notifications -- sourced from the official Bluetooth SIG database.
 
-> Requires macOS 13 or later and Bluetooth permission.
+### Modes of operation
+
+- **Command mode** -- run a single command, then exit: `blew [global-options] <command> [command-options]`
+- **Interactive REPL** -- run `blew` with no command for a readline-style shell with history and tab completion
+- **Script mode** -- run a semicolon-separated sequence sharing one connection: `blew exec "connect -n Sensor; gatt tree; read -f uint8 2A19"`
+
+> Requires macOS 13+ and Bluetooth permission.
+
+### Things you can do
+
+**Clone a real device and impersonate it.** Walk up to a heart rate monitor, clone its full GATT tree, and your Mac starts advertising as that device. Other apps can connect to the clone as if it were the real thing:
+
+```sh
+% blew periph clone -n "Heart Rate Monitor" --save hr.json
+```
+
+**Watch the BLE airwaves live.** See every device around you with signal-strength bars, updating in real time. Filter by name, service, or signal floor to zero in on what you need in a crowded venue:
+
+```sh
+% blew scan -w -R -70
+```
+
+**X-ray a device in one shot.** Connect, discover all services, read every readable characteristic, and print the whole thing as a tree, including names, properties, descriptors and live values:
+
+```sh
+% blew -n "Thingy" gatt tree -dr
+```
+
+**Look up any Bluetooth SIG characteristic without a device.** Instantly see the field-level structure of any standard characteristic, like byte layout, types, conditional fields:
+
+```sh
+% blew gatt info 2A37    # Heart Rate Measurement spec
+```
+
+**Stream sensor data straight to a log.** Subscribe to a characteristic, format values as key-value pairs, and pipe to a file or another tool. Runs headless, exits cleanly on timeout:
+
+```sh
+% blew -o kv sub -n "Sensor" -f uint16le -d 3600 fff1 >> hourly.log
+```
+
+**Spin up a virtual BLE device from a JSON file.** Define services, characteristics, properties, and initial values in a config file and start advertising in one command:
+
+```sh
+% blew periph adv --config health-thermometer.json
+```
+
+**Run a multi-step test sequence as a one-liner.** Connect, inspect, read, write, wait, read again or subscribe to notifications as a single command:
+
+```sh
+% blew exec -k "connect -n Sensor; gatt tree; write -f uint8 fff2 01; sleep 2; read -f uint16le fff1"
+```
 
 ---
 
@@ -29,24 +83,24 @@ On first run, macOS will prompt for Bluetooth permission. Grant it in **System S
 
 ## Quick start
 
-```bash
+```sh
 # Scan for nearby devices
-blew scan
+% blew scan
 
 # Print the GATT tree of a device (connects automatically)
-blew -n "Thingy" gatt tree
+% blew -n "Thingy" gatt tree
 
 # Read a characteristic (battery level)
-blew -n "Thingy" read -f uint8 2A19
+% blew -n "Thingy" read -f uint8 2A19
 
 # Subscribe to notifications for 10 seconds
-blew -n "Thingy" sub -d 10 fff1
+% blew -n "Thingy" sub -d 10 fff1
 
 # Run a multi-step procedure in one invocation
-blew -n "Thingy" -x "gatt tree; read -f uint8 2A19"
+% blew -n "Thingy" -x "gatt tree; read -f uint8 2A19"
 
 # Start the interactive REPL
-blew
+% blew
 ```
 
 ---
@@ -55,8 +109,8 @@ blew
 
 These options apply to all commands and must be placed **before** the subcommand name:
 
-```bash
-blew [global-options] <command> [command-options]
+```sh
+% blew [global-options] <command> [command-options]
 ```
 
 | Flag | Description |
@@ -111,15 +165,15 @@ Scans for advertising BLE peripherals and prints a table of discovered devices. 
 Standard Bluetooth SIG service UUIDs in the Services column are shown with their human-readable name: e.g. `180F (Battery Service), 180A (Device Information)`.
 
 **Examples:**
-```bash
-blew scan                          # Scan for 5 seconds
-blew -t 10 scan                    # Scan for 10 seconds
-blew scan -w                       # Continuously scan until Ctrl-C
-blew -t 30 scan -w                 # Watch for 30 seconds then stop
-blew scan -n "Heart" -w            # Watch for Heart Rate devices
-blew scan -S 180D -R -65           # Heart Rate service, RSSI ≥ -65 dBm
-blew -o kv scan                    # Machine-readable output
-blew -o kv scan -w                 # Stream device updates (piping-friendly)
+```sh
+% blew scan                          # Scan for 5 seconds
+% blew -t 10 scan                    # Scan for 10 seconds
+% blew scan -w                       # Continuously scan until Ctrl-C
+% blew -t 30 scan -w                 # Watch for 30 seconds then stop
+% blew scan -n "Heart" -w            # Watch for Heart Rate devices
+% blew scan -S 180D -R -65           # Heart Rate service, RSSI ≥ -65 dBm
+% blew -o kv scan                    # Machine-readable output
+% blew -o kv scan -w                 # Stream device updates (piping-friendly)
 ```
 
 ---
@@ -137,10 +191,10 @@ For `gatt`, `read`, `write`, and `sub` you do not need to run `connect` first �
 The connection is automatically closed on exit.
 
 **Examples:**
-```bash
-blew connect F3C2A1B0-...          # Test connectivity to an explicit ID
-blew connect -n "Thingy"           # Test connectivity by name
-blew connect -S 180F               # Connect to device advertising Battery Service
+```sh
+% blew connect F3C2A1B0-...          # Test connectivity to an explicit ID
+% blew connect -n "Thingy"           # Test connectivity by name
+% blew connect -S 180F               # Connect to device advertising Battery Service
 ```
 
 ---
@@ -263,14 +317,14 @@ Structure:
 With `-o kv`, one record per field is emitted (for scripting).
 
 **Examples:**
-```bash
-blew gatt tree -n "Thingy"
-blew gatt tree -n "Thingy" -d        # Include descriptors
-blew gatt tree -n "Thingy" -r        # Read values for readable characteristics
-blew gatt tree -n "Thingy" -dr       # Descriptors + values
-blew gatt chars -n "Thingy" 180F
-blew gatt chars -n "Thingy" -r 180A  # Read values for Device Information
-blew gatt desc -n "Thingy" 2A19
+```sh
+% blew gatt tree -n "Thingy"
+% blew gatt tree -n "Thingy" -d        # Include descriptors
+% blew gatt tree -n "Thingy" -r        # Read values for readable characteristics
+% blew gatt tree -n "Thingy" -dr       # Descriptors + values
+% blew gatt chars -n "Thingy" 180F
+% blew gatt chars -n "Thingy" -r 180A  # Read values for Device Information
+% blew gatt desc -n "Thingy" 2A19
 ```
 
 ---
@@ -301,10 +355,10 @@ Reads the value of a characteristic and prints it in the requested format. Conne
 | `raw` | Raw bytes |
 
 **Examples:**
-```bash
-blew read -n "Thingy" -f uint8 2A19     # Battery level as integer
-blew read -n "Thingy" -f utf8 2A29      # Manufacturer name string
-blew read -n "Thingy" fff1              # Raw characteristic as hex
+```sh
+% blew read -n "Thingy" -f uint8 2A19     # Battery level as integer
+% blew read -n "Thingy" -f utf8 2A29      # Manufacturer name string
+% blew read -n "Thingy" fff1              # Raw characteristic as hex
 ```
 
 ---
@@ -324,10 +378,10 @@ Writes data to a characteristic. Connects automatically if no connection is acti
 | `-w, --without-response` | Force write-without-response. |
 
 **Examples:**
-```bash
-blew write -n "Thingy" fff1 "deadbeef"           # Write hex bytes
-blew write -n "Thingy" -f uint8 -r 2A06 1        # Write uint8 with response
-blew write -n "Thingy" -f utf8 fff2 "hello"      # Write a UTF-8 string
+```sh
+% blew write -n "Thingy" fff1 "deadbeef"           # Write hex bytes
+% blew write -n "Thingy" -f uint8 -r 2A06 1        # Write uint8 with response
+% blew write -n "Thingy" -f utf8 fff2 "hello"      # Write a UTF-8 string
 ```
 
 ---
@@ -367,11 +421,11 @@ Stopped all background subscriptions.
 ```
 
 **Examples:**
-```bash
-blew sub -n "Thingy" fff1                        # Stream indefinitely (Ctrl-C to stop)
-blew sub -n "Thingy" -f uint16le -d 30 fff1      # 30-second capture as uint16
-blew -o kv sub -n "Thingy" -c 100 2A37           # Capture 100 events, kv output
-blew -o kv sub -n "Thingy" fff1 >> data.log      # Append to a log file
+```sh
+% blew sub -n "Thingy" fff1                        # Stream indefinitely (Ctrl-C to stop)
+% blew sub -n "Thingy" -f uint16le -d 30 fff1      # 30-second capture as uint16
+% blew -o kv sub -n "Thingy" -c 100 2A37           # Capture 100 events, kv output
+% blew -o kv sub -n "Thingy" fff1 >> data.log      # Append to a log file
 ```
 
 ---
@@ -380,9 +434,9 @@ blew -o kv sub -n "Thingy" fff1 >> data.log      # Append to a log file
 
 Run `blew` with no arguments (or with global options but no subcommand) to start the interactive REPL:
 
-```bash
-blew
-blew -v           # Start verbose REPL
+```sh
+% blew
+% blew -v           # Start verbose REPL
 ```
 
 The REPL provides:
@@ -449,8 +503,8 @@ blew> quit
 
 The `exec` subcommand runs a semicolon-separated sequence of commands in a single process, sharing one connection lifecycle. Commands are parsed identically to the REPL. The first command that requires a connection triggers an automatic connect; subsequent commands reuse it.
 
-```bash
-blew exec "connect -n Thingy; gatt tree; read -f uint8 2A19"
+```sh
+% blew exec "connect -n Thingy; gatt tree; read -f uint8 2A19"
 ```
 
 **Flags:**
@@ -467,18 +521,18 @@ blew exec "connect -n Thingy; gatt tree; read -f uint8 2A19"
 | `sleep <seconds>` | Pause for the given number of seconds. `0` means infinite (until Ctrl-C). |
 
 **Examples:**
-```bash
+```sh
 # Connect by name, read a value
-blew exec "connect -n Thingy; read -f uint8 2A19"
+% blew exec "connect -n Thingy; read -f uint8 2A19"
 
 # Wait 2 seconds between operations
-blew exec "connect -n Thingy; sleep 2; read -f uint8 2A19"
+% blew exec "connect -n Thingy; sleep 2; read -f uint8 2A19"
 
 # Keep going after errors
-blew exec -k "read fff1; read fff9"
+% blew exec -k "read fff1; read fff9"
 
 # Preview what would run
-blew exec --dry-run "connect -n Thingy; gatt tree; read -f uint8 2A19"
+% blew exec --dry-run "connect -n Thingy; gatt tree; read -f uint8 2A19"
 ```
 
 ---
@@ -523,8 +577,8 @@ ts=2026-02-21T12:34:56.789Z char=fff1 value=deadbeef
 
 The `name=` field is included when the UUID is a known Bluetooth SIG UUID. It is omitted for custom or vendor UUIDs.
 
-```bash
-blew -n "Thingy" -o kv sub -d 60 fff1 | awk -F'value=' '{print $2}'
+```sh
+% blew -n "Thingy" -o kv sub -d 60 fff1 | awk -F'value=' '{print $2}'
 ```
 
 ---
@@ -593,18 +647,18 @@ Starts advertising and runs until interrupted (Ctrl-C). Events (reads, writes, s
 
 **Examples:**
 
-```bash
+```sh
 # Advertise a name + service UUID (scanner-visible, no GATT characteristics)
-blew periph adv -n "My Sensor" -S 180F
+% blew periph adv -n "My Sensor" -S 180F
 
 # Multiple service UUIDs
-blew periph adv -n "My Sensor" -S 180F -S 180A
+% blew periph adv -n "My Sensor" -S 180F -S 180A
 
 # Full GATT server from a config file
-blew periph adv --config device.json
+% blew periph adv --config device.json
 
 # Config file with name override
-blew periph adv -n "Override Name" --config device.json
+% blew periph adv -n "Override Name" --config device.json
 ```
 
 Example config files are provided in the [`Examples/`](Examples/) directory:
@@ -660,9 +714,9 @@ Connects to a target device, discovers its full GATT tree, reads all readable ch
 
 **Examples:**
 
-```bash
-blew periph clone -n "Heart Rate Monitor"
-blew periph clone -i F3C2A1B0-... --save hr-monitor.json
+```sh
+% blew periph clone -n "Heart Rate Monitor"
+% blew periph clone -i F3C2A1B0-... --save hr-monitor.json
 ```
 
 #### REPL-only periph commands
@@ -687,8 +741,8 @@ Stopped advertising.
 
 In `exec` mode the same non-blocking behaviour applies, enabling scripts like:
 
-```bash
-blew exec "periph adv -n 'My Device' --config device.json; periph set 2A19 ff; periph notify 2A19 ff"
+```sh
+% blew exec "periph adv -n 'My Device' --config device.json; periph set 2A19 ff; periph notify 2A19 ff"
 ```
 
 ---
@@ -696,34 +750,33 @@ blew exec "periph adv -n 'My Device' --config device.json; periph set 2A19 ff; p
 ## Recipes
 
 ### Find a device in a crowded environment
-```bash
-blew scan -n "Sensor" -S 180F -R -65 -t 10
+```sh
+% blew scan -n "Sensor" -S 180F -R -65 -t 10
 ```
 
 ### Capture sensor data to a file
-```bash
-blew -o kv sub -n "Sensor" -f uint16le -d 300 fff1 >> sensor.log
+```sh
+% blew -o kv sub -n "Sensor" -f uint16le -d 300 fff1 >> sensor.log
 ```
 
 ### Quick GATT audit in one line
-```bash
-blew gatt tree -n "Thingy" -d
+```sh
+% blew gatt tree -n "Thingy" -d
 ```
 
 ### Inspect device info characteristics with values
-```bash
-blew gatt chars -n "Thingy" -r 180A
+```sh
+% blew gatt chars -n "Thingy" -r 180A
 ```
 
 ### Read with scripting
-```bash
-value=$(blew read -n "Thingy" -f uint8 2A19)
-echo "Battery: ${value}%"
+```sh
+% value=$(blew read -n "Thingy" -f uint8 2A19)
+% echo "Battery: ${value}%"
 ```
 
 ### Use `--pick only` to guard against accidental multi-match
-```bash
-blew read -n "Thingy" -p only -f uint8 2A19
+```sh
+% blew read -n "Thingy" -p only -f uint8 2A19
 # Errors out if more than one "Thingy" is nearby
 ```
-
