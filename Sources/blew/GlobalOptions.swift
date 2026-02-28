@@ -28,7 +28,7 @@ struct DeviceTargetingOptions: ParsableArguments {
     @Option(name: [.short, .long], help: "Filter by manufacturer ID.")
     var manufacturer: Int?
 
-    @Option(name: [.customShort("R"), .customLong("rssi-min")], help: "Minimum RSSI in dBm.")
+    @Option(name: [.customShort("R"), .customLong("rssi-min")], parsing: .unconditional, help: "Minimum RSSI in dBm.")
     var rssiMin: Int?
 
     @Option(name: [.short, .long], help: "Device pick strategy: strongest, first, or only.")
