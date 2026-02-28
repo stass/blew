@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>blew — BLE toolkit for the macOS terminal | scan, connect, read, write, subscribe</title>
+<meta name="description" content="blew is a command-line BLE toolkit for macOS. Scan, connect, inspect GATT trees, read and write characteristics, stream notifications, clone devices, and spin up virtual peripherals — all from the terminal.">
+<meta name="keywords" content="BLE, Bluetooth Low Energy, macOS, CLI, command line, GATT, BLE scanner, BLE tool, CoreBluetooth, peripheral mode, BLE debugging, BLE REPL, Swift, terminal">
+<meta name="author" content="blew">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="https://stass.github.io/blew">
+
+<!-- Open Graph -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="blew — BLE toolkit for the macOS terminal">
+<meta property="og:description" content="Scan, connect, read, write, subscribe, and impersonate Bluetooth Low Energy devices from the command line. No GUI, no Xcode, no pairing dialogs.">
+<meta property="og:url" content="https://stass.github.io/blew">
+<meta property="og:site_name" content="blew">
+<meta property="og:locale" content="en_US">
+
+<!-- Twitter Card -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="blew — BLE toolkit for the macOS terminal">
+<meta name="twitter:description" content="Scan, connect, read, write, subscribe, and impersonate Bluetooth Low Energy devices from the command line. No GUI, no Xcode, no pairing dialogs.">
+
+<meta name="theme-color" content="#0a0a0a">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "blew",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "macOS",
+  "description": "Command-line BLE toolkit for macOS. Scan, connect, inspect GATT trees, read/write characteristics, stream notifications, clone devices, and run virtual peripherals from the terminal.",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "programmingLanguage": "Swift",
+  "softwareRequirements": "macOS 13+"
+}
+</script>
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;500;600&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0a0a0a;
+    --surface: #111;
+    --border: #1a1a1a;
+    --text: #c8c8c8;
+    --text-dim: #666;
+    --accent: #4af;
+    --accent-dim: #2a6fa8;
+    --green: #5fd75f;
+    --yellow: #d7d75f;
+    --red: #d75f5f;
+    --mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+    --sans: 'Inter', -apple-system, sans-serif;
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.6;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .container {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* ---- hero ---- */
+  .hero {
+    padding: 120px 0 80px;
+    text-align: center;
+  }
+
+  .hero h1 {
+    font-family: var(--mono);
+    font-size: 4rem;
+    font-weight: 700;
+    letter-spacing: -0.04em;
+    color: #fff;
+    margin-bottom: 8px;
+  }
+
+  .hero h1 .cursor {
+    display: inline-block;
+    width: 3px;
+    height: 0.75em;
+    background: var(--accent);
+    margin-left: 4px;
+    vertical-align: middle;
+    animation: blink 1s step-end infinite;
+  }
+
+  @keyframes blink {
+    50% { opacity: 0; }
+  }
+
+  .hero .tagline {
+    font-family: var(--mono);
+    font-size: 1.1rem;
+    color: var(--text-dim);
+    margin-bottom: 40px;
+  }
+
+  .hero .pitch {
+    font-size: 1.25rem;
+    color: var(--text);
+    max-width: 600px;
+    margin: 0 auto 48px;
+    line-height: 1.7;
+  }
+
+  .hero .pitch strong {
+    color: #fff;
+  }
+
+  /* ---- install ---- */
+  .install-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    max-width: 560px;
+    margin: 0 auto 16px;
+    text-align: left;
+    position: relative;
+  }
+
+  .install-block pre {
+    font-family: var(--mono);
+    font-size: 0.875rem;
+    line-height: 1.8;
+    color: var(--text);
+    overflow-x: auto;
+  }
+
+  .install-block .prompt { color: var(--green); user-select: none; }
+  .install-block .comment { color: var(--text-dim); }
+  .install-block .flag { color: var(--yellow); }
+
+  .install-note {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    text-align: center;
+    margin-bottom: 80px;
+  }
+
+  /* ---- demo terminal ---- */
+  .demo {
+    padding-bottom: 80px;
+  }
+
+  .terminal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 48px;
+  }
+
+  .terminal-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 16px;
+    background: #161616;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .terminal-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
+
+  .terminal-dot.r { background: var(--red); }
+  .terminal-dot.y { background: var(--yellow); }
+  .terminal-dot.g { background: var(--green); }
+
+  .terminal-bar span {
+    flex: 1;
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--text-dim);
+  }
+
+  .terminal pre {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    line-height: 1.7;
+    padding: 20px 24px;
+    overflow-x: auto;
+    color: var(--text);
+  }
+
+  .terminal .prompt { color: var(--green); }
+  .terminal .dim { color: var(--text-dim); }
+  .terminal .accent { color: var(--accent); }
+  .terminal .bold { color: #fff; font-weight: 700; }
+
+  /* ---- features ---- */
+  .features {
+    padding-bottom: 80px;
+  }
+
+  .features h2 {
+    font-family: var(--mono);
+    font-size: 1rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    text-align: center;
+    margin-bottom: 40px;
+  }
+
+  .feature-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  .feature {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    transition: border-color 0.2s;
+  }
+
+  .feature:hover {
+    border-color: #333;
+  }
+
+  .feature h3 {
+    font-family: var(--mono);
+    font-size: 0.875rem;
+    color: #fff;
+    margin-bottom: 8px;
+  }
+
+  .feature p {
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+
+  .feature code {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--accent);
+    background: rgba(68, 170, 255, 0.08);
+    padding: 2px 5px;
+    border-radius: 3px;
+  }
+
+  /* ---- footer ---- */
+  .footer {
+    text-align: center;
+    padding: 40px 0;
+    border-top: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--text-dim);
+  }
+
+  .footer a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  .footer a:hover {
+    text-decoration: underline;
+  }
+
+  /* ---- responsive ---- */
+  @media (max-width: 600px) {
+    .hero { padding: 80px 0 60px; }
+    .hero h1 { font-size: 2.6rem; }
+    .hero .pitch { font-size: 1.05rem; }
+    .feature-grid { grid-template-columns: 1fr; }
+    .terminal pre { font-size: 0.72rem; padding: 16px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <section class="hero">
+    <h1>blew<span class="cursor"></span></h1>
+    <p class="tagline">BLE from your terminal. nothing else.</p>
+    <p class="pitch">
+      Scan, connect, read, write, subscribe, and impersonate
+      Bluetooth Low Energy devices — all from the command line.
+      <strong>No GUI. No Xcode. No pairing dialogs.</strong>
+      Just you, your terminal, and every BLE device in range.
+    </p>
+
+    <div class="install-block">
+      <pre><span class="prompt">$</span> git clone <span class="flag">--recurse-submodules</span> &lt;repo-url&gt;
+<span class="prompt">$</span> swift build <span class="flag">-c release</span>
+<span class="prompt">$</span> cp .build/release/blew /usr/local/bin/blew</pre>
+    </div>
+    <p class="install-note">macOS 13+. Swift toolchain required. Grant Bluetooth permission on first run.</p>
+  </section>
+
+  <section class="demo">
+    <div class="terminal">
+      <div class="terminal-bar">
+        <div class="terminal-dot r"></div>
+        <div class="terminal-dot y"></div>
+        <div class="terminal-dot g"></div>
+        <span>blew</span>
+      </div>
+      <pre><span class="dim"># scan the airwaves</span>
+<span class="prompt">%</span> blew scan -w -R -70
+<span class="bold">ID                                    NAME              RSSI  Signal    Services</span>
+<span class="dim">------------------------------------------------------------------------------------------</span>
+F3C2A1B0-1234-5678-ABCD-000000000001  Heart Monitor     -42   <span class="accent">████████</span>  180D (Heart Rate)
+A7E9D4C2-9876-5432-FEDC-000000000002  Env Sensor        -58   <span class="accent">██████</span>    181A (Environmental)
+B1D3F5A7-ABCD-EF01-2345-000000000003  Smart Lock        -63   <span class="accent">█████</span>    FFF0
+
+<span class="dim"># x-ray a device in one shot</span>
+<span class="prompt">%</span> blew gatt tree -n "Heart Monitor" -dr
+<span class="bold">Service 180D</span>  Heart Rate
+├── <span class="accent">2A37</span>  Heart Rate Measurement  [notify]
+│   └── 2902  Client Characteristic Configuration
+└── <span class="accent">2A38</span>  Body Sensor Location  [read]  = 1
+
+<span class="dim"># clone it and become it</span>
+<span class="prompt">%</span> blew periph clone -n "Heart Monitor" --save hr.json
+Cloning GATT from Heart Monitor...
+Advertising "Heart Monitor" [180D]</pre>
+    </div>
+  </section>
+
+  <section class="features">
+    <h2>What you get</h2>
+    <div class="feature-grid">
+      <div class="feature">
+        <h3>Zero-ceremony commands</h3>
+        <p>
+          Scan, connect, read, write, subscribe. Each is one command.
+          Auto-connect means <code>blew read -n Sensor 2A19</code> just works.
+        </p>
+      </div>
+      <div class="feature">
+        <h3>Interactive REPL</h3>
+        <p>
+          Tab completion on UUIDs, persistent history, background subscriptions
+          that print while you keep typing. Feels like a shell for BLE.
+        </p>
+      </div>
+      <div class="feature">
+        <h3>Full GATT visibility</h3>
+        <p>
+          Print the entire service tree with one flag. Read all values inline.
+          Look up any Bluetooth SIG characteristic spec without connecting.
+        </p>
+      </div>
+      <div class="feature">
+        <h3>Peripheral mode</h3>
+        <p>
+          Turn your Mac into a virtual BLE device. Define a GATT server from JSON,
+          or clone a real device and impersonate it.
+        </p>
+      </div>
+      <div class="feature">
+        <h3>Scriptable</h3>
+        <p>
+          Chain commands with <code>exec</code>. Pipe <code>-o kv</code> output into
+          awk. Deterministic exit codes. Built for CI and automation.
+        </p>
+      </div>
+      <div class="feature">
+        <h3>Human-readable by default</h3>
+        <p>
+          265+ Bluetooth SIG UUIDs resolved to names everywhere. Standard
+          characteristics decoded to natural types automatically.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <footer class="footer">
+    blew &mdash; macOS BLE toolkit &mdash; <a href="https://github.com/stass/blew">source</a>
+  </footer>
+
+</div>
+
+</body>
+</html>
