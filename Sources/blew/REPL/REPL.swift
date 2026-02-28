@@ -68,7 +68,7 @@ final class REPL {
         let commands = [
             "scan", "connect", "disconnect", "status",
             "gatt", "read", "write", "sub", "periph",
-            "help", "quit", "exit",
+            "sleep", "help", "quit", "exit",
         ]
         let gattSubs = ["svcs", "tree", "chars", "desc", "info"]
         let periphSubs = ["adv", "clone", "stop", "set", "notify", "status"]

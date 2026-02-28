@@ -310,6 +310,8 @@ periph status                          — show advertising state
 
 `disconnect` and `status` are available in REPL and `exec` mode but are not exposed as CLI subcommands — they carry no value when the process starts fresh with no persistent state.
 
+`sleep <seconds>` pauses execution for the given number of seconds. `0` means infinite (block until Ctrl-C). Available in REPL and `exec` mode; not exposed as a CLI subcommand.
+
 `sub` supports a `-b` (`--bg`) flag in REPL and `exec` mode that runs the subscription as a stored background `Task`, printing each notification via `printLive()` (stderr with ANSI cursor control) while the prompt remains available. Multiple simultaneous background subscriptions are supported, keyed by characteristic UUID. Two additional REPL/exec-only sub-subcommands manage them:
 
 ```

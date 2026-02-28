@@ -66,6 +66,8 @@ final class CommandRouter {
             return runSub(Array(tokens.dropFirst()))
         case "periph":
             return runPeriph(Array(tokens.dropFirst()))
+        case "sleep":
+            return runSleep(Array(tokens.dropFirst()))
         case "help":
             printHelp()
             return 0
@@ -99,6 +101,7 @@ final class CommandRouter {
             "  \(cmd("periph")) \(cmd("stop"))",
             "  \(cmd("periph")) \(cmd("set")) [-f <fmt>] <char> <value>",
             "  \(cmd("periph")) \(cmd("notify")) [-f <fmt>] <char> <value>",
+            "  \(cmd("sleep")) <seconds>",
             "  \(cmd("help"))",
             "  \(cmd("quit"))/\(cmd("exit"))",
         ]
@@ -507,6 +510,38 @@ final class CommandRouter {
         }
 
         waitInterruptible(task, semaphore: semaphore)
+        return 0
+    }
+
+    func runSleep(_ args: [String]) -> Int32 {
+        guard let raw = args.first, let seconds = Double(raw) else {
+            output.printError("sleep requires a numeric argument (seconds; 0 = infinite)")
+            return BlewExitCode.invalidArguments.code
+        }
+        guard seconds >= 0 else {
+            output.printError("sleep duration must be >= 0")
+            return BlewExitCode.invalidArguments.code
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+
+        let task = Task {
+            defer { semaphore.signal() }
+            do {
+                if seconds == 0 {
+                    // Sleep indefinitely until cancelled.
+                    while true {
+                        try await Task.sleep(nanoseconds: 1_000_000_000)
+                    }
+                } else {
+                    try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                }
+            } catch {}
+        }
+
+        if case .interrupted = waitInterruptible(task, semaphore: semaphore) {
+            return 130
+        }
         return 0
     }
 

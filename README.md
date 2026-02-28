@@ -460,10 +460,19 @@ blew exec "connect -n Thingy; gatt tree; read -f uint8 2A19"
 | `-k, --keep-going` | Continue after a command error; exit with the first non-zero code seen. |
 | `--dry-run` | Print parsed steps without executing them. |
 
+**Additional commands available in exec and REPL:**
+
+| Command | Description |
+|---------|-------------|
+| `sleep <seconds>` | Pause for the given number of seconds. `0` means infinite (until Ctrl-C). |
+
 **Examples:**
 ```bash
 # Connect by name, read a value
 blew exec "connect -n Thingy; read -f uint8 2A19"
+
+# Wait 2 seconds between operations
+blew exec "connect -n Thingy; sleep 2; read -f uint8 2A19"
 
 # Keep going after errors
 blew exec -k "read fff1; read fff9"
