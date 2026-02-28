@@ -6,7 +6,7 @@ final class CommandRouter {
     let manager: BLECentral
     let output: OutputFormatter
     let isInteractiveMode: Bool
-    private(set) var lastScanResults: [DiscoveredDevice] = []
+    var lastScanResults: [DiscoveredDevice] = []
     private var backgroundPeriphTask: Task<Void, Never>?
     private var backgroundSubTasks: [String: Task<Void, Never>] = [:]
 
@@ -108,7 +108,7 @@ final class CommandRouter {
         print(lines.joined(separator: "\n"))
     }
 
-    private func tokenize(_ line: String) -> [String] {
+    func tokenize(_ line: String) -> [String] {
         var tokens: [String] = []
         var current = ""
         var inQuote = false
@@ -1249,7 +1249,7 @@ final class CommandRouter {
 
     /// Collect non-flag positional tokens from args. Options listed in
     /// `optionsWithValue` consume their following token and are skipped.
-    private func positionalArgs(_ args: [String], optionsWithValue: Set<String>) -> [String] {
+    func positionalArgs(_ args: [String], optionsWithValue: Set<String>) -> [String] {
         var result: [String] = []
         var skipNext = false
         for arg in args {
@@ -1263,7 +1263,7 @@ final class CommandRouter {
         return result
     }
 
-    private func parseStringOption(_ args: [String], short: String, long: String) -> String? {
+    func parseStringOption(_ args: [String], short: String, long: String) -> String? {
         for (i, arg) in args.enumerated() {
             if (arg == short || arg == long) && i + 1 < args.count {
                 return args[i + 1]
@@ -1275,18 +1275,18 @@ final class CommandRouter {
         return nil
     }
 
-    private func parseDoubleOption(_ args: [String], short: String, long: String) -> Double? {
+    func parseDoubleOption(_ args: [String], short: String, long: String) -> Double? {
         guard let str = parseStringOption(args, short: short, long: long) else { return nil }
         return Double(str)
     }
 
-    private func parseIntOption(_ args: [String], short: String, long: String) -> Int? {
+    func parseIntOption(_ args: [String], short: String, long: String) -> Int? {
         guard let str = parseStringOption(args, short: short, long: long) else { return nil }
         return Int(str)
     }
 
     /// Collect all values for a repeatable option (e.g. `-S uuid1 -S uuid2`).
-    private func parseAllStringOptions(_ args: [String], short: String, long: String) -> [String] {
+    func parseAllStringOptions(_ args: [String], short: String, long: String) -> [String] {
         var results: [String] = []
         var i = 0
         while i < args.count {
