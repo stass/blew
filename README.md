@@ -1,4 +1,4 @@
-# blew — the OS X BLE toolkit for your terminal
+# blew -- BLE scanner and CLI tool for Mac OS X
 
 Stop fumbling with GUI apps to debug Bluetooth Low Energy devices. `blew` gives you full BLE control from the macOS command line: scan the airwaves, drill into any device's GATT tree, read and write characteristics, stream live notifications, and even spin up a virtual peripheral that other devices can connect to.
 

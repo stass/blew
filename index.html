@@ -3,25 +3,25 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>blew — BLE toolkit for the macOS terminal | scan, connect, read, write, subscribe</title>
-<meta name="description" content="blew is a command-line BLE toolkit for macOS. Scan, connect, inspect GATT trees, read and write characteristics, stream notifications, clone devices, and spin up virtual peripherals — all from the terminal.">
-<meta name="keywords" content="BLE, Bluetooth Low Energy, macOS, CLI, command line, GATT, BLE scanner, BLE tool, CoreBluetooth, peripheral mode, BLE debugging, BLE REPL, Swift, terminal">
+<title>blew — BLE scanner and CLI tool for Mac OS X | scan, connect, read, write, subscribe</title>
+<meta name="description" content="blew is a command-line BLE tool for Mac OS X (macOS). Scan for Bluetooth Low Energy devices, connect, inspect GATT trees, read and write characteristics, stream notifications, clone devices, and run virtual peripherals — all from the Mac terminal. No GUI needed.">
+<meta name="keywords" content="BLE scanner, BLE tool, Mac OS X BLE CLI, mac os x ble tool, Bluetooth Low Energy scanner, macOS command line BLE, GATT browser, BLE debugging tool, CoreBluetooth CLI, BLE REPL, Swift BLE, terminal BLE scanner, mac bluetooth scanner, ble scan Mac OS X, macOS BLE tool">
 <meta name="author" content="blew">
 <meta name="robots" content="index, follow">
 <link rel="canonical" href="https://stass.github.io/blew">
 
 <!-- Open Graph -->
 <meta property="og:type" content="website">
-<meta property="og:title" content="blew — BLE toolkit for the macOS terminal">
-<meta property="og:description" content="Scan, connect, read, write, subscribe, and impersonate Bluetooth Low Energy devices from the command line. No GUI, no Xcode, no pairing dialogs.">
+<meta property="og:title" content="blew — BLE scanner and CLI tool for Mac OS X">
+<meta property="og:description" content="A command-line BLE tool for Mac OS X. Scan for Bluetooth Low Energy devices, connect, read, write, subscribe, and impersonate — all from the terminal. No GUI, no Xcode, no pairing dialogs.">
 <meta property="og:url" content="https://stass.github.io/blew">
 <meta property="og:site_name" content="blew">
 <meta property="og:locale" content="en_US">
 
 <!-- Twitter Card -->
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="blew — BLE toolkit for the macOS terminal">
-<meta name="twitter:description" content="Scan, connect, read, write, subscribe, and impersonate Bluetooth Low Energy devices from the command line. No GUI, no Xcode, no pairing dialogs.">
+<meta name="twitter:title" content="blew — BLE scanner and CLI tool for Mac OS X">
+<meta name="twitter:description" content="A command-line BLE tool for Mac OS X. Scan for Bluetooth Low Energy devices, connect, read, write, subscribe, and impersonate — all from the terminal. No GUI, no Xcode, no pairing dialogs.">
 
 <meta name="theme-color" content="#0a0a0a">
 
@@ -32,12 +32,49 @@
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
   "name": "blew",
+  "alternateName": ["blew BLE scanner", "blew BLE tool"],
   "applicationCategory": "DeveloperApplication",
-  "operatingSystem": "macOS",
-  "description": "Command-line BLE toolkit for macOS. Scan, connect, inspect GATT trees, read/write characteristics, stream notifications, clone devices, and run virtual peripherals from the terminal.",
+  "applicationSubCategory": "Bluetooth Low Energy Scanner",
+  "operatingSystem": "Mac OS X",
+  "description": "Command-line BLE scanner and tool for Mac OS X. Scan for Bluetooth Low Energy devices, connect, inspect GATT trees, read/write characteristics, stream notifications, clone devices, and run virtual peripherals from the Mac terminal.",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
   "programmingLanguage": "Swift",
-  "softwareRequirements": "macOS 13+"
+  "softwareRequirements": "macOS 13+",
+  "url": "https://stass.github.io/blew",
+  "downloadUrl": "https://github.com/stass/blew",
+  "license": "https://opensource.org/licenses/MIT"
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Is there a BLE scanner CLI tool for Mac OS X?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. blew is a free, open-source command-line BLE tool for Mac OS X (macOS 13+). It lets you scan for Bluetooth Low Energy devices, connect, inspect GATT service trees, read and write characteristics, stream notifications, and even impersonate devices -- all from the terminal with no GUI required."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I scan for BLE devices from the Mac terminal?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Install blew (git clone, swift build), then run 'blew scan' to discover nearby BLE devices. Use 'blew scan -w' for continuous watch mode, or filter by name, service UUID, or signal strength."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I read and write BLE characteristics from the Mac OS X command line?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. blew supports reading ('blew read'), writing ('blew write'), and subscribing to notifications ('blew sub') on any BLE characteristic, directly from the macOS terminal. It auto-connects and auto-discovers GATT services."
+      }
+    }
+  ]
 }
 </script>
 
@@ -266,6 +303,75 @@
     border-radius: 3px;
   }
 
+  /* ---- faq ---- */
+  .faq {
+    padding-bottom: 80px;
+  }
+
+  .faq h2 {
+    font-family: var(--mono);
+    font-size: 1rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    text-align: center;
+    margin-bottom: 40px;
+  }
+
+  .faq details {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    transition: border-color 0.2s;
+  }
+
+  .faq details:hover {
+    border-color: #333;
+  }
+
+  .faq details[open] {
+    border-color: var(--accent-dim);
+  }
+
+  .faq summary {
+    font-family: var(--mono);
+    font-size: 0.875rem;
+    color: #fff;
+    padding: 20px 24px;
+    cursor: pointer;
+    list-style: none;
+  }
+
+  .faq summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .faq summary::before {
+    content: '+ ';
+    color: var(--accent);
+  }
+
+  .faq details[open] summary::before {
+    content: '- ';
+  }
+
+  .faq details p {
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    line-height: 1.7;
+    padding: 0 24px 20px;
+  }
+
+  .faq details code {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--accent);
+    background: rgba(68, 170, 255, 0.08);
+    padding: 2px 5px;
+    border-radius: 3px;
+  }
+
   /* ---- footer ---- */
   .footer {
     text-align: center;
@@ -301,10 +407,10 @@
 
   <section class="hero">
     <h1>blew<span class="cursor"></span></h1>
-    <p class="tagline">BLE from your terminal. nothing else.</p>
+    <p class="tagline">a BLE scanner and CLI tool for Mac OS X</p>
     <p class="pitch">
       Scan, connect, read, write, subscribe, and impersonate
-      Bluetooth Low Energy devices — all from the command line.
+      Bluetooth Low Energy devices on macOS — all from the command line.
       <strong>No GUI. No Xcode. No pairing dialogs.</strong>
       Just you, your terminal, and every BLE device in range.
     </p>
@@ -314,7 +420,7 @@
 <span class="prompt">$</span> swift build <span class="flag">-c release</span>
 <span class="prompt">$</span> cp .build/release/blew /usr/local/bin/blew</pre>
     </div>
-    <p class="install-note">macOS 13+. Swift toolchain required. Grant Bluetooth permission on first run.</p>
+    <p class="install-note">Runs on Mac OS X 13+. Swift toolchain required. Grant Bluetooth permission on first run.</p>
   </section>
 
   <section class="demo">
@@ -348,7 +454,7 @@ Advertising "Heart Monitor" [180D]</pre>
   </section>
 
   <section class="features">
-    <h2>What you get</h2>
+    <h2>What you get with this Mac OS X BLE tool</h2>
     <div class="feature-grid">
       <div class="feature">
         <h3>Zero-ceremony commands</h3>
@@ -395,8 +501,24 @@ Advertising "Heart Monitor" [180D]</pre>
     </div>
   </section>
 
+  <section class="faq">
+    <h2>FAQ</h2>
+    <details>
+      <summary>Is there a BLE scanner CLI tool for Mac OS X?</summary>
+      <p>Yes. blew is a free, open-source command-line BLE tool for Mac OS X (macOS 13+). It lets you scan for Bluetooth Low Energy devices, connect, inspect GATT service trees, read and write characteristics, stream notifications, and even impersonate devices -- all from the terminal with no GUI required.</p>
+    </details>
+    <details>
+      <summary>How do I scan for BLE devices from the Mac terminal?</summary>
+      <p>Install blew (<code>git clone</code>, <code>swift build</code>), then run <code>blew scan</code> to discover nearby BLE devices. Use <code>blew scan -w</code> for continuous watch mode, or filter by name, service UUID, or signal strength.</p>
+    </details>
+    <details>
+      <summary>Can I read and write BLE characteristics from the Mac OS X command line?</summary>
+      <p>Yes. blew supports reading (<code>blew read</code>), writing (<code>blew write</code>), and subscribing to notifications (<code>blew sub</code>) on any BLE characteristic, directly from the macOS terminal. It auto-connects and auto-discovers GATT services.</p>
+    </details>
+  </section>
+
   <footer class="footer">
-    blew &mdash; macOS BLE toolkit &mdash; <a href="https://github.com/stass/blew">source</a>
+    blew &mdash; BLE scanner and CLI tool for Mac OS X &mdash; <a href="https://github.com/stass/blew">source</a>
   </footer>
 
 </div>
