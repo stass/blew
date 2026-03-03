@@ -67,10 +67,16 @@ Stop fumbling with GUI apps to debug Bluetooth Low Energy devices. `blew` gives 
 
 ## Installation
 
-Build from source with Swift:
+### Homebrew
 
 ```bash
-git clone --recurse-submodules <repo-url>
+brew install stass/tap/blew
+```
+
+### Build from source
+
+```bash
+git clone --recurse-submodules https://github.com/stass/blew.git
 swift build -c release
 cp .build/release/blew /usr/local/bin/blew
 ```

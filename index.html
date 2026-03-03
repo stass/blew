@@ -117,7 +117,7 @@
 
   /* ---- hero ---- */
   .hero {
-    padding: 120px 0 80px;
+    padding: 120px 0 40px;
     text-align: center;
   }
 
@@ -196,7 +196,7 @@
 
   /* ---- demo terminal ---- */
   .demo {
-    padding-bottom: 80px;
+    padding-bottom: 48px;
   }
 
   .terminal {
@@ -415,12 +415,6 @@
       Just you, your terminal, and every BLE device in range.
     </p>
 
-    <div class="install-block">
-      <pre><span class="prompt">$</span> git clone <span class="flag">--recurse-submodules</span> https://github.com/stass/blew.git
-<span class="prompt">$</span> swift build <span class="flag">-c release</span>
-<span class="prompt">$</span> cp .build/release/blew /usr/local/bin/blew</pre>
-    </div>
-    <p class="install-note">Runs on Mac OS X 13+. Swift toolchain required. Grant Bluetooth permission on first run.</p>
   </section>
 
   <section class="demo">
@@ -451,6 +445,14 @@ B1D3F5A7-ABCD-EF01-2345-000000000003  Smart Lock        -63   <span class="accen
 Cloning GATT from Heart Monitor...
 Advertising "Heart Monitor" [180D]</pre>
     </div>
+  </section>
+
+  <section class="hero" style="padding-top:0">
+    <h2 style="font-family:var(--mono);font-size:1rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:24px">Install</h2>
+    <div class="install-block">
+      <pre><span class="prompt">$</span> brew install stass/tap/blew</pre>
+    </div>
+    <p class="install-note">Runs on Mac OS X 13+. Grant Bluetooth permission on first run. Or build from <a href="https://github.com/stass/blew" style="color:var(--accent);text-decoration:none">source</a>.</p>
   </section>
 
   <section class="features">
@@ -509,7 +511,7 @@ Advertising "Heart Monitor" [180D]</pre>
     </details>
     <details>
       <summary>How do I scan for BLE devices from the Mac terminal?</summary>
-      <p>Install blew (<code>git clone</code>, <code>swift build</code>), then run <code>blew scan</code> to discover nearby BLE devices. Use <code>blew scan -w</code> for continuous watch mode, or filter by name, service UUID, or signal strength.</p>
+      <p>Install blew with <code>brew install stass/tap/blew</code>, then run <code>blew scan</code> to discover nearby BLE devices. Use <code>blew scan -w</code> for continuous watch mode, or filter by name, service UUID, or signal strength.</p>
     </details>
     <details>
       <summary>Can I read and write BLE characteristics from the Mac OS X command line?</summary>
