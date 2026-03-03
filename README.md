@@ -2,6 +2,8 @@
 
 Stop fumbling with GUI apps to debug Bluetooth Low Energy devices. `blew` gives you full BLE control from the macOS command line: scan the airwaves, drill into any device's GATT tree, read and write characteristics, stream live notifications, and even spin up a virtual peripheral that other devices can connect to.
 
+<img src="img/scan.avif" alt="BLE scan" width="32%"> <img src="img/gatttree.avif" alt="GATT tree" width="32%"> <img src="img/uart.avif" alt="UART" width="32%">
+
 ### Why blew
 
 - **One tool, zero ceremony.** Scan, connect, inspect, read, write, subscribe -- each is a single command. Auto-connect means you never have to manually pair before doing real work.
