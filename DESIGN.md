@@ -28,7 +28,7 @@ The two library targets are intentionally decoupled. `BLEManager` has no knowled
 │        │           │           │                                    │
 │        └───────────┴───────────┘                                    │
 │                        │                                            │
-│                   OutputFormatter                                   │
+│            OutputRenderer (TextRenderer / KVRenderer)               │
 │                  (stdout / stderr)                                  │
 └───────────────────────────────┬─────────────────────────────────────┘
                                 │ async/await calls
@@ -261,8 +261,9 @@ Each subcommand is a thin `ParsableCommand` that:
 1. Validates/collects its own flags and an `@OptionGroup var targeting: DeviceTargetingOptions` where applicable
 2. Creates a `CommandRouter` with `GlobalOptions.current`
 3. Builds an args array via `targeting.toArgs()` + its own flags
-4. Calls the matching `CommandRouter.run*()` method
-5. Throws `BlewExitCode` if the result is non-zero
+4. Calls the matching `CommandRouter.run*()` method, receiving a `CommandResult`
+5. Renders the result via `router.renderer.renderResult(result)`
+6. Throws `BlewExitCode` if the result's exit code is non-zero
 
 The subcommand list:
 
@@ -344,17 +345,22 @@ The `pickDevice(from:pick:)` helper applies the pick parameter:
 
 The central command dispatcher. It is the shared implementation used by all three entry paths (ArgumentParser subcommands, `exec`, and REPL).
 
-**`dispatch(_:)`** — tokenizes a single command-line string (with basic single/double-quote handling) and routes to the appropriate `run*()` method.
+**`dispatch(_:)`** — tokenizes a single command-line string (with basic single/double-quote handling) and routes to the appropriate `run*()` method. Returns a `CommandResult`. After each `run*()` call, `dispatch()` renders the result via its `renderer` (which writes output to stdout/stderr). This means REPL callers get automatic rendering, while CLI subcommands render explicitly.
 
-**`executeScript(_:keepGoing:dryRun:)`** — splits the script string on `;`, strips whitespace and empty segments, calls `dispatch` on each. With `dryRun: true`, prints numbered steps instead. With `keepGoing: true`, records first error but continues.
+**`executeScript(_:keepGoing:dryRun:)`** — splits the script string on `;`, strips whitespace and empty segments, calls `dispatch` on each. Returns `Int32` exit code. With `dryRun: true`, prints numbered steps instead. With `keepGoing: true`, records first error but continues.
 
-**`run*()` methods** — each is a synchronous function that:
+**`run*()` methods** — each is a synchronous function that returns a `CommandResult` containing structured output. The method:
 1. Parses its args from the token array via private helpers: `parseStringOption`, `parseIntOption`, `parseDoubleOption`, `parseAllStringOptions`
 2. Creates a `DispatchSemaphore`
 3. Launches a `Task` calling the appropriate `BLECentral.shared` async method
-4. Signals the semaphore on completion (success or error)
-5. Waits on the semaphore
-6. Returns an exit code
+4. Appends structured `CommandOutput` items to the result (instead of printing directly)
+5. Signals the semaphore on completion (success or error)
+6. Waits on the semaphore
+7. Returns the `CommandResult`
+
+Commands fall into two categories:
+- **Non-streaming commands** (scan, connect, disconnect, status, read, write, gatt *, periph set/notify/status/stop): produce all output before returning. Their `CommandResult` contains the full structured output.
+- **Streaming commands** (foreground sub, periph adv/clone event loops, background sub): produce output incrementally during execution. These render each item live via the `renderer` during the async loop. Their `CommandResult` contains only the exit code and any errors.
 
 This semaphore pattern bridges Swift's structured concurrency into the synchronous world of the CLI main thread and REPL loop.
 
@@ -365,35 +371,59 @@ This semaphore pattern bridges Swift's structured concurrency into the synchrono
 
 **Scan results cache** — `lastScanResults: [DiscoveredDevice]` is updated after every successful scan. Used for device resolution in `connect` and for REPL tab completion.
 
-**Text output** — uses the `ScanSpinner` (a `DispatchSourceTimer`-based braille spinner on stderr) when stdout is a TTY and a scan is running. In `--watch` mode, uses `ScanWatchDisplay` instead — a timer-based renderer that redraws the device table in-place on stderr every 250 ms using ANSI cursor movement. When the watch loop exits (Ctrl-C or timeout), the final table is printed once to stdout so it persists in scroll history.
+**Scan UI** — uses the `ScanSpinner` (a `DispatchSourceTimer`-based braille spinner on stderr) when stdout is a TTY and a scan is running. In `--watch` mode, uses `ScanWatchDisplay` instead — a timer-based renderer that redraws the device table in-place on stderr every 250 ms using ANSI cursor movement. When the watch loop exits (Ctrl-C or timeout), the final table is printed once to stdout so it persists in scroll history.
 
-### 4.6 OutputFormatter
+### 4.6 Output architecture
 
-Wraps `OutputFormat` (text|kv) and `verbosity` (0/1/2). All output goes through this type; no command calls `Swift.print` directly.
+Command output is structured rather than text-based. Commands produce `CommandResult` values containing typed `CommandOutput` items, and renderers convert these to text or key-value format for display.
 
-| Method | Destination | Visibility |
-|--------|-------------|------------|
-| `printError(_:)` | stderr, prefixed `Error:` | always |
-| `printInfo(_:)` | stderr, plain | verbosity ≥ 1 |
-| `printDebug(_:)` | stderr, prefixed `[debug]` | verbosity ≥ 2 |
-| `print(_:)` | stdout | always |
-| `printRecord(_:)` | stdout | always |
-| `printTable(headers:rows:)` | stdout | always |
+**CommandResult and CommandOutput** (`Sources/blew/Output/CommandOutput.swift`)
 
-`printRecord`, `printTable`, and `formatTable` adapt their output to the selected format:
-- **text**: `key: value` pairs (record) or auto-padded aligned columns (table). `formatTable` returns the table as a `String` without printing; `printTable` calls it and writes to stdout. `ScanWatchDisplay` uses `formatTable` to compose the in-place redraw buffer.
-- **kv**: space-separated `key=value` on one line; values with spaces or quotes are double-quoted
+`CommandResult` holds the exit code, an array of `CommandOutput` items, and arrays of error/info/debug messages:
 
-**ANSI formatting** — `OutputFormatter` detects whether stdout is a TTY at init time (`isatty(fileno(stdout))`). When in text mode with a TTY, two helpers apply ANSI escape sequences:
-- `bold(_:)` — wraps text in `\e[1m...\e[0m`
-- `dim(_:)` — wraps text in `\e[2m...\e[0m`
+```
+struct CommandResult {
+    var exitCode: Int32
+    var output: [CommandOutput]
+    var errors: [String]
+    var infos: [String]
+    var debugs: [String]
+}
+```
 
-Both helpers return the string unchanged when stdout is not a TTY or format is `kv`, so piped output and machine-readable output are never polluted with escape codes. These helpers are used by:
-- `printTable` — bold column headers, dim separator line
-- `printRecord` — bold key names (text mode)
-- `gatt tree` — bold service/characteristic UUIDs, dim properties and values
-- `gatt info` — bold characteristic name header and "Structure:" label, dim conditional field annotations
-- `help` — bold command names
+`CommandOutput` is an enum with cases for each kind of structured data: `.devices`, `.services`, `.characteristics`, `.descriptors`, `.gattTree`, `.characteristicInfo`, `.connectionStatus`, `.peripheralStatus`, `.readValue`, `.writeSuccess`, `.notification`, `.peripheralSummary`, `.peripheralEvent`, `.subscriptionList`, `.message`, `.empty`.
+
+Each case wraps lightweight row/result structs (`DeviceRow`, `ServiceRow`, `CharacteristicRow`, `GATTTreeService`, `ReadResult`, `NotificationValue`, etc.) that carry display-oriented data.
+
+**OutputRenderer protocol** (`Sources/blew/Output/OutputRenderer.swift`)
+
+```
+protocol OutputRenderer {
+    func render(_ output: CommandOutput)
+    func renderError(_ message: String)
+    func renderInfo(_ message: String)
+    func renderDebug(_ message: String)
+    func renderResult(_ result: CommandResult)
+    func renderLive(_ text: String)
+}
+```
+
+Two implementations:
+
+- **TextRenderer** (`Sources/blew/Output/TextRenderer.swift`): produces human-readable text output with aligned tables, GATT tree drawing, ANSI bold/dim when stdout is a TTY. Uses `OutputFormatter` internally for table formatting and ANSI helpers.
+- **KVRenderer** (`Sources/blew/Output/KVRenderer.swift`): produces machine-readable `key=value` lines.
+
+**OutputFormatter** (`Sources/blew/Output/OutputFormatter.swift`)
+
+Narrowed to a formatting utility used internally by `TextRenderer`. Provides:
+- `bold(_:)` / `dim(_:)` — ANSI escape wrappers (no-op when not a TTY or in KV mode)
+- `boldPaddingWidth` — byte-count adjustment for ANSI sequences in column alignment
+- `formatTable(headers:rows:)` — builds an aligned text table as a `String`
+- `printTable(headers:rows:)` / `printRecord(_:)` — convenience methods that format and write to stdout
+
+The `isTTY` flag is detected at init time via `isatty(fileno(stdout))`. ANSI escapes are only applied in text mode with a TTY, so piped output is never polluted.
+
+The `ScanWatchDisplay` still uses `OutputFormatter.formatTable` directly to compose its in-place redraw buffer on stderr.
 
 ### 4.7 DataFormatter
 

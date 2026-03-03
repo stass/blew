@@ -44,9 +44,10 @@ struct AdvCommand: ParsableCommand {
         if let n = name { args += ["-n", n] }
         for s in service { args += ["-S", s] }
         if let c = config { args += ["-c", c] }
-        let code = router.runPeriphAdv(args)
+        let result = router.runPeriphAdv(args)
+        router.renderer.renderResult(result)
         cleanupBeforeExit()
-        if code != 0 { throw BlewExitCode(code) }
+        if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
     }
 }
 
@@ -66,8 +67,9 @@ struct CloneCommand: ParsableCommand {
         let router = CommandRouter(globals: globals)
         var args = targeting.toArgs()
         if let s = save { args += ["-o", s] }
-        let code = router.runPeriphClone(args)
+        let result = router.runPeriphClone(args)
+        router.renderer.renderResult(result)
         cleanupBeforeExit()
-        if code != 0 { throw BlewExitCode(code) }
+        if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
     }
 }

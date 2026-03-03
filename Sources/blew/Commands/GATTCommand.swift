@@ -28,8 +28,9 @@ struct GATTSvcsCommand: ParsableCommand {
         let router = CommandRouter(globals: GlobalOptions.current)
         var args = targeting.toArgs()
         args.append("svcs")
-        let code = router.runGATT(args)
-        if code != 0 { throw BlewExitCode(code) }
+        let result = router.runGATT(args)
+        router.renderer.renderResult(result)
+        if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
     }
 }
 
@@ -53,8 +54,9 @@ struct GATTTreeCommand: ParsableCommand {
         args.append("tree")
         if descriptors { args.append("-d") }
         if readValues { args.append("-r") }
-        let code = router.runGATT(args)
-        if code != 0 { throw BlewExitCode(code) }
+        let result = router.runGATT(args)
+        router.renderer.renderResult(result)
+        if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
     }
 }
 
@@ -77,8 +79,9 @@ struct GATTCharsCommand: ParsableCommand {
         var args = targeting.toArgs()
         args += ["chars", service]
         if readValues { args.append("-r") }
-        let code = router.runGATT(args)
-        if code != 0 { throw BlewExitCode(code) }
+        let result = router.runGATT(args)
+        router.renderer.renderResult(result)
+        if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
     }
 }
 
@@ -97,8 +100,9 @@ struct GATTDescCommand: ParsableCommand {
         let router = CommandRouter(globals: GlobalOptions.current)
         var args = targeting.toArgs()
         args += ["desc", char]
-        let code = router.runGATT(args)
-        if code != 0 { throw BlewExitCode(code) }
+        let result = router.runGATT(args)
+        router.renderer.renderResult(result)
+        if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
     }
 }
 
@@ -114,7 +118,8 @@ struct GATTInfoCommand: ParsableCommand {
 
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
-        let code = router.runGATT(["info", char])
-        if code != 0 { throw BlewExitCode(code) }
+        let result = router.runGATT(["info", char])
+        router.renderer.renderResult(result)
+        if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
     }
 }

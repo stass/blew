@@ -20,7 +20,8 @@ struct ReadCommand: ParsableCommand {
         let router = CommandRouter(globals: GlobalOptions.current)
         var args = targeting.toArgs()
         args += ["-f", format, char]
-        let code = router.runRead(args)
-        if code != 0 { throw BlewExitCode(code) }
+        let result = router.runRead(args)
+        router.renderer.renderResult(result)
+        if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
     }
 }

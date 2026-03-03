@@ -18,7 +18,8 @@ struct ScanCommand: ParsableCommand {
         let router = CommandRouter(globals: globals)
         var args = targeting.toArgs()
         if watch { args.append("--watch") }
-        let code = router.runScan(args)
-        if code != 0 { throw BlewExitCode(code) }
+        let result = router.runScan(args)
+        router.renderer.renderResult(result)
+        if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
     }
 }

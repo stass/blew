@@ -42,7 +42,7 @@ final class REPL {
                     break
                 }
 
-                _ = router.dispatch(trimmed)
+                let _ = router.dispatch(trimmed)
 
             } catch LinenoiseError.CTRL_C {
                 print("^C")

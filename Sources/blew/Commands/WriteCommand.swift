@@ -31,7 +31,8 @@ struct WriteCommand: ParsableCommand {
         args += ["-f", format, char, data]
         if withResponse { args.append("-r") }
         if withoutResponse { args.append("-w") }
-        let code = router.runWrite(args)
-        if code != 0 { throw BlewExitCode(code) }
+        let result = router.runWrite(args)
+        router.renderer.renderResult(result)
+        if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
     }
 }

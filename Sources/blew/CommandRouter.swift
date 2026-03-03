@@ -5,6 +5,7 @@ final class CommandRouter {
     let globals: GlobalOptions
     let manager: BLECentral
     let output: OutputFormatter
+    let renderer: OutputRenderer
     let isInteractiveMode: Bool
     var lastScanResults: [DiscoveredDevice] = []
     private var backgroundPeriphTask: Task<Void, Never>?
@@ -14,6 +15,7 @@ final class CommandRouter {
         self.globals = globals
         self.manager = manager ?? BLECentral.shared
         self.output = OutputFormatter(format: globals.out, verbosity: globals.verbose)
+        self.renderer = makeRenderer(format: globals.out, verbosity: globals.verbose)
         self.isInteractiveMode = isInteractiveMode
     }
 
@@ -31,50 +33,57 @@ final class CommandRouter {
 
         var firstError: Int32 = 0
         for cmd in commands {
-            let code = dispatch(cmd)
-            if code != 0 {
-                if firstError == 0 { firstError = code }
+            let result = dispatch(cmd)
+            if result.exitCode != 0 {
+                if firstError == 0 { firstError = result.exitCode }
                 if !keepGoing {
-                    return code
+                    return result.exitCode
                 }
             }
         }
         return firstError
     }
 
-    /// Parse and dispatch a single command line. Returns exit code.
-    func dispatch(_ line: String) -> Int32 {
+    /// Parse and dispatch a single command line. Returns CommandResult.
+    func dispatch(_ line: String) -> CommandResult {
         let tokens = tokenize(line)
-        guard let first = tokens.first else { return 0 }
+        guard let first = tokens.first else { return CommandResult() }
 
+        let result: CommandResult
         switch first {
         case "scan":
-            return runScan(Array(tokens.dropFirst()))
+            result = runScan(Array(tokens.dropFirst()))
         case "connect":
-            return runConnect(Array(tokens.dropFirst()))
+            result = runConnect(Array(tokens.dropFirst()))
         case "disconnect":
-            return runDisconnect(Array(tokens.dropFirst()))
+            result = runDisconnect(Array(tokens.dropFirst()))
         case "status":
-            return runStatus(Array(tokens.dropFirst()))
+            result = runStatus(Array(tokens.dropFirst()))
         case "gatt":
-            return runGATT(Array(tokens.dropFirst()))
+            result = runGATT(Array(tokens.dropFirst()))
         case "read":
-            return runRead(Array(tokens.dropFirst()))
+            result = runRead(Array(tokens.dropFirst()))
         case "write":
-            return runWrite(Array(tokens.dropFirst()))
+            result = runWrite(Array(tokens.dropFirst()))
         case "sub":
-            return runSub(Array(tokens.dropFirst()))
+            result = runSub(Array(tokens.dropFirst()))
         case "periph":
-            return runPeriph(Array(tokens.dropFirst()))
+            result = runPeriph(Array(tokens.dropFirst()))
         case "sleep":
-            return runSleep(Array(tokens.dropFirst()))
+            result = runSleep(Array(tokens.dropFirst()))
         case "help":
             printHelp()
-            return 0
+            return CommandResult()
         default:
-            output.printError("unknown command '\(first)'")
-            return BlewExitCode.invalidArguments.code
+            var r = CommandResult()
+            r.errors.append("unknown command '\(first)'")
+            r.exitCode = BlewExitCode.invalidArguments.code
+            renderer.renderResult(r)
+            return r
         }
+
+        renderer.renderResult(result)
+        return result
     }
 
     func printHelp() {
@@ -141,7 +150,7 @@ final class CommandRouter {
 
     // MARK: - Command runners (called from REPL/exec)
 
-    func runScan(_ args: [String]) -> Int32 {
+    func runScan(_ args: [String]) -> CommandResult {
         let watchMode = args.contains("--watch") || args.contains("-w")
         let nameFilter = parseStringOption(args, short: "-n", long: "--name")
         let rssiMin = parseIntOption(args, short: "-R", long: "--rssi-min")
@@ -155,13 +164,13 @@ final class CommandRouter {
         let interactive = isatty(fileno(stderr)) != 0
         let spinner: ScanSpinner? = interactive ? ScanSpinner(timeout: scanTimeout) : nil
         if !interactive {
-            output.printInfo("scanning for \(scanTimeout)s...")
+            renderer.renderInfo("scanning for \(scanTimeout)s...")
         }
         spinner?.start()
 
         let semaphore = DispatchSemaphore(value: 0)
         var deviceMap: [String: DiscoveredDevice] = [:]
-        var scanError: Int32 = 0
+        var result = CommandResult()
 
         let task = Task {
             defer { semaphore.signal() }
@@ -194,65 +203,51 @@ final class CommandRouter {
             } catch is CancellationError {
                 // scan interrupted; partial results will still be printed below
             } catch {
-                output.printError("\(error)")
-                scanError = BlewExitCode.operationFailed.code
+                result.errors.append("\(error)")
+                result.exitCode = BlewExitCode.operationFailed.code
             }
         }
 
-        // Scan manages its own duration; no external timeout needed.
         let outcome = waitInterruptible(task, semaphore: semaphore)
         spinner?.stop()
 
-        if case .interrupted = outcome { return 130 }
+        if case .interrupted = outcome { result.exitCode = 130; return result }
 
-        if scanError != 0 { return scanError }
+        if result.exitCode != 0 { return result }
 
         let devices = Array(deviceMap.values)
         if devices.isEmpty {
-            output.printError("no devices found")
-            return BlewExitCode.notFound.code
+            result.errors.append("no devices found")
+            result.exitCode = BlewExitCode.notFound.code
+            return result
         }
 
         let sorted = devices.sorted { $0.rssi > $1.rssi }
         lastScanResults = sorted
 
-        if output.format == .text {
-            let headers = ["ID", "Name", "RSSI", "Signal", "Services"]
-            let rows: [[String]] = sorted.map { d in
-                [
-                    d.identifier,
-                    d.name ?? "(unknown)",
-                    "\(d.rssi)",
-                    Self.rssiBar(d.rssi),
-                    d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) }.joined(separator: ", "),
-                ]
-            }
-            output.printTable(headers: headers, rows: rows)
-        } else {
-            let headers = ["ID", "Name", "RSSI", "Services"]
-            let rows: [[String]] = sorted.map { d in
-                [
-                    d.identifier,
-                    d.name ?? "(unknown)",
-                    "\(d.rssi)",
-                    d.serviceUUIDs.joined(separator: ","),
-                ]
-            }
-            output.printTable(headers: headers, rows: rows)
+        let deviceRows = sorted.map { d in
+            DeviceRow(
+                id: d.identifier,
+                name: d.name,
+                rssi: d.rssi,
+                serviceUUIDs: d.serviceUUIDs,
+                serviceDisplayNames: d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) }
+            )
         }
-        return 0
+        result.output.append(.devices(deviceRows))
+        return result
     }
 
-    private func runScanWatch(nameFilter: String?, rssiMin: Int?) -> Int32 {
-        // KV mode: stream a line per update to stdout without any terminal control.
+    private func runScanWatch(nameFilter: String?, rssiMin: Int?) -> CommandResult {
         if output.format == .kv {
             return runScanWatchKV(nameFilter: nameFilter, rssiMin: rssiMin)
         }
 
-        // Text mode requires a TTY for in-place redraw.
         guard isatty(fileno(stdout)) != 0 else {
-            output.printError("scan --watch in text mode requires an interactive terminal; use -o kv for piped output")
-            return BlewExitCode.invalidArguments.code
+            var r = CommandResult()
+            r.errors.append("scan --watch in text mode requires an interactive terminal; use -o kv for piped output")
+            r.exitCode = BlewExitCode.invalidArguments.code
+            return r
         }
 
         let watchTimeout: TimeInterval? = globals.timeout
@@ -297,35 +292,48 @@ final class CommandRouter {
             } catch is CancellationError {
                 // normal exit path
             } catch {
-                output.printError("\(error)")
                 scanError = BlewExitCode.operationFailed.code
+                renderer.renderError("\(error)")
             }
         }
 
         let outcome = waitInterruptible(task, semaphore: semaphore)
         display.stop()
 
-        if case .interrupted = outcome {
-            // Print final table to stdout so it persists in scroll history.
-            let sorted = deviceMap.values.sorted { $0.rssi > $1.rssi }
-            lastScanResults = sorted
-            printScanTable(sorted)
-            return 130
-        }
-
-        if scanError != 0 { return scanError }
-
+        var result = CommandResult()
         let sorted = deviceMap.values.sorted { $0.rssi > $1.rssi }
         lastScanResults = sorted
-        if sorted.isEmpty {
-            output.printError("no devices found")
-            return BlewExitCode.notFound.code
+
+        if case .interrupted = outcome {
+            if !sorted.isEmpty {
+                let rows = sorted.map { d in
+                    DeviceRow(id: d.identifier, name: d.name, rssi: d.rssi,
+                              serviceUUIDs: d.serviceUUIDs,
+                              serviceDisplayNames: d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) })
+                }
+                result.output.append(.devices(rows))
+            }
+            result.exitCode = 130
+            return result
         }
-        printScanTable(sorted)
-        return 0
+
+        if scanError != 0 { result.exitCode = scanError; return result }
+
+        if sorted.isEmpty {
+            result.errors.append("no devices found")
+            result.exitCode = BlewExitCode.notFound.code
+            return result
+        }
+        let rows = sorted.map { d in
+            DeviceRow(id: d.identifier, name: d.name, rssi: d.rssi,
+                      serviceUUIDs: d.serviceUUIDs,
+                      serviceDisplayNames: d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) })
+        }
+        result.output.append(.devices(rows))
+        return result
     }
 
-    private func runScanWatchKV(nameFilter: String?, rssiMin: Int?) -> Int32 {
+    private func runScanWatchKV(nameFilter: String?, rssiMin: Int?) -> CommandResult {
         let watchTimeout: TimeInterval? = globals.timeout
 
         let semaphore = DispatchSemaphore(value: 0)
@@ -359,168 +367,147 @@ final class CommandRouter {
                         deviceMap[device.identifier] = device
                     }
                     let d = deviceMap[device.identifier]!
-                    output.printRecord(
-                        ("id", d.identifier),
-                        ("name", d.name ?? ""),
-                        ("rssi", "\(d.rssi)"),
-                        ("services", d.serviceUUIDs.joined(separator: ","))
-                    )
+                    let row = DeviceRow(id: d.identifier, name: d.name, rssi: d.rssi,
+                                        serviceUUIDs: d.serviceUUIDs,
+                                        serviceDisplayNames: d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) })
+                    renderer.render(.devices([row]))
                 }
             } catch is CancellationError {
                 // normal exit
             } catch {
-                output.printError("\(error)")
+                renderer.renderError("\(error)")
                 scanError = BlewExitCode.operationFailed.code
             }
         }
 
+        var result = CommandResult()
         let outcome = waitInterruptible(task, semaphore: semaphore)
         if case .interrupted = outcome {
             lastScanResults = deviceMap.values.sorted { $0.rssi > $1.rssi }
-            return 130
+            result.exitCode = 130
+            return result
         }
-        if scanError != 0 { return scanError }
+        if scanError != 0 { result.exitCode = scanError; return result }
         lastScanResults = deviceMap.values.sorted { $0.rssi > $1.rssi }
-        return 0
+        return result
     }
 
-    private func printScanTable(_ sorted: [DiscoveredDevice]) {
-        guard !sorted.isEmpty else { return }
-        let headers = ["ID", "Name", "RSSI", "Signal", "Services"]
-        let rows: [[String]] = sorted.map { d in
-            [
-                d.identifier,
-                d.name ?? "(unknown)",
-                "\(d.rssi)",
-                Self.rssiBar(d.rssi),
-                d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) }.joined(separator: ", "),
-            ]
-        }
-        output.printTable(headers: headers, rows: rows)
-    }
-
-    func runConnect(_ args: [String]) -> Int32 {
-        // An explicit positional UUID takes priority; -i/--id is the option form.
+    func runConnect(_ args: [String]) -> CommandResult {
         let positional = positionalArgs(args, optionsWithValue: ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"])
         let deviceId = positional.first ?? parseStringOption(args, short: "-i", long: "--id")
         let connectTimeout = globals.timeout ?? 10.0
 
         guard let rawInput = deviceId else {
-            // No explicit device — try auto-connect via targeting options.
             return ensureConnected(args: args)
         }
 
+        var result = CommandResult()
+
         let resolved = resolveDevice(rawInput)
         if case .ambiguous(let matches) = resolved {
-            output.printError("ambiguous device '\(rawInput)' — matches:")
+            result.errors.append("ambiguous device '\(rawInput)' -- matches:")
             for d in matches {
                 let label = d.name.map { "\($0) (\(d.identifier))" } ?? d.identifier
-                output.printError("  \(label)")
+                result.errors.append("  \(label)")
             }
-            return BlewExitCode.invalidArguments.code
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
 
         let targetId: String
         if case .resolved(let device) = resolved {
             let label = device.name.map { "\($0) (\(device.identifier))" } ?? device.identifier
-            output.printInfo("resolved '\(rawInput)' → \(label)")
+            result.infos.append("resolved '\(rawInput)' -> \(label)")
             targetId = device.identifier
         } else {
             targetId = rawInput
         }
 
-        output.printInfo("connecting to \(targetId)...")
+        result.infos.append("connecting to \(targetId)...")
 
         let semaphore = DispatchSemaphore(value: 0)
-        var exitCode: Int32 = 0
 
         let task = Task {
             defer { semaphore.signal() }
             do {
                 try await manager.connect(deviceId: targetId, timeout: connectTimeout)
-                output.printInfo("connected to \(targetId)")
+                result.infos.append("connected to \(targetId)")
             } catch is CancellationError {
                 // handled by waitInterruptible
             } catch let error as BLEError {
-                output.printError(error.localizedDescription)
-                exitCode = error.exitCode
+                result.errors.append(error.localizedDescription)
+                result.exitCode = error.exitCode
             } catch {
-                output.printError("\(error)")
-                exitCode = BlewExitCode.operationFailed.code
+                result.errors.append("\(error)")
+                result.exitCode = BlewExitCode.operationFailed.code
             }
         }
 
         switch waitInterruptible(task, semaphore: semaphore, timeout: connectTimeout) {
         case .completed: break
-        case .interrupted: exitCode = 130
+        case .interrupted: result.exitCode = 130
         case .timedOut:
-            output.printError("connection timed out")
-            exitCode = BlewExitCode.timeout.code
+            result.errors.append("connection timed out")
+            result.exitCode = BlewExitCode.timeout.code
         }
-        return exitCode
+        return result
     }
 
-    func runDisconnect(_ args: [String]) -> Int32 {
+    func runDisconnect(_ args: [String]) -> CommandResult {
+        var result = CommandResult()
         let semaphore = DispatchSemaphore(value: 0)
-        var exitCode: Int32 = 0
 
         let task = Task {
             defer { semaphore.signal() }
             do {
                 try await manager.disconnect()
-                output.printInfo("disconnected")
+                result.infos.append("disconnected")
             } catch is CancellationError {
                 // handled by waitInterruptible
             } catch let error as BLEError {
-                output.printError(error.localizedDescription)
-                exitCode = error.exitCode
+                result.errors.append(error.localizedDescription)
+                result.exitCode = error.exitCode
             } catch {
-                output.printError("\(error)")
-                exitCode = BlewExitCode.operationFailed.code
+                result.errors.append("\(error)")
+                result.exitCode = BlewExitCode.operationFailed.code
             }
         }
 
         switch waitInterruptible(task, semaphore: semaphore, timeout: globals.timeout ?? 5.0) {
         case .completed: break
-        case .interrupted: exitCode = 130
+        case .interrupted: result.exitCode = 130
         case .timedOut:
-            output.printError("disconnect timed out")
-            exitCode = BlewExitCode.timeout.code
+            result.errors.append("disconnect timed out")
+            result.exitCode = BlewExitCode.timeout.code
         }
-        return exitCode
+        return result
     }
 
-    func runStatus(_ args: [String]) -> Int32 {
+    func runStatus(_ args: [String]) -> CommandResult {
+        var result = CommandResult()
         let semaphore = DispatchSemaphore(value: 0)
 
         let task = Task {
             defer { semaphore.signal() }
             let status = await manager.status()
-            output.printRecord(
-                ("connected", status.isConnected ? "yes" : "no"),
-                ("device", status.deviceId ?? "(none)"),
-                ("name", status.deviceName ?? "(none)"),
-                ("services", "\(status.servicesCount)"),
-                ("characteristics", "\(status.characteristicsCount)"),
-                ("subscriptions", "\(status.subscriptionsCount)")
-            )
-            if let lastError = status.lastError {
-                output.printRecord(("last_error", lastError))
-            }
+            result.output.append(.connectionStatus(status))
         }
 
         waitInterruptible(task, semaphore: semaphore)
-        return 0
+        return result
     }
 
-    func runSleep(_ args: [String]) -> Int32 {
+    func runSleep(_ args: [String]) -> CommandResult {
+        var result = CommandResult()
         guard let raw = args.first, let seconds = Double(raw) else {
-            output.printError("sleep requires a numeric argument (seconds; 0 = infinite)")
-            return BlewExitCode.invalidArguments.code
+            result.errors.append("sleep requires a numeric argument (seconds; 0 = infinite)")
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
         guard seconds >= 0 else {
-            output.printError("sleep duration must be >= 0")
-            return BlewExitCode.invalidArguments.code
+            result.errors.append("sleep duration must be >= 0")
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
 
         let semaphore = DispatchSemaphore(value: 0)
@@ -529,7 +516,6 @@ final class CommandRouter {
             defer { semaphore.signal() }
             do {
                 if seconds == 0 {
-                    // Sleep indefinitely until cancelled.
                     while true {
                         try await Task.sleep(nanoseconds: 1_000_000_000)
                     }
@@ -540,27 +526,37 @@ final class CommandRouter {
         }
 
         if case .interrupted = waitInterruptible(task, semaphore: semaphore) {
-            return 130
+            result.exitCode = 130
         }
-        return 0
+        return result
     }
 
-    func runGATT(_ args: [String]) -> Int32 {
-        // The subcommand is the first positional token (skip option flags and their values).
+    func runGATT(_ args: [String]) -> CommandResult {
         let targetingOpts: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
         guard let sub = positionalArgs(args, optionsWithValue: targetingOpts).first else {
-            output.printError("missing subcommand")
-            print("Usage: gatt <svcs|tree|chars|desc|info>")
-            return BlewExitCode.invalidArguments.code
+            var result = CommandResult()
+            result.errors.append("missing subcommand")
+            result.output.append(.message("Usage: gatt <svcs|tree|chars|desc|info>"))
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
 
-        if sub != "info" {
-            let connectCode = ensureConnected(args: args)
-            guard connectCode == 0 else { return connectCode }
+        if sub == "info" {
+            let positionals = positionalArgs(args, optionsWithValue: targetingOpts).dropFirst()
+            guard let charInput = positionals.first else {
+                var result = CommandResult()
+                result.errors.append("missing characteristic UUID")
+                result.exitCode = BlewExitCode.invalidArguments.code
+                return result
+            }
+            return runGATTInfo(charInput)
         }
 
+        let connectResult = ensureConnected(args: args)
+        guard connectResult.exitCode == 0 else { return connectResult }
+
+        var result = CommandResult()
         let semaphore = DispatchSemaphore(value: 0)
-        var exitCode: Int32 = 0
 
         let task = Task {
             defer { semaphore.signal() }
@@ -568,35 +564,22 @@ final class CommandRouter {
                 switch sub {
                 case "svcs":
                     let services = try await manager.discoverServices()
-                    let headers = ["UUID", "Name", "Primary"]
-                    let rows = services.map { svc -> [String] in
-                        let name = BLENames.name(for: svc.uuid, category: .service) ?? ""
-                        return [svc.uuid, name, svc.isPrimary ? "yes" : "no"]
+                    let rows = services.map { svc in
+                        ServiceRow(uuid: svc.uuid, name: BLENames.name(for: svc.uuid, category: .service), isPrimary: svc.isPrimary)
                     }
-                    output.printTable(headers: headers, rows: rows)
+                    result.output.append(.services(rows))
 
                 case "tree":
                     let includeDescriptors = args.contains("-d") || args.contains("--descriptors")
                     let includeValues = args.contains("-r") || args.contains("--read")
                     let tree = try await manager.discoverTree(includeDescriptors: includeDescriptors)
-                    for (svcIdx, service) in tree.enumerated() {
-                        let svcName = BLENames.name(for: service.uuid, category: .service)
-                        var svcLine = "Service \(output.bold(service.uuid))"
-                        if let name = svcName { svcLine += "  \(name)" }
-                        output.print(svcLine)
-
-                        for (charIdx, char) in service.characteristics.enumerated() {
-                            let isLastChar = charIdx == service.characteristics.count - 1
-                            let charBranch = isLastChar ? "└── " : "├── "
-                            let descIndent = isLastChar ? "    " : "│   "
-                            // Value lines are indented under the char, at the same depth as descriptors
-                            let valueIndent = descIndent + "  "
-
+                    var treeServices: [GATTTreeService] = []
+                    for service in tree {
+                        var treeChars: [GATTTreeCharacteristic] = []
+                        for char in service.characteristics {
                             let charName = BLENames.name(for: char.uuid, category: .characteristic)
-                            let props = char.properties.joined(separator: ", ")
-                            var charLine = charBranch + output.bold(char.uuid)
-                            if let name = charName { charLine += "  \(name)" }
-                            charLine += "  \(output.dim("[\(props)]"))"
+                            var value: String? = nil
+                            var valueFields: [(label: String, value: String)]? = nil
 
                             if includeValues && char.properties.contains("read") {
                                 do {
@@ -605,304 +588,214 @@ final class CommandRouter {
                                         ?? DataFormatter.format(data, as: "hex")
                                     let parts = decoded.components(separatedBy: " | ")
                                     if parts.count > 1 {
-                                        // Multi-field: print char header first, then each field on its own line
-                                        output.print(charLine)
-                                        for part in parts {
-                                            let (label, value) = Self.splitFieldPart(part)
-                                            output.print(output.dim(valueIndent + label + ": ") + value)
-                                        }
+                                        valueFields = parts.map { Self.splitFieldPart($0) }
                                     } else {
-                                        // Single-field: dim the "= " separator, normal weight for the value
-                                        output.print(charLine + output.dim("  = ") + decoded)
+                                        value = decoded
                                     }
-                                } catch is CancellationError {
-                                    throw CancellationError()
-                                } catch {
-                                    output.print(charLine + output.dim("  = (read error)"))
-                                }
-                            } else {
-                                output.print(charLine)
-                            }
-
-                            for (descIdx, desc) in char.descriptors.enumerated() {
-                                let isLastDesc = descIdx == char.descriptors.count - 1
-                                let descBranch = isLastDesc ? "└── " : "├── "
-                                let descName = BLENames.name(for: desc.uuid, category: .descriptor)
-                                var descLine = descIndent + descBranch + output.dim(desc.uuid)
-                                if let name = descName { descLine += output.dim("  \(name)") }
-                                output.print(descLine)
-                            }
-                        }
-
-                        if svcIdx < tree.count - 1 { output.print("") }
-                    }
-
-                case "chars":
-                    let charsOpts: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
-                    // positionals are [subcommand, service-uuid]; skip the subcommand
-                    let charsPositional = positionalArgs(args, optionsWithValue: charsOpts).dropFirst()
-                    guard let svcInput = charsPositional.first else {
-                        output.printError("missing service UUID")
-                        exitCode = BlewExitCode.invalidArguments.code
-                        return
-                    }
-                    let svcUUID: String
-                    switch resolveService(svcInput) {
-                    case .resolved(let uuid): svcUUID = uuid
-                    case .ambiguous(let uuids):
-                        output.printError("ambiguous service '\(svcInput)' — matches: \(uuids.joined(separator: ", "))")
-                        exitCode = BlewExitCode.invalidArguments.code
-                        return
-                    case .notFound: svcUUID = svcInput
-                    }
-                    let includeValues = args.contains("-r") || args.contains("--read")
-                    let chars = try await manager.discoverCharacteristics(forService: svcUUID)
-                    if includeValues {
-                        struct CharRow {
-                            let uuid: String
-                            let name: String
-                            let properties: String
-                            let value: String
-                        }
-                        var charRows: [CharRow] = []
-                        for char in chars {
-                            let name = BLENames.name(for: char.uuid, category: .characteristic) ?? ""
-                            var value = ""
-                            if char.properties.contains("read") {
-                                do {
-                                    let data = try await manager.readCharacteristic(char.uuid)
-                                    value = GATTDecoder.decode(data, uuid: char.uuid)
-                                        ?? DataFormatter.format(data, as: "hex")
                                 } catch is CancellationError {
                                     throw CancellationError()
                                 } catch {
                                     value = "(read error)"
                                 }
                             }
-                            charRows.append(CharRow(uuid: char.uuid, name: name, properties: char.properties.joined(separator: ","), value: value))
+
+                            let descRows = char.descriptors.map { desc in
+                                DescriptorRow(uuid: desc.uuid, name: BLENames.name(for: desc.uuid, category: .descriptor))
+                            }
+                            treeChars.append(GATTTreeCharacteristic(
+                                uuid: char.uuid, name: charName,
+                                properties: char.properties,
+                                value: value, valueFields: valueFields,
+                                descriptors: descRows
+                            ))
                         }
-                        if output.format == .kv {
-                            output.printTable(
-                                headers: ["UUID", "Name", "Properties", "Value"],
-                                rows: charRows.map { [$0.uuid, $0.name, $0.properties, $0.value] }
-                            )
-                        } else {
-                            let headers = ["UUID", "Name", "Properties", "Value"]
-                            let uuidW  = charRows.map { $0.uuid.count }.max().map { max($0, headers[0].count) } ?? headers[0].count
-                            let nameW  = charRows.map { $0.name.count }.max().map { max($0, headers[1].count) } ?? headers[1].count
-                            let propsW = charRows.map { $0.properties.count }.max().map { max($0, headers[2].count) } ?? headers[2].count
-                            let headerLine = [
-                                output.bold(headers[0]).padding(toLength: uuidW  + output.boldPaddingWidth, withPad: " ", startingAt: 0),
-                                output.bold(headers[1]).padding(toLength: nameW  + output.boldPaddingWidth, withPad: " ", startingAt: 0),
-                                output.bold(headers[2]).padding(toLength: propsW + output.boldPaddingWidth, withPad: " ", startingAt: 0),
-                                output.bold(headers[3]),
-                            ].joined(separator: "  ")
-                            let sepWidth = uuidW + 2 + nameW + 2 + propsW + 2 + headers[3].count
-                            output.print(headerLine)
-                            output.print(output.dim(String(repeating: "─", count: sepWidth)))
-                            let valueIndent = String(repeating: " ", count: uuidW + 2 + nameW + 2 + propsW + 2)
-                            for row in charRows {
-                                let parts = row.value.components(separatedBy: " | ")
-                                let rowLine = [
-                                    row.uuid.padding(toLength: uuidW,  withPad: " ", startingAt: 0),
-                                    row.name.padding(toLength: nameW,  withPad: " ", startingAt: 0),
-                                    row.properties.padding(toLength: propsW, withPad: " ", startingAt: 0),
-                                ].joined(separator: "  ")
+                        treeServices.append(GATTTreeService(
+                            uuid: service.uuid,
+                            name: BLENames.name(for: service.uuid, category: .service),
+                            characteristics: treeChars
+                        ))
+                    }
+                    result.output.append(.gattTree(treeServices))
+
+                case "chars":
+                    let charsOpts: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+                    let charsPositional = positionalArgs(args, optionsWithValue: charsOpts).dropFirst()
+                    guard let svcInput = charsPositional.first else {
+                        result.errors.append("missing service UUID")
+                        result.exitCode = BlewExitCode.invalidArguments.code
+                        return
+                    }
+                    let svcUUID: String
+                    switch resolveService(svcInput) {
+                    case .resolved(let uuid): svcUUID = uuid
+                    case .ambiguous(let uuids):
+                        result.errors.append("ambiguous service '\(svcInput)' -- matches: \(uuids.joined(separator: ", "))")
+                        result.exitCode = BlewExitCode.invalidArguments.code
+                        return
+                    case .notFound: svcUUID = svcInput
+                    }
+                    let includeValues = args.contains("-r") || args.contains("--read")
+                    let chars = try await manager.discoverCharacteristics(forService: svcUUID)
+                    var charRows: [CharacteristicRow] = []
+                    for char in chars {
+                        let name = BLENames.name(for: char.uuid, category: .characteristic)
+                        var value: String? = nil
+                        var valueFields: [(label: String, value: String)]? = nil
+                        if includeValues && char.properties.contains("read") {
+                            do {
+                                let data = try await manager.readCharacteristic(char.uuid)
+                                let decoded = GATTDecoder.decode(data, uuid: char.uuid)
+                                    ?? DataFormatter.format(data, as: "hex")
+                                let parts = decoded.components(separatedBy: " | ")
                                 if parts.count > 1 {
-                                    output.print(rowLine)
-                                    for part in parts {
-                                        let (label, val) = Self.splitFieldPart(part)
-                                        output.print(output.dim(valueIndent + label + ": ") + val)
-                                    }
+                                    valueFields = parts.map { Self.splitFieldPart($0) }
                                 } else {
-                                    output.print(parts.count == 1 && !row.value.isEmpty
-                                        ? rowLine + "  " + row.value
-                                        : rowLine)
+                                    value = decoded
                                 }
+                            } catch is CancellationError {
+                                throw CancellationError()
+                            } catch {
+                                value = "(read error)"
                             }
                         }
-                    } else {
-                        let rows = chars.map { char -> [String] in
-                            let name = BLENames.name(for: char.uuid, category: .characteristic) ?? ""
-                            return [char.uuid, name, char.properties.joined(separator: ",")]
-                        }
-                        output.printTable(headers: ["UUID", "Name", "Properties"], rows: rows)
+                        charRows.append(CharacteristicRow(uuid: char.uuid, name: name,
+                                                          properties: char.properties,
+                                                          value: value, valueFields: valueFields))
                     }
+                    result.output.append(.characteristics(charRows))
 
                 case "desc":
                     let descOpts: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
                     let descPositional = positionalArgs(args, optionsWithValue: descOpts).dropFirst()
                     guard let charInput = descPositional.first else {
-                        output.printError("missing characteristic UUID")
-                        exitCode = BlewExitCode.invalidArguments.code
+                        result.errors.append("missing characteristic UUID")
+                        result.exitCode = BlewExitCode.invalidArguments.code
                         return
                     }
                     let charUUID: String
                     switch resolveCharacteristic(charInput) {
                     case .resolved(let uuid): charUUID = uuid
                     case .ambiguous(let uuids):
-                        output.printError("ambiguous characteristic '\(charInput)' — matches: \(uuids.joined(separator: ", "))")
-                        exitCode = BlewExitCode.invalidArguments.code
+                        result.errors.append("ambiguous characteristic '\(charInput)' -- matches: \(uuids.joined(separator: ", "))")
+                        result.exitCode = BlewExitCode.invalidArguments.code
                         return
                     case .notFound: charUUID = charInput
                     }
                     let descs = try await manager.discoverDescriptors(forCharacteristic: charUUID)
-                    let headers = ["UUID", "Name"]
-                    let rows = descs.map { desc -> [String] in
-                        let name = BLENames.name(for: desc.uuid, category: .descriptor) ?? ""
-                        return [desc.uuid, name]
+                    let rows = descs.map { desc in
+                        DescriptorRow(uuid: desc.uuid, name: BLENames.name(for: desc.uuid, category: .descriptor))
                     }
-                    output.printTable(headers: headers, rows: rows)
-
-                case "info":
-                    let positionals = positionalArgs(args, optionsWithValue: targetingOpts).dropFirst()
-                    guard let charInput = positionals.first else {
-                        output.printError("missing characteristic UUID")
-                        exitCode = BlewExitCode.invalidArguments.code
-                        return
-                    }
-                    exitCode = runGATTInfo(charInput)
+                    result.output.append(.descriptors(rows))
 
                 default:
-                    output.printError("unknown gatt subcommand '\(sub)'")
-                    print("Usage: gatt <svcs|tree|chars|desc|info>")
-                    exitCode = BlewExitCode.invalidArguments.code
+                    result.errors.append("unknown gatt subcommand '\(sub)'")
+                    result.output.append(.message("Usage: gatt <svcs|tree|chars|desc|info>"))
+                    result.exitCode = BlewExitCode.invalidArguments.code
                 }
             } catch is CancellationError {
                 // handled by waitInterruptible
             } catch let error as BLEError {
-                output.printError(error.localizedDescription)
-                exitCode = error.exitCode
+                result.errors.append(error.localizedDescription)
+                result.exitCode = error.exitCode
             } catch {
-                output.printError("\(error)")
-                exitCode = BlewExitCode.operationFailed.code
+                result.errors.append("\(error)")
+                result.exitCode = BlewExitCode.operationFailed.code
             }
         }
 
         switch waitInterruptible(task, semaphore: semaphore, timeout: globals.timeout ?? 10.0) {
         case .completed: break
-        case .interrupted: exitCode = 130
+        case .interrupted: result.exitCode = 130
         case .timedOut:
-            output.printError("operation timed out")
-            exitCode = BlewExitCode.timeout.code
+            result.errors.append("operation timed out")
+            result.exitCode = BlewExitCode.timeout.code
         }
-        return exitCode
+        return result
     }
 
-    private func runGATTInfo(_ charInput: String) -> Int32 {
+    private func runGATTInfo(_ charInput: String) -> CommandResult {
+        var result = CommandResult()
         guard let info = GATTDecoder.info(for: charInput) else {
-            output.printError("no Bluetooth SIG definition found for '\(charInput)'")
-            return BlewExitCode.notFound.code
+            result.errors.append("no Bluetooth SIG definition found for '\(charInput)'")
+            result.exitCode = BlewExitCode.notFound.code
+            return result
         }
 
-        switch output.format {
-        case .text:
-            output.print("\(output.bold("\(info.name) (\(info.uuid))"))")
-            output.print("")
-            output.print(info.description)
-            if !info.fields.isEmpty {
-                output.print("")
-                output.print(output.bold("Structure:"))
-                let nameWidth = info.fields.map { $0.name.count }.max() ?? 0
-                let typeWidth = info.fields.map { $0.typeName.count }.max() ?? 0
-                for f in info.fields {
-                    var line = "  \(f.name.padding(toLength: nameWidth, withPad: " ", startingAt: 0))"
-                    line += "  \(f.typeName.padding(toLength: typeWidth, withPad: " ", startingAt: 0))"
-                    line += "  \(f.sizeDescription)"
-                    if let cond = f.conditionDescription {
-                        line += "  \(output.dim("[\(cond)]"))"
-                    }
-                    output.print(line)
-                }
-            }
-        case .kv:
-            output.printRecord(("uuid", info.uuid), ("name", info.name), ("description", info.description))
-            for f in info.fields {
-                var pairs: [(String, String)] = [
-                    ("field", f.name),
-                    ("type", f.typeName),
-                    ("size", f.sizeDescription),
-                ]
-                if let cond = f.conditionDescription {
-                    pairs.append(("condition", cond))
-                }
-                output.printRecord(pairs)
-            }
-        }
-        return 0
+        result.output.append(.characteristicInfo(GATTCharInfo(
+            uuid: info.uuid, name: info.name,
+            description: info.description, fields: info.fields
+        )))
+        return result
     }
 
-    func runRead(_ args: [String]) -> Int32 {
-        let connectCode = ensureConnected(args: args)
-        guard connectCode == 0 else { return connectCode }
+    func runRead(_ args: [String]) -> CommandResult {
+        let connectResult = ensureConnected(args: args)
+        guard connectResult.exitCode == 0 else { return connectResult }
 
         let readOpts: Set<String> = ["-f", "--format", "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
         guard let charInput = positionalArgs(args, optionsWithValue: readOpts).first else {
-            output.printError("missing characteristic UUID")
-            return BlewExitCode.invalidArguments.code
+            var result = CommandResult()
+            result.errors.append("missing characteristic UUID")
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
+        var result = CommandResult()
         let charUUID: String
         switch resolveCharacteristic(charInput) {
         case .resolved(let uuid): charUUID = uuid
         case .ambiguous(let uuids):
-            output.printError("ambiguous characteristic '\(charInput)' — matches: \(uuids.joined(separator: ", "))")
-            return BlewExitCode.invalidArguments.code
+            result.errors.append("ambiguous characteristic '\(charInput)' -- matches: \(uuids.joined(separator: ", "))")
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         case .notFound: charUUID = charInput
         }
         let fmt = parseStringOption(args, short: "-f", long: "--format") ?? "hex"
 
         let semaphore = DispatchSemaphore(value: 0)
-        var exitCode: Int32 = 0
 
         let task = Task {
             defer { semaphore.signal() }
             do {
                 let data = try await manager.readCharacteristic(charUUID)
                 let formatted = DataFormatter.format(data, as: fmt)
-                switch output.format {
-                case .text:
-                    output.print(formatted)
-                case .kv:
-                    if let name = BLENames.name(for: charUUID, category: .characteristic) {
-                        output.printRecord(("char", charUUID), ("name", name), ("value", formatted), ("fmt", fmt))
-                    } else {
-                        output.printRecord(("char", charUUID), ("value", formatted), ("fmt", fmt))
-                    }
-                }
+                let name = BLENames.name(for: charUUID, category: .characteristic)
+                result.output.append(.readValue(ReadResult(char: charUUID, name: name, value: formatted, format: fmt)))
             } catch is CancellationError {
                 // handled by waitInterruptible
             } catch let error as BLEError {
-                output.printError(error.localizedDescription)
-                exitCode = error.exitCode
+                result.errors.append(error.localizedDescription)
+                result.exitCode = error.exitCode
             } catch {
-                output.printError("\(error)")
-                exitCode = BlewExitCode.operationFailed.code
+                result.errors.append("\(error)")
+                result.exitCode = BlewExitCode.operationFailed.code
             }
         }
 
         switch waitInterruptible(task, semaphore: semaphore, timeout: globals.timeout ?? 5.0) {
         case .completed: break
-        case .interrupted: exitCode = 130
+        case .interrupted: result.exitCode = 130
         case .timedOut:
-            output.printError("read timed out")
-            exitCode = BlewExitCode.timeout.code
+            result.errors.append("read timed out")
+            result.exitCode = BlewExitCode.timeout.code
         }
-        return exitCode
+        return result
     }
 
-    func runWrite(_ args: [String]) -> Int32 {
-        let connectCode = ensureConnected(args: args)
-        guard connectCode == 0 else { return connectCode }
+    func runWrite(_ args: [String]) -> CommandResult {
+        let connectResult = ensureConnected(args: args)
+        guard connectResult.exitCode == 0 else { return connectResult }
 
+        var result = CommandResult()
         let writeOpts: Set<String> = ["-f", "--format", "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
         let positional = positionalArgs(args, optionsWithValue: writeOpts)
         guard positional.count >= 2 else {
             if positional.isEmpty {
-                output.printError("missing characteristic UUID and data")
+                result.errors.append("missing characteristic UUID and data")
             } else {
-                output.printError("missing data to write")
+                result.errors.append("missing data to write")
             }
-            return BlewExitCode.invalidArguments.code
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
         let charInput = positional[0]
         let dataStr = positional[1]
@@ -910,8 +803,9 @@ final class CommandRouter {
         switch resolveCharacteristic(charInput) {
         case .resolved(let uuid): charUUID = uuid
         case .ambiguous(let uuids):
-            output.printError("ambiguous characteristic '\(charInput)' — matches: \(uuids.joined(separator: ", "))")
-            return BlewExitCode.invalidArguments.code
+            result.errors.append("ambiguous characteristic '\(charInput)' -- matches: \(uuids.joined(separator: ", "))")
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         case .notFound: charUUID = charInput
         }
         let fmt = parseStringOption(args, short: "-f", long: "--format") ?? "hex"
@@ -919,8 +813,9 @@ final class CommandRouter {
         let withoutResponse = args.contains("-w") || args.contains("--without-response")
 
         guard let data = DataFormatter.parse(dataStr, as: fmt) else {
-            output.printError("invalid data '\(dataStr)' for format '\(fmt)'")
-            return BlewExitCode.invalidArguments.code
+            result.errors.append("invalid data '\(dataStr)' for format '\(fmt)'")
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
 
         let writeType: WriteType
@@ -933,36 +828,35 @@ final class CommandRouter {
         }
 
         let semaphore = DispatchSemaphore(value: 0)
-        var exitCode: Int32 = 0
 
         let task = Task {
             defer { semaphore.signal() }
             do {
                 try await manager.writeCharacteristic(charUUID, data: data, type: writeType)
-                output.printInfo("written to \(BLENames.displayUUID(charUUID, category: .characteristic))")
+                result.infos.append("written to \(BLENames.displayUUID(charUUID, category: .characteristic))")
+                result.output.append(.writeSuccess(char: charUUID, name: BLENames.name(for: charUUID, category: .characteristic)))
             } catch is CancellationError {
                 // handled by waitInterruptible
             } catch let error as BLEError {
-                output.printError(error.localizedDescription)
-                exitCode = error.exitCode
+                result.errors.append(error.localizedDescription)
+                result.exitCode = error.exitCode
             } catch {
-                output.printError("\(error)")
-                exitCode = BlewExitCode.operationFailed.code
+                result.errors.append("\(error)")
+                result.exitCode = BlewExitCode.operationFailed.code
             }
         }
 
         switch waitInterruptible(task, semaphore: semaphore, timeout: globals.timeout ?? 5.0) {
         case .completed: break
-        case .interrupted: exitCode = 130
+        case .interrupted: result.exitCode = 130
         case .timedOut:
-            output.printError("write timed out")
-            exitCode = BlewExitCode.timeout.code
+            result.errors.append("write timed out")
+            result.exitCode = BlewExitCode.timeout.code
         }
-        return exitCode
+        return result
     }
 
-    func runSub(_ args: [String]) -> Int32 {
-        // Route sub-subcommands before connecting.
+    func runSub(_ args: [String]) -> CommandResult {
         if let first = args.first {
             switch first {
             case "stop":   return runSubStop(Array(args.dropFirst()))
@@ -971,22 +865,25 @@ final class CommandRouter {
             }
         }
 
-        let connectCode = ensureConnected(args: args)
-        guard connectCode == 0 else { return connectCode }
+        let connectResult = ensureConnected(args: args)
+        guard connectResult.exitCode == 0 else { return connectResult }
 
+        var result = CommandResult()
         let subOpts: Set<String> = ["-f", "--format", "-d", "--duration", "-c", "--count", "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
         let background = args.contains("--bg") || args.contains("-b")
         let positionals = positionalArgs(args.filter { $0 != "--bg" && $0 != "-b" }, optionsWithValue: subOpts)
         guard let charInput = positionals.first else {
-            output.printError("missing characteristic UUID")
-            return BlewExitCode.invalidArguments.code
+            result.errors.append("missing characteristic UUID")
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
         let charUUID: String
         switch resolveCharacteristic(charInput) {
         case .resolved(let uuid): charUUID = uuid
         case .ambiguous(let uuids):
-            output.printError("ambiguous characteristic '\(charInput)' — matches: \(uuids.joined(separator: ", "))")
-            return BlewExitCode.invalidArguments.code
+            result.errors.append("ambiguous characteristic '\(charInput)' -- matches: \(uuids.joined(separator: ", "))")
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         case .notFound: charUUID = charInput
         }
         let fmt = parseStringOption(args, short: "-f", long: "--format") ?? "hex"
@@ -995,11 +892,12 @@ final class CommandRouter {
 
         if background {
             guard isInteractiveMode else {
-                output.printError("-b is only available in interactive mode")
-                return BlewExitCode.invalidArguments.code
+                result.errors.append("-b is only available in interactive mode")
+                result.exitCode = BlewExitCode.invalidArguments.code
+                return result
             }
-            // Cancel any existing background sub for the same characteristic.
             backgroundSubTasks[charUUID]?.cancel()
+            let capturedRenderer = self.renderer
             backgroundSubTasks[charUUID] = Task {
                 do {
                     let stream = try await manager.subscribe(characteristicUUID: charUUID)
@@ -1008,19 +906,10 @@ final class CommandRouter {
                     let charName = BLENames.name(for: charUUID, category: .characteristic)
                     for await data in stream {
                         let formatted = DataFormatter.format(data, as: fmt)
-                        let line: String
-                        switch output.format {
-                        case .text:
-                            line = "[\(charUUID)] \(formatted)"
-                        case .kv:
-                            let ts = ISO8601DateFormatter.shared.string(from: Date())
-                            if let name = charName {
-                                line = "ts=\(ts) char=\(charUUID) name=\(name) value=\(formatted)"
-                            } else {
-                                line = "ts=\(ts) char=\(charUUID) value=\(formatted)"
-                            }
-                        }
-                        printLive(line)
+                        let ts = ISO8601DateFormatter.shared.string(from: Date())
+                        let nv = NotificationValue(timestamp: ts, char: charUUID, name: charName, value: formatted)
+                        capturedRenderer.renderLive("[\(charUUID)] \(formatted)")
+                        _ = nv
                         count += 1
                         if let maxCount = maxCount, count >= maxCount { break }
                         if let duration = duration, Date().timeIntervalSince(startTime) >= duration { break }
@@ -1028,19 +917,20 @@ final class CommandRouter {
                 } catch is CancellationError {
                     // stopped
                 } catch let error as BLEError {
-                    printLive("sub error [\(charUUID)]: \(error.localizedDescription)")
+                    capturedRenderer.renderLive("sub error [\(charUUID)]: \(error.localizedDescription)")
                 } catch {
-                    printLive("sub error [\(charUUID)]: \(error)")
+                    capturedRenderer.renderLive("sub error [\(charUUID)]: \(error)")
                 }
                 backgroundSubTasks.removeValue(forKey: charUUID)
             }
             let displayUUID = BLENames.displayUUID(charUUID, category: .characteristic)
-            output.print("Subscribing to \(displayUUID) in background. Use 'sub stop \(charUUID)' to stop.")
-            return 0
+            result.output.append(.message("Subscribing to \(displayUUID) in background. Use 'sub stop \(charUUID)' to stop."))
+            return result
         }
 
+        // Foreground subscription: streaming command, renders each notification live
         let semaphore = DispatchSemaphore(value: 0)
-        var exitCode: Int32 = 0
+        let capturedRenderer = self.renderer
 
         let task = Task {
             defer { semaphore.signal() }
@@ -1048,21 +938,13 @@ final class CommandRouter {
                 let stream = try await manager.subscribe(characteristicUUID: charUUID)
                 var count = 0
                 let startTime = Date()
-
                 let charName = BLENames.name(for: charUUID, category: .characteristic)
+
                 for await data in stream {
                     let formatted = DataFormatter.format(data, as: fmt)
-                    switch output.format {
-                    case .text:
-                        output.print(formatted)
-                    case .kv:
-                        let ts = ISO8601DateFormatter.shared.string(from: Date())
-                        if let name = charName {
-                            output.printRecord(("ts", ts), ("char", charUUID), ("name", name), ("value", formatted))
-                        } else {
-                            output.printRecord(("ts", ts), ("char", charUUID), ("value", formatted))
-                        }
-                    }
+                    let ts = ISO8601DateFormatter.shared.string(from: Date())
+                    let nv = NotificationValue(timestamp: ts, char: charUUID, name: charName, value: formatted)
+                    capturedRenderer.render(.notification(nv))
 
                     count += 1
                     if let maxCount = maxCount, count >= maxCount { break }
@@ -1071,60 +953,57 @@ final class CommandRouter {
             } catch is CancellationError {
                 // interrupted
             } catch let error as BLEError {
-                output.printError(error.localizedDescription)
-                exitCode = error.exitCode
+                result.errors.append(error.localizedDescription)
+                result.exitCode = error.exitCode
             } catch {
-                output.printError("\(error)")
-                exitCode = BlewExitCode.operationFailed.code
+                result.errors.append("\(error)")
+                result.exitCode = BlewExitCode.operationFailed.code
             }
         }
 
-        // No external timeout: sub runs until --count / --duration / Ctrl-C.
         if case .interrupted = waitInterruptible(task, semaphore: semaphore) {
-            exitCode = 130
+            result.exitCode = 130
         }
-        return exitCode
+        return result
     }
 
-    func runSubStop(_ args: [String]) -> Int32 {
+    func runSubStop(_ args: [String]) -> CommandResult {
+        var result = CommandResult()
         if let charInput = args.first {
             let charUUID: String
             switch resolveCharacteristic(charInput) {
             case .resolved(let uuid): charUUID = uuid
             case .ambiguous(let uuids):
-                output.printError("ambiguous characteristic '\(charInput)' — matches: \(uuids.joined(separator: ", "))")
-                return BlewExitCode.invalidArguments.code
+                result.errors.append("ambiguous characteristic '\(charInput)' -- matches: \(uuids.joined(separator: ", "))")
+                result.exitCode = BlewExitCode.invalidArguments.code
+                return result
             case .notFound: charUUID = charInput
             }
             guard backgroundSubTasks[charUUID] != nil else {
-                output.printError("no background subscription for '\(charUUID)'")
-                return BlewExitCode.notFound.code
+                result.errors.append("no background subscription for '\(charUUID)'")
+                result.exitCode = BlewExitCode.notFound.code
+                return result
             }
             backgroundSubTasks[charUUID]?.cancel()
             backgroundSubTasks.removeValue(forKey: charUUID)
-            output.print("Stopped subscription for \(BLENames.displayUUID(charUUID, category: .characteristic)).")
+            result.output.append(.message("Stopped subscription for \(BLENames.displayUUID(charUUID, category: .characteristic))."))
         } else {
             guard !backgroundSubTasks.isEmpty else {
-                output.print("No active background subscriptions.")
-                return 0
+                result.output.append(.message("No active background subscriptions."))
+                return result
             }
             for (_, task) in backgroundSubTasks { task.cancel() }
             backgroundSubTasks.removeAll()
-            output.print("Stopped all background subscriptions.")
+            result.output.append(.message("Stopped all background subscriptions."))
         }
-        return 0
+        return result
     }
 
-    func runSubStatus(_ args: [String]) -> Int32 {
-        guard !backgroundSubTasks.isEmpty else {
-            output.print("No active background subscriptions.")
-            return 0
-        }
-        output.print("Active background subscriptions:")
-        for uuid in backgroundSubTasks.keys.sorted() {
-            output.print("  \(BLENames.displayUUID(uuid, category: .characteristic))")
-        }
-        return 0
+    func runSubStatus(_ args: [String]) -> CommandResult {
+        var result = CommandResult()
+        let uuids = backgroundSubTasks.keys.sorted()
+        result.output.append(.subscriptionList(uuids))
+        return result
     }
 
     // MARK: - Interrupt-aware wait
@@ -1170,7 +1049,7 @@ final class CommandRouter {
     ///   - `-i`/`--id`  → direct connect (no scan needed)
     ///   - `-n`/`--name` / `-S`/`--service` / `-m`/`--manufacturer` / `-R`/`--rssi-min` → scan then pick and connect
     ///   - none of the above → error
-    func ensureConnected(args: [String] = []) -> Int32 {
+    func ensureConnected(args: [String] = []) -> CommandResult {
         var isConnected = false
         let statusSem = DispatchSemaphore(value: 0)
         Task {
@@ -1179,7 +1058,7 @@ final class CommandRouter {
             statusSem.signal()
         }
         statusSem.wait()
-        if isConnected { return 0 }
+        if isConnected { return CommandResult() }
 
         if let id = parseStringOption(args, short: "-i", long: "--id") {
             return runConnect([id])
@@ -1192,8 +1071,10 @@ final class CommandRouter {
 
         let hasFilters = name != nil || !services.isEmpty || manufacturer != nil || rssiMin != nil
         guard hasFilters else {
-            output.printError("not connected — specify a device with --id or --name")
-            return BlewExitCode.invalidArguments.code
+            var result = CommandResult()
+            result.errors.append("not connected -- specify a device with --id or --name")
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
 
         let timeout = globals.timeout ?? 5.0
@@ -1203,12 +1084,14 @@ final class CommandRouter {
         if let m = manufacturer { scanArgs += ["-m", "\(m)"] }
         if let r = rssiMin { scanArgs += ["-R", "\(r)"] }
 
-        let code = runScan(scanArgs)
-        if code != 0 { return code }
+        let scanResult = runScan(scanArgs)
+        if scanResult.exitCode != 0 { return scanResult }
 
         let pick = parsePickStrategy(args)
         guard let device = pickDevice(from: lastScanResults, pick: pick) else {
-            return BlewExitCode.notFound.code
+            var result = CommandResult()
+            result.exitCode = BlewExitCode.notFound.code
+            return result
         }
         return runConnect([device.identifier])
     }
@@ -1219,20 +1102,20 @@ final class CommandRouter {
         switch pick {
         case .strongest, .first:
             guard let device = candidates.first else {
-                output.printError("no devices found")
+                renderer.renderError("no devices found")
                 return nil
             }
             return device
         case .only:
             if candidates.isEmpty {
-                output.printError("no devices found")
+                renderer.renderError("no devices found")
                 return nil
             }
             if candidates.count > 1 {
-                output.printError("--pick only: \(candidates.count) devices found, expected exactly one")
+                renderer.renderError("--pick only: \(candidates.count) devices found, expected exactly one")
                 for d in candidates {
                     let label = d.name.map { "\($0) (\(d.identifier))" } ?? d.identifier
-                    output.printError("  \(label)")
+                    renderer.renderError("  \(label)")
                 }
                 return nil
             }
@@ -1405,11 +1288,13 @@ extension CommandRouter {
 // MARK: - Peripheral commands
 
 extension CommandRouter {
-    func runPeriph(_ args: [String]) -> Int32 {
+    func runPeriph(_ args: [String]) -> CommandResult {
         guard let sub = args.first else {
-            output.printError("missing subcommand")
-            print("Usage: periph <adv|clone|stop|set|notify|status>")
-            return BlewExitCode.invalidArguments.code
+            var result = CommandResult()
+            result.errors.append("missing subcommand")
+            result.output.append(.message("Usage: periph <adv|clone|stop|set|notify|status>"))
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
 
         switch sub {
@@ -1426,13 +1311,16 @@ extension CommandRouter {
         case "status":
             return runPeriphStatus(Array(args.dropFirst()))
         default:
-            output.printError("unknown periph subcommand '\(sub)'")
-            print("Usage: periph <adv|clone|stop|set|notify|status>")
-            return BlewExitCode.invalidArguments.code
+            var result = CommandResult()
+            result.errors.append("unknown periph subcommand '\(sub)'")
+            result.output.append(.message("Usage: periph <adv|clone|stop|set|notify|status>"))
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
     }
 
-    func runPeriphAdv(_ args: [String]) -> Int32 {
+    func runPeriphAdv(_ args: [String]) -> CommandResult {
+        var result = CommandResult()
         let configPath = parseStringOption(args, short: "-c", long: "--config")
 
         var serviceUUIDs: [String] = []
@@ -1456,8 +1344,9 @@ extension CommandRouter {
             do {
                 config = try PeripheralConfig.load(from: path)
             } catch {
-                output.printError("\(error.localizedDescription)")
-                return BlewExitCode.invalidArguments.code
+                result.errors.append("\(error.localizedDescription)")
+                result.exitCode = BlewExitCode.invalidArguments.code
+                return result
             }
             services = config.services
             advName = nameArg ?? config.name ?? "blew"
@@ -1474,11 +1363,11 @@ extension CommandRouter {
         }
 
         if services.isEmpty && serviceUUIDs.isEmpty {
-            output.printError("no services defined — use --config <file> or -S <uuid>")
-            return BlewExitCode.invalidArguments.code
+            result.errors.append("no services defined -- use --config <file> or -S <uuid>")
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
 
-        // Resolve initial values from config
         var initialValues: [String: Data] = [:]
         if configPath != nil {
             let config: PeripheralConfig
@@ -1486,8 +1375,9 @@ extension CommandRouter {
                 config = try PeripheralConfig.load(from: configPath!)
                 initialValues = try config.resolvedInitialValues()
             } catch {
-                output.printError("\(error.localizedDescription)")
-                return BlewExitCode.invalidArguments.code
+                result.errors.append("\(error.localizedDescription)")
+                result.exitCode = BlewExitCode.invalidArguments.code
+                return result
             }
         }
 
@@ -1495,16 +1385,14 @@ extension CommandRouter {
         backgroundPeriphTask?.cancel()
         backgroundPeriphTask = nil
 
-        // Phase 1: configure + startAdvertising — always blocking to confirm success.
         let startSemaphore = DispatchSemaphore(value: 0)
-        var startExitCode: Int32 = 0
 
         let startTask = Task {
             defer { startSemaphore.signal() }
             do {
                 let servicesWithChars = services.filter { !$0.characteristics.isEmpty }
                 if !servicesWithChars.isEmpty {
-                    output.printInfo("configuring \(servicesWithChars.count) service(s)...")
+                    result.infos.append("configuring \(servicesWithChars.count) service(s)...")
                     try await peripheral.configure(services: servicesWithChars)
 
                     for (uuid, data) in initialValues {
@@ -1512,81 +1400,86 @@ extension CommandRouter {
                     }
                 }
 
-                output.printInfo("starting advertising as \"\(advName)\"...")
+                result.infos.append("starting advertising as \"\(advName)\"...")
                 try await peripheral.startAdvertising(name: advName, serviceUUIDs: serviceUUIDs)
-                printPeriphSummary(name: advName, services: services, serviceUUIDs: serviceUUIDs)
+                result.output.append(.peripheralSummary(PeriphSummaryResult(
+                    name: advName, serviceUUIDs: serviceUUIDs, services: services
+                )))
             } catch is CancellationError {
                 // handled below
             } catch let error as BLEError {
-                output.printError(error.localizedDescription)
-                startExitCode = error.exitCode
+                result.errors.append(error.localizedDescription)
+                result.exitCode = error.exitCode
             } catch {
-                output.printError("\(error)")
-                startExitCode = BlewExitCode.operationFailed.code
+                result.errors.append("\(error)")
+                result.exitCode = BlewExitCode.operationFailed.code
             }
         }
 
         switch waitInterruptible(startTask, semaphore: startSemaphore, timeout: globals.timeout ?? 15.0) {
         case .interrupted:
             peripheral.stopAdvertising()
-            return 130
+            result.exitCode = 130
+            return result
         case .timedOut:
-            output.printError("advertising failed to start (timed out)")
-            return BlewExitCode.timeout.code
+            result.errors.append("advertising failed to start (timed out)")
+            result.exitCode = BlewExitCode.timeout.code
+            return result
         case .completed:
-            if startExitCode != 0 { return startExitCode }
+            if result.exitCode != 0 { return result }
         }
 
-        // Phase 2: event loop — background in interactive mode, blocking in CLI mode.
+        // Phase 2: event loop -- streaming, renders each event live
+        let capturedRenderer = self.renderer
         if isInteractiveMode {
             backgroundPeriphTask = Task {
                 let eventStream = peripheral.events()
                 for await event in eventStream {
-                    printPeriphEvent(event)
+                    let ts = ISO8601DateFormatter.shared.string(from: Date())
+                    capturedRenderer.render(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
                 }
             }
-            output.print("Advertising in background. Use 'periph stop' to stop.")
-            return 0
+            result.output.append(.message("Advertising in background. Use 'periph stop' to stop."))
+            return result
         } else {
             let semaphore = DispatchSemaphore(value: 0)
             let eventTask = Task {
                 defer { semaphore.signal() }
                 let eventStream = peripheral.events()
                 for await event in eventStream {
-                    printPeriphEvent(event)
+                    let ts = ISO8601DateFormatter.shared.string(from: Date())
+                    capturedRenderer.render(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
                     if Task.isCancelled { break }
                 }
             }
             if case .interrupted = waitInterruptible(eventTask, semaphore: semaphore) {
                 peripheral.stopAdvertising()
-                output.print("Stopped advertising.")
+                result.output.append(.message("Stopped advertising."))
             }
-            return 0
+            return result
         }
     }
 
-    func runPeriphClone(_ args: [String]) -> Int32 {
+    func runPeriphClone(_ args: [String]) -> CommandResult {
+        var result = CommandResult()
         let savePath = parseStringOption(args, short: "-o", long: "--save")
 
-        // First, connect to the target device using central mode
-        let connectCode = ensureConnected(args: args)
-        guard connectCode == 0 else { return connectCode }
+        let connectResult = ensureConnected(args: args)
+        guard connectResult.exitCode == 0 else { return connectResult }
 
-        output.printInfo("snapshotting GATT tree...")
+        result.infos.append("snapshotting GATT tree...")
 
         var clonedServices: [ServiceDefinition] = []
         var clonedName: String = "blew-clone"
         var initialValues: [String: Data] = [:]
 
         let snapSemaphore = DispatchSemaphore(value: 0)
-        var snapError: Int32 = 0
 
         let snapTask = Task {
             defer { snapSemaphore.signal() }
             do {
                 let tree = try await manager.discoverTree(includeDescriptors: false)
 
-                // Use the connected device name as clone name
                 let status = await manager.status()
                 if let name = status.deviceName {
                     clonedName = name
@@ -1622,27 +1515,26 @@ extension CommandRouter {
             } catch is CancellationError {
                 // handled
             } catch let error as BLEError {
-                output.printError(error.localizedDescription)
-                snapError = error.exitCode
+                result.errors.append(error.localizedDescription)
+                result.exitCode = error.exitCode
             } catch {
-                output.printError("\(error)")
-                snapError = BlewExitCode.operationFailed.code
+                result.errors.append("\(error)")
+                result.exitCode = BlewExitCode.operationFailed.code
             }
         }
 
         switch waitInterruptible(snapTask, semaphore: snapSemaphore, timeout: globals.timeout ?? 15.0) {
         case .completed: break
-        case .interrupted: return 130
+        case .interrupted: result.exitCode = 130; return result
         case .timedOut:
-            output.printError("GATT snapshot timed out")
-            return BlewExitCode.timeout.code
+            result.errors.append("GATT snapshot timed out")
+            result.exitCode = BlewExitCode.timeout.code
+            return result
         }
-        if snapError != 0 { return snapError }
+        if result.exitCode != 0 { return result }
 
-        // Disconnect from real device before advertising
         _ = runDisconnect([])
 
-        // Optionally save config
         if let path = savePath {
             let config = PeripheralConfig(name: clonedName, services: clonedServices)
             if let data = try? JSONEncoder().encode(config) {
@@ -1651,24 +1543,21 @@ extension CommandRouter {
                 }
                 let url = URL(fileURLWithPath: path)
                 try? (pretty ?? data).write(to: url)
-                output.printInfo("saved config to \(path)")
+                result.infos.append("saved config to \(path)")
             }
         }
 
-        // Now advertise as the clone
         let serviceUUIDs = clonedServices.map { $0.uuid }
         let peripheral = BLEPeripheral.shared
         backgroundPeriphTask?.cancel()
         backgroundPeriphTask = nil
 
-        // Phase 1: configure + startAdvertising — always blocking to confirm success.
         let startSemaphore = DispatchSemaphore(value: 0)
-        var startExitCode: Int32 = 0
 
         let startTask = Task {
             defer { startSemaphore.signal() }
             do {
-                output.printInfo("configuring \(clonedServices.count) cloned service(s)...")
+                result.infos.append("configuring \(clonedServices.count) cloned service(s)...")
                 try await peripheral.configure(services: clonedServices)
 
                 for (uuid, data) in initialValues {
@@ -1676,72 +1565,81 @@ extension CommandRouter {
                 }
 
                 try await peripheral.startAdvertising(name: clonedName, serviceUUIDs: serviceUUIDs)
-                printPeriphSummary(name: clonedName, services: clonedServices, serviceUUIDs: serviceUUIDs)
+                result.output.append(.peripheralSummary(PeriphSummaryResult(
+                    name: clonedName, serviceUUIDs: serviceUUIDs, services: clonedServices
+                )))
             } catch is CancellationError {
                 // handled below
             } catch let error as BLEError {
-                output.printError(error.localizedDescription)
-                startExitCode = error.exitCode
+                result.errors.append(error.localizedDescription)
+                result.exitCode = error.exitCode
             } catch {
-                output.printError("\(error)")
-                startExitCode = BlewExitCode.operationFailed.code
+                result.errors.append("\(error)")
+                result.exitCode = BlewExitCode.operationFailed.code
             }
         }
 
         switch waitInterruptible(startTask, semaphore: startSemaphore, timeout: globals.timeout ?? 15.0) {
         case .interrupted:
             peripheral.stopAdvertising()
-            return 130
+            result.exitCode = 130
+            return result
         case .timedOut:
-            output.printError("advertising failed to start (timed out)")
-            return BlewExitCode.timeout.code
+            result.errors.append("advertising failed to start (timed out)")
+            result.exitCode = BlewExitCode.timeout.code
+            return result
         case .completed:
-            if startExitCode != 0 { return startExitCode }
+            if result.exitCode != 0 { return result }
         }
 
-        // Phase 2: event loop — background in interactive mode, blocking in CLI mode.
+        let capturedRenderer = self.renderer
         if isInteractiveMode {
             backgroundPeriphTask = Task {
                 let eventStream = peripheral.events()
                 for await event in eventStream {
-                    printPeriphEvent(event)
+                    let ts = ISO8601DateFormatter.shared.string(from: Date())
+                    capturedRenderer.render(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
                 }
             }
-            output.print("Advertising in background. Use 'periph stop' to stop.")
-            return 0
+            result.output.append(.message("Advertising in background. Use 'periph stop' to stop."))
+            return result
         } else {
             let semaphore = DispatchSemaphore(value: 0)
             let eventTask = Task {
                 defer { semaphore.signal() }
                 let eventStream = peripheral.events()
                 for await event in eventStream {
-                    printPeriphEvent(event)
+                    let ts = ISO8601DateFormatter.shared.string(from: Date())
+                    capturedRenderer.render(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
                     if Task.isCancelled { break }
                 }
             }
             if case .interrupted = waitInterruptible(eventTask, semaphore: semaphore) {
                 peripheral.stopAdvertising()
-                output.print("Stopped advertising.")
+                result.output.append(.message("Stopped advertising."))
             }
-            return 0
+            return result
         }
     }
 
-    func runPeriphStop(_ args: [String]) -> Int32 {
+    func runPeriphStop(_ args: [String]) -> CommandResult {
+        var result = CommandResult()
         backgroundPeriphTask?.cancel()
         backgroundPeriphTask = nil
         BLEPeripheral.shared.stopAdvertising()
-        output.print("Stopped advertising.")
-        return 0
+        result.output.append(.message("Stopped advertising."))
+        return result
     }
 
-    func runPeriphSet(_ args: [String]) -> Int32 {
+    func runPeriphSet(_ args: [String]) -> CommandResult {
+        var result = CommandResult()
         let positional = positionalArgs(args, optionsWithValue: ["-f", "--format"])
         guard positional.count >= 2 else {
-            output.printError(positional.isEmpty
+            result.errors.append(positional.isEmpty
                 ? "missing characteristic UUID and value"
                 : "missing value")
-            return BlewExitCode.invalidArguments.code
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
         let charInput = positional[0]
         let valueStr = positional[1]
@@ -1750,30 +1648,33 @@ extension CommandRouter {
         let charUUID = resolvePeriphCharacteristic(charInput)
 
         guard let data = DataFormatter.parse(valueStr, as: fmt) else {
-            output.printError("invalid value '\(valueStr)' for format '\(fmt)'")
-            return BlewExitCode.invalidArguments.code
+            result.errors.append("invalid value '\(valueStr)' for format '\(fmt)'")
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
 
         do {
             try BLEPeripheral.shared.updateValue(data, forCharacteristic: charUUID)
-            output.printInfo("set \(BLENames.displayUUID(charUUID, category: .characteristic)) = \(DataFormatter.format(data, as: fmt))")
+            result.infos.append("set \(BLENames.displayUUID(charUUID, category: .characteristic)) = \(DataFormatter.format(data, as: fmt))")
         } catch let error as BLEError {
-            output.printError(error.localizedDescription)
-            return error.exitCode
+            result.errors.append(error.localizedDescription)
+            result.exitCode = error.exitCode
         } catch {
-            output.printError("\(error)")
-            return BlewExitCode.operationFailed.code
+            result.errors.append("\(error)")
+            result.exitCode = BlewExitCode.operationFailed.code
         }
-        return 0
+        return result
     }
 
-    func runPeriphNotify(_ args: [String]) -> Int32 {
+    func runPeriphNotify(_ args: [String]) -> CommandResult {
+        var result = CommandResult()
         let positional = positionalArgs(args, optionsWithValue: ["-f", "--format"])
         guard positional.count >= 2 else {
-            output.printError(positional.isEmpty
+            result.errors.append(positional.isEmpty
                 ? "missing characteristic UUID and value"
                 : "missing value")
-            return BlewExitCode.invalidArguments.code
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
         let charInput = positional[0]
         let valueStr = positional[1]
@@ -1782,134 +1683,34 @@ extension CommandRouter {
         let charUUID = resolvePeriphCharacteristic(charInput)
 
         guard let data = DataFormatter.parse(valueStr, as: fmt) else {
-            output.printError("invalid value '\(valueStr)' for format '\(fmt)'")
-            return BlewExitCode.invalidArguments.code
+            result.errors.append("invalid value '\(valueStr)' for format '\(fmt)'")
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
 
         do {
             try BLEPeripheral.shared.updateValue(data, forCharacteristic: charUUID)
-            output.printInfo("sent notification on \(BLENames.displayUUID(charUUID, category: .characteristic))")
+            result.infos.append("sent notification on \(BLENames.displayUUID(charUUID, category: .characteristic))")
         } catch let error as BLEError {
-            output.printError(error.localizedDescription)
-            return error.exitCode
+            result.errors.append(error.localizedDescription)
+            result.exitCode = error.exitCode
         } catch {
-            output.printError("\(error)")
-            return BlewExitCode.operationFailed.code
+            result.errors.append("\(error)")
+            result.exitCode = BlewExitCode.operationFailed.code
         }
-        return 0
+        return result
     }
 
-    func runPeriphStatus(_ args: [String]) -> Int32 {
+    func runPeriphStatus(_ args: [String]) -> CommandResult {
+        var result = CommandResult()
         let status = BLEPeripheral.shared.peripheralStatus()
-        output.printRecord(
-            ("advertising", status.isAdvertising ? "yes" : "no"),
-            ("name", status.advertisedName ?? "(none)"),
-            ("services", "\(status.serviceCount)"),
-            ("characteristics", "\(status.characteristicCount)"),
-            ("subscribers", "\(status.subscriberCount)")
-        )
-        return 0
-    }
-
-    // MARK: - Peripheral output helpers
-
-    private func printPeriphSummary(name: String, services: [ServiceDefinition], serviceUUIDs: [String]) {
-        let displayUUIDs = serviceUUIDs.map { BLENames.displayUUID($0, category: .service) }.joined(separator: ", ")
-        output.print("Advertising \"\(name)\" [\(displayUUIDs)]")
-
-        for svc in services where !svc.characteristics.isEmpty {
-            let svcDisplay = BLENames.displayUUID(svc.uuid, category: .service)
-            output.print("  Service \(svcDisplay)")
-            for char in svc.characteristics {
-                let charDisplay = BLENames.displayUUID(char.uuid, category: .characteristic)
-                let props = char.properties.map { $0.rawValue }.joined(separator: ", ")
-                output.print("  +-- \(charDisplay) [\(props)]")
-            }
-        }
+        result.output.append(.peripheralStatus(status))
+        return result
     }
 
     /// Write an event line that is safe to call while the terminal may be in raw mode
     /// (OPOST disabled by LineNoise). \r moves to column 0, \033[K erases any partial
     /// prompt or typed input on that line, and \r\n ends with a proper newline.
-    private func printLive(_ text: String) {
-        FileHandle.standardError.write(Data("\r\u{1B}[K\(text)\r\n".utf8))
-    }
-
-    private func printPeriphEvent(_ event: PeripheralEvent) {
-        let ts = timeStamp()
-        switch output.format {
-        case .text:
-            switch event {
-            case .stateChanged(let state):
-                output.printInfo("[\(ts)] Bluetooth state: \(state.rawValue)")
-            case .advertisingStarted(let error):
-                if let error = error {
-                    output.printError("[\(ts)] advertising failed: \(error)")
-                }
-            case .serviceAdded(let uuid, let error):
-                if let error = error {
-                    output.printError("[\(ts)] service \(uuid) add failed: \(error)")
-                }
-            case .centralConnected(let id):
-                let line = "[\(ts)] central \(shortId(id)) connected"
-                isInteractiveMode ? printLive(line) : output.print(line)
-            case .centralDisconnected(let id):
-                let line = "[\(ts)] central \(shortId(id)) disconnected"
-                isInteractiveMode ? printLive(line) : output.print(line)
-            case .readRequest(let id, let uuid):
-                let line = "[\(ts)] read \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))"
-                isInteractiveMode ? printLive(line) : output.print(line)
-            case .writeRequest(let id, let uuid, let value):
-                let hex = DataFormatter.format(value, as: "hex")
-                let line = "[\(ts)] write \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id)) <- \(hex)"
-                isInteractiveMode ? printLive(line) : output.print(line)
-            case .subscribed(let id, let uuid):
-                let line = "[\(ts)] subscribe \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))"
-                isInteractiveMode ? printLive(line) : output.print(line)
-            case .unsubscribed(let id, let uuid):
-                let line = "[\(ts)] unsubscribe \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))"
-                isInteractiveMode ? printLive(line) : output.print(line)
-            case .notificationSent(let uuid, let count):
-                output.printInfo("[\(ts)] notification sent on \(uuid) to \(count) subscriber(s)")
-            }
-        case .kv:
-            switch event {
-            case .stateChanged: break
-            case .advertisingStarted: break
-            case .serviceAdded: break
-            case .centralConnected(let id):
-                output.printRecord(("event", "connected"), ("ts", ts), ("central", id))
-            case .centralDisconnected(let id):
-                output.printRecord(("event", "disconnected"), ("ts", ts), ("central", id))
-            case .readRequest(let id, let uuid):
-                output.printRecord(("event", "read"), ("ts", ts), ("central", id), ("char", uuid))
-            case .writeRequest(let id, let uuid, let value):
-                output.printRecord(
-                    ("event", "write"),
-                    ("ts", ts),
-                    ("central", id),
-                    ("char", uuid),
-                    ("value", DataFormatter.format(value, as: "hex"))
-                )
-            case .subscribed(let id, let uuid):
-                output.printRecord(("event", "subscribe"), ("ts", ts), ("central", id), ("char", uuid))
-            case .unsubscribed(let id, let uuid):
-                output.printRecord(("event", "unsubscribe"), ("ts", ts), ("central", id), ("char", uuid))
-            case .notificationSent(let uuid, let count):
-                output.printRecord(("event", "notification"), ("ts", ts), ("char", uuid), ("subscribers", "\(count)"))
-            }
-        }
-    }
-
-    private func timeStamp() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
-        return f.string(from: Date())
-    }
-
-    private func shortId(_ uuidString: String) -> String {
-        String(uuidString.prefix(8))
-    }
 
     private func resolvePeriphCharacteristic(_ input: String) -> String {
         let known = BLEPeripheral.shared.knownCharacteristicUUIDs()
