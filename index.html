@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>blew — BLE scanner and CLI tool for Mac OS X | scan, connect, read, write, subscribe</title>
-<meta name="description" content="blew is a command-line BLE tool for Mac OS X (macOS). Scan for Bluetooth Low Energy devices, connect, inspect GATT trees, read and write characteristics, stream notifications, clone devices, and run virtual peripherals — all from the Mac terminal. No GUI needed.">
-<meta name="keywords" content="BLE scanner, BLE tool, Mac OS X BLE CLI, mac os x ble tool, Bluetooth Low Energy scanner, macOS command line BLE, GATT browser, BLE debugging tool, CoreBluetooth CLI, BLE REPL, Swift BLE, terminal BLE scanner, mac bluetooth scanner, ble scan Mac OS X, macOS BLE tool">
+<meta name="description" content="blew is a command-line BLE tool for Mac OS X (macOS). Scan for Bluetooth Low Energy devices, connect, inspect GATT trees, read and write characteristics, stream notifications, clone devices, run virtual peripherals, and expose BLE operations to AI agents via MCP — all from the Mac terminal. No GUI needed.">
+<meta name="keywords" content="BLE scanner, BLE tool, Mac OS X BLE CLI, mac os x ble tool, Bluetooth Low Energy scanner, macOS command line BLE, GATT browser, BLE debugging tool, CoreBluetooth CLI, BLE REPL, Swift BLE, terminal BLE scanner, mac bluetooth scanner, ble scan Mac OS X, macOS BLE tool, MCP server, Model Context Protocol, BLE MCP, AI agent BLE, Cursor BLE, Claude BLE">
 <meta name="author" content="blew">
 <meta name="robots" content="index, follow">
 <link rel="canonical" href="https://stass.github.io/blew">
@@ -13,7 +13,7 @@
 <!-- Open Graph -->
 <meta property="og:type" content="website">
 <meta property="og:title" content="blew — BLE scanner and CLI tool for Mac OS X">
-<meta property="og:description" content="A command-line BLE tool for Mac OS X. Scan for Bluetooth Low Energy devices, connect, read, write, subscribe, and impersonate — all from the terminal. No GUI, no Xcode, no pairing dialogs.">
+<meta property="og:description" content="A command-line BLE tool for Mac OS X. Scan for Bluetooth Low Energy devices, connect, read, write, subscribe, impersonate, and expose BLE to AI agents via MCP — all from the terminal. No GUI, no Xcode, no pairing dialogs.">
 <meta property="og:url" content="https://stass.github.io/blew">
 <meta property="og:site_name" content="blew">
 <meta property="og:locale" content="en_US">
@@ -21,7 +21,7 @@
 <!-- Twitter Card -->
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="blew — BLE scanner and CLI tool for Mac OS X">
-<meta name="twitter:description" content="A command-line BLE tool for Mac OS X. Scan for Bluetooth Low Energy devices, connect, read, write, subscribe, and impersonate — all from the terminal. No GUI, no Xcode, no pairing dialogs.">
+<meta name="twitter:description" content="A command-line BLE tool for Mac OS X. Scan for Bluetooth Low Energy devices, connect, read, write, subscribe, impersonate, and expose BLE to AI agents via MCP — all from the terminal. No GUI, no Xcode, no pairing dialogs.">
 
 <meta name="theme-color" content="#0a0a0a">
 
@@ -36,7 +36,7 @@
   "applicationCategory": "DeveloperApplication",
   "applicationSubCategory": "Bluetooth Low Energy Scanner",
   "operatingSystem": "Mac OS X",
-  "description": "Command-line BLE scanner and tool for Mac OS X. Scan for Bluetooth Low Energy devices, connect, inspect GATT trees, read/write characteristics, stream notifications, clone devices, and run virtual peripherals from the Mac terminal.",
+  "description": "Command-line BLE scanner and tool for Mac OS X. Scan for Bluetooth Low Energy devices, connect, inspect GATT trees, read/write characteristics, stream notifications, clone devices, run virtual peripherals, and expose BLE operations to AI agents via MCP (Model Context Protocol) from the Mac terminal.",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
   "programmingLanguage": "Swift",
   "softwareRequirements": "macOS 13+",
@@ -72,6 +72,14 @@
       "acceptedAnswer": {
         "@type": "Answer",
         "text": "Yes. blew supports reading ('blew read'), writing ('blew write'), and subscribing to notifications ('blew sub') on any BLE characteristic, directly from the macOS terminal. It auto-connects and auto-discovers GATT services."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can AI agents control BLE devices?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. blew includes an MCP (Model Context Protocol) server mode ('blew mcp') that exposes all BLE operations as structured tool calls. AI agents in Cursor, Claude Desktop, and other MCP-compatible hosts can scan for devices, connect, read/write characteristics, subscribe to notifications, and run virtual peripherals -- all through typed JSON tool calls with structured results."
       }
     }
   ]
@@ -410,7 +418,8 @@
     <p class="tagline">a BLE scanner and CLI tool for Mac OS X</p>
     <p class="pitch">
       Scan, connect, read, write, subscribe, and impersonate
-      Bluetooth Low Energy devices on macOS — all from the command line.
+      Bluetooth Low Energy devices on macOS — from the command line
+      or through AI agents via MCP.
       <strong>No GUI. No Xcode. No pairing dialogs.</strong>
       Just you, your terminal, and every BLE device in range.
     </p>
@@ -500,6 +509,22 @@ Advertising "Heart Monitor" [180D]</pre>
           characteristics decoded to natural types automatically.
         </p>
       </div>
+      <div class="feature">
+        <h3>MCP server for AI agents</h3>
+        <p>
+          Run <code>blew mcp</code> to expose every BLE operation as a structured MCP tool.
+          Cursor, Claude Desktop, and other AI agents can scan, connect, read, write,
+          and subscribe — returning typed JSON results.
+        </p>
+      </div>
+      <div class="feature">
+        <h3>Four modes of operation</h3>
+        <p>
+          Single command, interactive REPL, <code>exec</code> scripts, or
+          MCP server. Same operations everywhere, same structured output,
+          pick the mode that fits your workflow.
+        </p>
+      </div>
     </div>
   </section>
 
@@ -516,6 +541,10 @@ Advertising "Heart Monitor" [180D]</pre>
     <details>
       <summary>Can I read and write BLE characteristics from the Mac OS X command line?</summary>
       <p>Yes. blew supports reading (<code>blew read</code>), writing (<code>blew write</code>), and subscribing to notifications (<code>blew sub</code>) on any BLE characteristic, directly from the macOS terminal. It auto-connects and auto-discovers GATT services.</p>
+    </details>
+    <details>
+      <summary>Can AI agents control BLE devices with blew?</summary>
+      <p>Yes. Run <code>blew mcp</code> to start an MCP (Model Context Protocol) server over stdio. AI agents in Cursor, Claude Desktop, and other MCP-compatible hosts can discover and invoke all BLE operations as structured tool calls — scanning, connecting, reading, writing, subscribing, and running virtual peripherals. Results are returned as typed JSON.</p>
     </details>
   </section>
 
