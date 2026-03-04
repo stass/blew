@@ -8,7 +8,7 @@ nonisolated(unsafe) var interruptRequested = false
 nonisolated(unsafe) var commandIsRunning = false
 
 @main
-struct Blew: ParsableCommand {
+struct Blew: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "blew",
         abstract: "macOS BLE CLI workbench",
@@ -23,6 +23,7 @@ struct Blew: ParsableCommand {
             SubCommand.self,
             PeriphCommand.self,
             ExecCommand.self,
+            MCPCommand.self,
         ]
     )
 
@@ -32,7 +33,7 @@ struct Blew: ParsableCommand {
         GlobalOptions.current = globals
     }
 
-    mutating func run() throws {
+    mutating func run() async throws {
         installSignalHandlers()
         let repl = REPL(globals: globals)
         repl.run()

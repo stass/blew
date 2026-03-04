@@ -223,11 +223,12 @@ Peripheral errors: `peripheralUnavailable`, `advertisingFailed`, `serviceRegistr
 
 ### 4.1 Entry point and modes
 
-`Blew` is the `@main` `ParsableCommand`. Its `run()` method selects one of two modes:
+`Blew` is the `@main` `AsyncParsableCommand`. Its `run()` method selects one of three modes:
 
 ```
 blew [global-options] <subcommand> [command-options]  →  subcommand's own run() is called by ArgumentParser
 blew [global-options]                                 →  REPL.run()
+blew mcp                                             →  MCP server over stdio (see 4.12)
 ```
 
 Before any mode exits, `cleanupBeforeExit()` performs a best-effort disconnect (waits up to 2 seconds for the disconnect to complete). SIGINT and SIGTERM both call this function before exiting.
@@ -540,6 +541,76 @@ Custom vendor UUIDs that do not follow the Bluetooth Base pattern return `nil`.
 6   invalid arguments
 ```
 
+### 4.12 MCP Server Mode
+
+`blew mcp` starts an MCP (Model Context Protocol) server over stdio, allowing AI agents (Cursor, Claude Desktop, etc.) to discover and invoke BLE operations as structured tool calls.
+
+**Architecture:**
+
+The MCP server reuses the existing structured output system. Instead of rendering `CommandOutput` to text (via `TextRenderer` / `KVRenderer`), the server converts `CommandResult` data directly to JSON via `Codable` conformances and returns it as MCP `structuredContent`.
+
+```
+AI Agent
+  | JSON-RPC over stdio
+  v
+BlewMCPServer (MCP SDK Server actor, StdioTransport)
+  | run*() calls
+  v
+CommandRouter (isInteractiveMode: true, renderer: CollectingRenderer)
+  | CommandResult with typed CommandOutput items
+  v
+BlewMCPServer
+  | encodes Codable output types -> structuredContent (JSON)
+  | builds text summary -> content fallback
+  v
+CallTool.Result { content: [.text(...)], structuredContent: Value, isError: Bool }
+```
+
+**Key files:**
+
+| File | Role |
+|------|------|
+| `Sources/blew/Commands/MCPCommand.swift` | `AsyncParsableCommand` entry point for `blew mcp` |
+| `Sources/blew/MCP/MCPServer.swift` | MCP server: tool definitions, call dispatch, `CommandOutput` to JSON conversion |
+| `Sources/blew/Output/CollectingRenderer.swift` | `OutputRenderer` that buffers output instead of printing (captures streaming command output) |
+
+**Tool dispatch:**
+
+The MCP server calls `CommandRouter.run*()` methods directly (not through `dispatch()`) to avoid automatic rendering to stdout. For streaming commands (`sub`, `periph adv/clone`) that call `renderer.render()` during execution, the `CollectingRenderer` captures the output. After each `run*()` call, the server merges the returned `CommandResult.output` with any items captured by the collector.
+
+**Structured content:**
+
+Each tool result includes both `structuredContent` (typed JSON via `Codable`) and a text `content` fallback. All output types (`DeviceRow`, `ServiceRow`, `CharacteristicRow`, `ReadResult`, `NotificationValue`, etc.) conform to `Codable`. The `StructuredResult` enum wraps each output type with a `type` discriminator for JSON serialization.
+
+**Tool list:**
+
+| MCP Tool | blew Command | Key Parameters |
+|----------|-------------|----------------|
+| `ble_scan` | `scan` | name?, service?, rssi_min?, manufacturer?, pick?, timeout? |
+| `ble_connect` | `connect` | device_id?, name?, service?, manufacturer?, rssi_min?, pick? |
+| `ble_disconnect` | `disconnect` | (none) |
+| `ble_status` | `status` | (none) |
+| `ble_gatt_services` | `gatt svcs` | targeting options |
+| `ble_gatt_tree` | `gatt tree` | targeting options, descriptors?, read_values? |
+| `ble_gatt_chars` | `gatt chars` | targeting options, service_uuid, read_values? |
+| `ble_gatt_descriptors` | `gatt desc` | targeting options, char_uuid |
+| `ble_gatt_info` | `gatt info` | char_uuid |
+| `ble_read` | `read` | targeting options, char_uuid, format? |
+| `ble_write` | `write` | targeting options, char_uuid, data, format?, with_response? |
+| `ble_subscribe` | `sub` | targeting options, char_uuid, format?, duration?, count? |
+| `ble_periph_advertise` | `periph adv` | name?, services?, config_file? |
+| `ble_periph_clone` | `periph clone` | targeting options, save_file? |
+| `ble_periph_stop` | `periph stop` | (none) |
+| `ble_periph_set` | `periph set` | char_uuid, value, format? |
+| `ble_periph_notify` | `periph notify` | char_uuid, value, format? |
+| `ble_periph_status` | `periph status` | (none) |
+
+**Subscribe behavior:** `ble_subscribe` collects notifications for the specified `duration` or `count`. If neither is specified, defaults to `count: 10` to prevent infinite blocking. All values are returned at once as a `[NotificationValue]` array.
+
+**Peripheral commands:** `ble_periph_advertise` and `ble_periph_clone` start the peripheral and return the summary immediately (the `CommandRouter` runs with `isInteractiveMode: true`). Subsequent `ble_periph_status`, `ble_periph_set`, `ble_periph_notify`, `ble_periph_stop` calls operate on the running peripheral.
+
+**stdout constraint:** In MCP mode, stdout is the JSON-RPC transport. The `CollectingRenderer` prevents any command output from being written to stdout, which would corrupt the transport. The `isTTY` check in `OutputFormatter` naturally returns false when stdout is a pipe.
+
 ---
 
 ## 5. Threading model
@@ -585,6 +656,7 @@ blew (executable)
  │     Shared: BLEError, PeripheralTypes, PeripheralEvent, DeviceInfo
  ├── LineNoise                         (system libedit — linenoise Swift implementation)
  ├── ArgumentParser                    (swift-argument-parser)
+ ├── MCP                               (modelcontextprotocol/swift-sdk)
  └── [build plugin] GenerateBLENames   runs Scripts/generate-all-ble.sh, which invokes:
                                          Scripts/generate-ble-names.rb
                                            reads Vendor/bluetooth-numbers-database/v1/*.json

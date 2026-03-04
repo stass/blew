@@ -28,9 +28,16 @@ enum CommandOutput {
     case empty
 }
 
+// MARK: - Shared types
+
+struct LabeledValue: Codable {
+    let label: String
+    let value: String
+}
+
 // MARK: - Row types
 
-struct DeviceRow {
+struct DeviceRow: Codable {
     let id: String
     let name: String?
     let rssi: Int
@@ -38,45 +45,45 @@ struct DeviceRow {
     let serviceDisplayNames: [String]
 }
 
-struct ServiceRow {
+struct ServiceRow: Codable {
     let uuid: String
     let name: String?
     let isPrimary: Bool
 }
 
-struct CharacteristicRow {
+struct CharacteristicRow: Codable {
     let uuid: String
     let name: String?
     let properties: [String]
     let value: String?
-    let valueFields: [(label: String, value: String)]?
+    let valueFields: [LabeledValue]?
 }
 
-struct DescriptorRow {
+struct DescriptorRow: Codable {
     let uuid: String
     let name: String?
 }
 
 // MARK: - GATT tree types
 
-struct GATTTreeService {
+struct GATTTreeService: Codable {
     let uuid: String
     let name: String?
     let characteristics: [GATTTreeCharacteristic]
 }
 
-struct GATTTreeCharacteristic {
+struct GATTTreeCharacteristic: Codable {
     let uuid: String
     let name: String?
     let properties: [String]
     let value: String?
-    let valueFields: [(label: String, value: String)]?
+    let valueFields: [LabeledValue]?
     let descriptors: [DescriptorRow]
 }
 
 // MARK: - Info types
 
-struct GATTCharInfo {
+struct GATTCharInfo: Codable {
     let uuid: String
     let name: String
     let description: String
@@ -85,14 +92,14 @@ struct GATTCharInfo {
 
 // MARK: - Value types
 
-struct ReadResult {
+struct ReadResult: Codable {
     let char: String
     let name: String?
     let value: String
     let format: String
 }
 
-struct NotificationValue {
+struct NotificationValue: Codable {
     let timestamp: String
     let char: String
     let name: String?
@@ -101,13 +108,13 @@ struct NotificationValue {
 
 // MARK: - Peripheral types
 
-struct PeriphSummaryResult {
+struct PeriphSummaryResult: Codable {
     let name: String
     let serviceUUIDs: [String]
     let services: [ServiceDefinition]
 }
 
-struct PeriphEventRecord {
+struct PeriphEventRecord: Codable {
     let timestamp: String
     let event: PeripheralEvent
 }

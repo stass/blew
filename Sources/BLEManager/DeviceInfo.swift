@@ -65,7 +65,7 @@ public struct ServiceTree: Sendable {
     }
 }
 
-public struct ConnectionStatus: Sendable {
+public struct ConnectionStatus: Sendable, Codable {
     public let isConnected: Bool
     public let deviceId: String?
     public let deviceName: String?

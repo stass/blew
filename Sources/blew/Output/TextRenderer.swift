@@ -120,8 +120,8 @@ final class TextRenderer: OutputRenderer {
                         props.padding(toLength: propsW, withPad: " ", startingAt: 0),
                     ].joined(separator: "  ")
                     Swift.print(rowLine)
-                    for field in fields {
-                        Swift.print(formatter.dim(valueIndent + field.label + ": ") + field.value)
+                    for lv in fields {
+                        Swift.print(formatter.dim(valueIndent + lv.label + ": ") + lv.value)
                     }
                 } else {
                     let value = row.value ?? ""
@@ -174,8 +174,8 @@ final class TextRenderer: OutputRenderer {
 
                 if let fields = char.valueFields, fields.count > 1 {
                     Swift.print(charLine)
-                    for field in fields {
-                        Swift.print(formatter.dim(valueIndent + field.label + ": ") + field.value)
+                    for lv in fields {
+                        Swift.print(formatter.dim(valueIndent + lv.label + ": ") + lv.value)
                     }
                 } else if let value = char.value {
                     Swift.print(charLine + formatter.dim("  = ") + value)

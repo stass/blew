@@ -20,6 +20,7 @@ Stop fumbling with GUI apps to debug Bluetooth Low Energy devices. `blew` gives 
 - **Command mode** -- run a single command, then exit: `blew [global-options] <command> [command-options]`
 - **Interactive REPL** -- run `blew` with no command for a readline-style shell with history and tab completion
 - **Script mode** -- run a semicolon-separated sequence sharing one connection: `blew exec "connect -n Sensor; gatt tree; read -f uint8 2A19"`
+- **MCP server mode** -- expose all BLE operations as MCP tools for AI agents: `blew mcp`
 
 > Requires macOS 13+ and Bluetooth permission.
 
@@ -753,6 +754,100 @@ In `exec` mode the same non-blocking behaviour applies, enabling scripts like:
 
 ```sh
 % blew exec "periph adv -n 'My Device' --config device.json; periph set 2A19 ff; periph notify 2A19 ff"
+```
+
+---
+
+## MCP Server Mode
+
+`blew mcp` starts a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio, exposing all BLE operations as individual MCP tools. AI agents (Cursor, Claude Desktop, etc.) can discover and invoke these tools to interact with BLE devices programmatically.
+
+The server is stateful: BLE connections and peripheral state persist across tool calls, just like the REPL. Tool results are returned as structured JSON (`structuredContent`), giving agents typed access to scan results, GATT data, read values, and more.
+
+### Agent configuration
+
+**Cursor** (`.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "blew": {
+      "command": "/path/to/blew",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Claude Desktop** (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "blew": {
+      "command": "/path/to/blew",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Available tools
+
+| Tool | Description |
+|------|-------------|
+| `ble_scan` | Scan for nearby BLE devices |
+| `ble_connect` | Connect to a device by ID, name, or filters |
+| `ble_disconnect` | Disconnect from current device |
+| `ble_status` | Show connection status |
+| `ble_gatt_services` | List GATT services |
+| `ble_gatt_tree` | Full GATT tree with optional values |
+| `ble_gatt_chars` | List characteristics of a service |
+| `ble_gatt_descriptors` | List descriptors of a characteristic |
+| `ble_gatt_info` | Look up Bluetooth SIG characteristic spec (no device needed) |
+| `ble_read` | Read a characteristic value |
+| `ble_write` | Write to a characteristic |
+| `ble_subscribe` | Collect notifications (returns batch) |
+| `ble_periph_advertise` | Start advertising as a peripheral |
+| `ble_periph_clone` | Clone a real device's GATT structure |
+| `ble_periph_stop` | Stop advertising |
+| `ble_periph_set` | Update a peripheral characteristic value |
+| `ble_periph_notify` | Update value and notify subscribers |
+| `ble_periph_status` | Show peripheral state |
+
+All tools that interact with a remote device accept optional targeting parameters (`name`, `device_id`, `service`, `manufacturer`, `rssi_min`, `pick`) and auto-connect if not already connected.
+
+### Example structured output
+
+A `ble_scan` call returns:
+
+```json
+{
+  "type": "devices",
+  "devices": [
+    {
+      "id": "A1B2C3D4-...",
+      "name": "Heart Rate Sensor",
+      "rssi": -55,
+      "serviceUUIDs": ["180D"],
+      "serviceDisplayNames": ["Heart Rate"]
+    }
+  ]
+}
+```
+
+A `ble_read` call returns:
+
+```json
+{
+  "type": "readValue",
+  "readValue": {
+    "char": "2A19",
+    "name": "Battery Level",
+    "value": "85",
+    "format": "uint8"
+  }
+}
 ```
 
 ---

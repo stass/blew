@@ -49,7 +49,7 @@ public enum CharacteristicProperty: String, Sendable, Codable, CaseIterable {
 }
 
 /// Snapshot of the peripheral's advertising/GATT state.
-public struct PeripheralStatus: Sendable {
+public struct PeripheralStatus: Sendable, Codable {
     public let isAdvertising: Bool
     public let advertisedName: String?
     public let serviceCount: Int

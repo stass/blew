@@ -11,11 +11,12 @@ final class CommandRouter {
     private var backgroundPeriphTask: Task<Void, Never>?
     private var backgroundSubTasks: [String: Task<Void, Never>] = [:]
 
-    init(globals: GlobalOptions, manager: BLECentral? = nil, isInteractiveMode: Bool = false) {
+    init(globals: GlobalOptions, manager: BLECentral? = nil, isInteractiveMode: Bool = false,
+         renderer: OutputRenderer? = nil) {
         self.globals = globals
         self.manager = manager ?? BLECentral.shared
         self.output = OutputFormatter(format: globals.out, verbosity: globals.verbose)
-        self.renderer = makeRenderer(format: globals.out, verbosity: globals.verbose)
+        self.renderer = renderer ?? makeRenderer(format: globals.out, verbosity: globals.verbose)
         self.isInteractiveMode = isInteractiveMode
     }
 
@@ -579,7 +580,7 @@ final class CommandRouter {
                         for char in service.characteristics {
                             let charName = BLENames.name(for: char.uuid, category: .characteristic)
                             var value: String? = nil
-                            var valueFields: [(label: String, value: String)]? = nil
+                            var valueFields: [LabeledValue]? = nil
 
                             if includeValues && char.properties.contains("read") {
                                 do {
@@ -640,7 +641,7 @@ final class CommandRouter {
                     for char in chars {
                         let name = BLENames.name(for: char.uuid, category: .characteristic)
                         var value: String? = nil
-                        var valueFields: [(label: String, value: String)]? = nil
+                        var valueFields: [LabeledValue]? = nil
                         if includeValues && char.properties.contains("read") {
                             do {
                                 let data = try await manager.readCharacteristic(char.uuid)
@@ -1273,15 +1274,15 @@ extension CommandRouter {
     /// Split a decoded field string like "Outer.Inner.Leaf: 2026" into
     /// a simplified label ("Leaf") and the raw value string ("2026").
     /// The caller is responsible for applying any visual styling to each part.
-    static func splitFieldPart(_ field: String) -> (label: String, value: String) {
-        guard let colonRange = field.range(of: ": ") else { return ("", field) }
+    static func splitFieldPart(_ field: String) -> LabeledValue {
+        guard let colonRange = field.range(of: ": ") else { return LabeledValue(label: "", value: field) }
         let fullName = String(field[field.startIndex..<colonRange.lowerBound])
         let value = String(field[colonRange.upperBound...])
         let shortName = fullName
             .components(separatedBy: ".")
             .last?
             .trimmingCharacters(in: .whitespaces) ?? fullName
-        return (shortName, value)
+        return LabeledValue(label: shortName, value: value)
     }
 }
 

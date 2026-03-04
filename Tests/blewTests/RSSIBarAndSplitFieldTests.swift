@@ -79,73 +79,71 @@ final class SplitFieldPartTests: XCTestCase {
     // MARK: - Simple "Label: value" patterns
 
     func testSimpleFieldPart() {
-        let (label, value) = CommandRouter.splitFieldPart("Battery Level: 85")
-        XCTAssertEqual(label, "Battery Level")
-        XCTAssertEqual(value, "85")
+        let lv = CommandRouter.splitFieldPart("Battery Level: 85")
+        XCTAssertEqual(lv.label, "Battery Level")
+        XCTAssertEqual(lv.value, "85")
     }
 
     func testNumericValue() {
-        let (label, value) = CommandRouter.splitFieldPart("Heart Rate: 72")
-        XCTAssertEqual(label, "Heart Rate")
-        XCTAssertEqual(value, "72")
+        let lv = CommandRouter.splitFieldPart("Heart Rate: 72")
+        XCTAssertEqual(lv.label, "Heart Rate")
+        XCTAssertEqual(lv.value, "72")
     }
 
     func testStringValue() {
-        let (label, value) = CommandRouter.splitFieldPart("Name: Apple Inc.")
-        XCTAssertEqual(label, "Name")
-        XCTAssertEqual(value, "Apple Inc.")
+        let lv = CommandRouter.splitFieldPart("Name: Apple Inc.")
+        XCTAssertEqual(lv.label, "Name")
+        XCTAssertEqual(lv.value, "Apple Inc.")
     }
 
     // MARK: - Dot-separated names (struct inlining)
 
     func testDotSeparatedNameTakesLastComponent() {
-        let (label, value) = CommandRouter.splitFieldPart("Date Time.Year: 2026")
-        XCTAssertEqual(label, "Year")
-        XCTAssertEqual(value, "2026")
+        let lv = CommandRouter.splitFieldPart("Date Time.Year: 2026")
+        XCTAssertEqual(lv.label, "Year")
+        XCTAssertEqual(lv.value, "2026")
     }
 
     func testMultipleDotsTakesLastComponent() {
-        let (label, value) = CommandRouter.splitFieldPart("Outer.Middle.Leaf: 42")
-        XCTAssertEqual(label, "Leaf")
-        XCTAssertEqual(value, "42")
+        let lv = CommandRouter.splitFieldPart("Outer.Middle.Leaf: 42")
+        XCTAssertEqual(lv.label, "Leaf")
+        XCTAssertEqual(lv.value, "42")
     }
 
     func testSingleDotComponent() {
-        let (label, value) = CommandRouter.splitFieldPart("Parent.Child: hello")
-        XCTAssertEqual(label, "Child")
-        XCTAssertEqual(value, "hello")
+        let lv = CommandRouter.splitFieldPart("Parent.Child: hello")
+        XCTAssertEqual(lv.label, "Child")
+        XCTAssertEqual(lv.value, "hello")
     }
 
     // MARK: - Edge cases
 
     func testNoColonReturnsEmptyLabelAndFullString() {
-        let (label, value) = CommandRouter.splitFieldPart("NoColonHere")
-        XCTAssertEqual(label, "")
-        XCTAssertEqual(value, "NoColonHere")
+        let lv = CommandRouter.splitFieldPart("NoColonHere")
+        XCTAssertEqual(lv.label, "")
+        XCTAssertEqual(lv.value, "NoColonHere")
     }
 
     func testColonInValuePreserved() {
-        // Only the FIRST ": " is the separator
-        let (label, value) = CommandRouter.splitFieldPart("URL: http://example.com:8080")
-        XCTAssertEqual(label, "URL")
-        XCTAssertEqual(value, "http://example.com:8080")
+        let lv = CommandRouter.splitFieldPart("URL: http://example.com:8080")
+        XCTAssertEqual(lv.label, "URL")
+        XCTAssertEqual(lv.value, "http://example.com:8080")
     }
 
     func testEmptyValue() {
-        let (label, value) = CommandRouter.splitFieldPart("Flags: ")
-        XCTAssertEqual(label, "Flags")
-        XCTAssertEqual(value, "")
+        let lv = CommandRouter.splitFieldPart("Flags: ")
+        XCTAssertEqual(lv.label, "Flags")
+        XCTAssertEqual(lv.value, "")
     }
 
     func testHexValue() {
-        let (label, value) = CommandRouter.splitFieldPart("Flags: 0x0A")
-        XCTAssertEqual(label, "Flags")
-        XCTAssertEqual(value, "0x0A")
+        let lv = CommandRouter.splitFieldPart("Flags: 0x0A")
+        XCTAssertEqual(lv.label, "Flags")
+        XCTAssertEqual(lv.value, "0x0A")
     }
 
     func testLabelWithWhitespaceIsTrimmed() {
-        // The implementation trims the last dot-separated component
-        let (label, _) = CommandRouter.splitFieldPart("A. B: value")
-        XCTAssertEqual(label, "B")
+        let lv = CommandRouter.splitFieldPart("A. B: value")
+        XCTAssertEqual(lv.label, "B")
     }
 }

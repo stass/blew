@@ -48,7 +48,7 @@ enum GATTDecoder {
 
     // MARK: - Info types
 
-    struct FieldInfo {
+    struct FieldInfo: Codable {
         let name: String
         let typeName: String
         let sizeDescription: String
