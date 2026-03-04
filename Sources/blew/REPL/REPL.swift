@@ -21,7 +21,7 @@ final class REPL {
     }
 
     func run() {
-        print("blew v0.1.0 — type 'help' for commands, 'quit' to exit")
+        print("blew — type 'help' for commands, 'quit' to exit")
 
         while true {
             do {

@@ -13,7 +13,7 @@ struct Blew: AsyncParsableCommand {
         commandName: "blew",
         abstract: "macOS BLE CLI workbench",
         discussion: "Global options must be placed before the subcommand name.",
-        version: "0.1.0",
+        version: "0.2.0",
         subcommands: [
             ScanCommand.self,
             ConnectCommand.self,

@@ -23,7 +23,7 @@ final class BlewMCPServer {
         )
         self.server = Server(
             name: "blew",
-            version: "0.1.0",
+            version: "0.2.0",
             instructions: """
                 blew is a macOS BLE CLI workbench. Use these tools to scan for BLE devices, \
                 connect to them, explore GATT services/characteristics, read/write values, \
