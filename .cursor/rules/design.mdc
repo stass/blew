@@ -14,3 +14,5 @@ Don't hedge or add fallback values -- make a reasoned decision on what values sh
 Don't use emojis in documentation or logs.
 
 Whenever we update user facing functionality or behvaior update README.md to reflect the changes.
+
+For every new change make sure tests still pass.  If we are fixing a bug -- add a new test to cover it.

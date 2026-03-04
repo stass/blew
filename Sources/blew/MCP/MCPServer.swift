@@ -2,18 +2,24 @@ import Foundation
 import MCP
 import BLEManager
 
+/// Reference-type accumulator for streaming command output.
+/// @unchecked Sendable is safe here: run*() methods are synchronous (semaphore-blocked)
+/// so all emit() calls complete before the collected items are read.
+private final class StreamCollector: @unchecked Sendable {
+    var items: [CommandOutput] = []
+    func collect(_ item: CommandOutput) { items.append(item) }
+}
+
 final class BlewMCPServer {
     private let server: Server
     private let router: CommandRouter
-    private let collector: CollectingRenderer
 
     init() {
-        self.collector = CollectingRenderer()
         let globals = try! GlobalOptions.parse([])
         self.router = CommandRouter(
             globals: globals,
             isInteractiveMode: true,
-            renderer: collector
+            renderer: NullRenderer()
         )
         self.server = Server(
             name: "blew",
@@ -50,72 +56,65 @@ final class BlewMCPServer {
         let result: CommandResult
         switch params.name {
         case "ble_scan":
-            result = executeTool { self.router.runScan(self.buildScanArgs(args)) }
+            result = router.runScan(buildScanArgs(args))
         case "ble_connect":
-            result = executeTool { self.router.runConnect(self.buildConnectArgs(args)) }
+            result = router.runConnect(buildConnectArgs(args))
         case "ble_disconnect":
-            result = executeTool { self.router.runDisconnect([]) }
+            result = router.runDisconnect([])
         case "ble_status":
-            result = executeTool { self.router.runStatus([]) }
+            result = router.runStatus([])
         case "ble_gatt_services":
-            result = executeTool { self.router.runGATT(["svcs"] + self.buildTargetingArgs(args)) }
+            result = router.runGATT(["svcs"] + buildTargetingArgs(args))
         case "ble_gatt_tree":
             var gattArgs = ["tree"] + buildTargetingArgs(args)
             if args["descriptors"]?.boolValue == true { gattArgs.append("--descriptors") }
             if args["read_values"]?.boolValue == true { gattArgs.append("--read") }
-            result = executeTool { self.router.runGATT(gattArgs) }
+            result = router.runGATT(gattArgs)
         case "ble_gatt_chars":
             var gattArgs = ["chars"] + buildTargetingArgs(args)
             if let svc = args["service_uuid"]?.stringValue { gattArgs.append(svc) }
             if args["read_values"]?.boolValue == true { gattArgs.append("--read") }
-            result = executeTool { self.router.runGATT(gattArgs) }
+            result = router.runGATT(gattArgs)
         case "ble_gatt_descriptors":
             var gattArgs = ["desc"] + buildTargetingArgs(args)
             if let char = args["char_uuid"]?.stringValue { gattArgs.append(char) }
-            result = executeTool { self.router.runGATT(gattArgs) }
+            result = router.runGATT(gattArgs)
         case "ble_gatt_info":
             var gattArgs = ["info"]
             if let char = args["char_uuid"]?.stringValue { gattArgs.append(char) }
-            result = executeTool { self.router.runGATT(gattArgs) }
+            result = router.runGATT(gattArgs)
         case "ble_read":
-            result = executeTool { self.router.runRead(self.buildReadArgs(args)) }
+            result = router.runRead(buildReadArgs(args))
         case "ble_write":
-            result = executeTool { self.router.runWrite(self.buildWriteArgs(args)) }
+            result = router.runWrite(buildWriteArgs(args))
         case "ble_subscribe":
-            result = executeTool { self.router.runSub(self.buildSubArgs(args)) }
+            let collector = StreamCollector()
+            var r = router.runSub(buildSubArgs(args), emit: { collector.collect($0) })
+            r.output = collector.items + r.output
+            result = r
         case "ble_periph_advertise":
-            result = executeTool { self.router.runPeriph(self.buildPeriphAdvArgs(args)) }
+            let collector = StreamCollector()
+            var r = router.runPeriph(buildPeriphAdvArgs(args), emit: { collector.collect($0) })
+            r.output = collector.items + r.output
+            result = r
         case "ble_periph_clone":
-            result = executeTool { self.router.runPeriph(self.buildPeriphCloneArgs(args)) }
+            let collector = StreamCollector()
+            var r = router.runPeriph(buildPeriphCloneArgs(args), emit: { collector.collect($0) })
+            r.output = collector.items + r.output
+            result = r
         case "ble_periph_stop":
-            result = executeTool { self.router.runPeriph(["stop"]) }
+            result = router.runPeriph(["stop"])
         case "ble_periph_set":
-            result = executeTool { self.router.runPeriph(self.buildPeriphSetArgs("set", args)) }
+            result = router.runPeriph(buildPeriphSetArgs("set", args))
         case "ble_periph_notify":
-            result = executeTool { self.router.runPeriph(self.buildPeriphSetArgs("notify", args)) }
+            result = router.runPeriph(buildPeriphSetArgs("notify", args))
         case "ble_periph_status":
-            result = executeTool { self.router.runPeriph(["status"]) }
+            result = router.runPeriph(["status"])
         default:
             throw MCPError.methodNotFound("Unknown tool: \(params.name)")
         }
 
         return buildMCPResult(result)
-    }
-
-    /// Run a command, merging batch output from the returned result with any
-    /// streamed output captured by the CollectingRenderer.
-    func executeTool(_ block: () -> CommandResult) -> CommandResult {
-        collector.reset()
-        var result = block()
-        let streamed = collector.collected
-        if !streamed.isEmpty {
-            result.output = streamed + result.output
-        }
-        let streamedErrors = collector.errors
-        if !streamedErrors.isEmpty {
-            result.errors = streamedErrors + result.errors
-        }
-        return result
     }
 
     // MARK: - Result conversion

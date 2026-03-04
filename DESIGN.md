@@ -361,7 +361,9 @@ The central command dispatcher. It is the shared implementation used by all thre
 
 Commands fall into two categories:
 - **Non-streaming commands** (scan, connect, disconnect, status, read, write, gatt *, periph set/notify/status/stop): produce all output before returning. Their `CommandResult` contains the full structured output.
-- **Streaming commands** (foreground sub, periph adv/clone event loops, background sub): produce output incrementally during execution. These render each item live via the `renderer` during the async loop. Their `CommandResult` contains only the exit code and any errors.
+- **Streaming commands** (foreground sub, periph adv/clone event loops): produce output incrementally during execution. These accept an `emit: @escaping @Sendable (CommandOutput) -> Void` closure and call it for each item as it arrives. Their `CommandResult` contains only the exit code and any errors. The caller decides what the emit closure does — interactive callers pass `renderer.render(_:)`, MCP callers collect items into an array.
+
+`runSub`, `runPeriph`, `runPeriphAdv`, and `runPeriphClone` all accept an `emit` parameter with a no-op default so existing call sites without a need for streaming output require no change.
 
 This semaphore pattern bridges Swift's structured concurrency into the synchronous world of the CLI main thread and REPL loop.
 
@@ -409,10 +411,11 @@ protocol OutputRenderer {
 }
 ```
 
-Two implementations:
+Three implementations:
 
 - **TextRenderer** (`Sources/blew/Output/TextRenderer.swift`): produces human-readable text output with aligned tables, GATT tree drawing, ANSI bold/dim when stdout is a TTY. Uses `OutputFormatter` internally for table formatting and ANSI helpers.
 - **KVRenderer** (`Sources/blew/Output/KVRenderer.swift`): produces machine-readable `key=value` lines.
+- **NullRenderer** (`Sources/blew/Output/NullRenderer.swift`): discards all output. Used by the MCP server to prevent any command output from reaching the JSON-RPC stdout transport.
 
 **OutputFormatter** (`Sources/blew/Output/OutputFormatter.swift`)
 
@@ -556,7 +559,7 @@ AI Agent
 BlewMCPServer (MCP SDK Server actor, StdioTransport)
   | run*() calls
   v
-CommandRouter (isInteractiveMode: true, renderer: CollectingRenderer)
+CommandRouter (isInteractiveMode: true, renderer: NullRenderer)
   | CommandResult with typed CommandOutput items
   v
 BlewMCPServer
@@ -572,11 +575,11 @@ CallTool.Result { content: [.text(...)], structuredContent: Value, isError: Bool
 |------|------|
 | `Sources/blew/Commands/MCPCommand.swift` | `AsyncParsableCommand` entry point for `blew mcp` |
 | `Sources/blew/MCP/MCPServer.swift` | MCP server: tool definitions, call dispatch, `CommandOutput` to JSON conversion |
-| `Sources/blew/Output/CollectingRenderer.swift` | `OutputRenderer` that buffers output instead of printing (captures streaming command output) |
+| `Sources/blew/Output/NullRenderer.swift` | `OutputRenderer` that discards all output (prevents any command output from reaching the JSON-RPC stdout) |
 
 **Tool dispatch:**
 
-The MCP server calls `CommandRouter.run*()` methods directly (not through `dispatch()`) to avoid automatic rendering to stdout. For streaming commands (`sub`, `periph adv/clone`) that call `renderer.render()` during execution, the `CollectingRenderer` captures the output. After each `run*()` call, the server merges the returned `CommandResult.output` with any items captured by the collector.
+The MCP server calls `CommandRouter.run*()` methods directly (not through `dispatch()`) to avoid automatic rendering to stdout. Non-streaming commands return their full output in `CommandResult.output`. For streaming commands (`sub`, `periph adv/clone`), the server passes a collecting closure as the `emit` parameter — items are accumulated in a local `StreamCollector`, then prepended to `CommandResult.output` before JSON encoding.
 
 **Structured content:**
 

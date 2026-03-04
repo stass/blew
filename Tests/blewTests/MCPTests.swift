@@ -560,95 +560,6 @@ final class MCPStructuredResultTests: XCTestCase {
     }
 }
 
-// MARK: - MCPCollectingRendererTests
-
-final class MCPCollectingRendererTests: XCTestCase {
-
-    private var renderer: CollectingRenderer!
-
-    override func setUp() {
-        super.setUp()
-        renderer = CollectingRenderer()
-    }
-
-    func testInitialStateIsEmpty() {
-        XCTAssertTrue(renderer.collected.isEmpty)
-        XCTAssertTrue(renderer.errors.isEmpty)
-        XCTAssertTrue(renderer.infos.isEmpty)
-        XCTAssertTrue(renderer.debugs.isEmpty)
-    }
-
-    func testRenderAppendsToCollected() {
-        renderer.render(.empty)
-        renderer.render(.message("hello"))
-        XCTAssertEqual(renderer.collected.count, 2)
-    }
-
-    func testRenderErrorAppendsToErrors() {
-        renderer.renderError("something went wrong")
-        XCTAssertEqual(renderer.errors, ["something went wrong"])
-    }
-
-    func testRenderInfoAppendsToInfos() {
-        renderer.renderInfo("info message")
-        XCTAssertEqual(renderer.infos, ["info message"])
-    }
-
-    func testRenderDebugAppendsToDebugs() {
-        renderer.renderDebug("debug message")
-        XCTAssertEqual(renderer.debugs, ["debug message"])
-    }
-
-    func testRenderLiveIsNoOp() {
-        renderer.renderLive("should be ignored")
-        XCTAssertTrue(renderer.collected.isEmpty)
-        XCTAssertTrue(renderer.errors.isEmpty)
-    }
-
-    func testResetClearsAll() {
-        renderer.render(.message("x"))
-        renderer.renderError("err")
-        renderer.renderInfo("info")
-        renderer.renderDebug("debug")
-        renderer.reset()
-        XCTAssertTrue(renderer.collected.isEmpty)
-        XCTAssertTrue(renderer.errors.isEmpty)
-        XCTAssertTrue(renderer.infos.isEmpty)
-        XCTAssertTrue(renderer.debugs.isEmpty)
-    }
-
-    func testRenderResultDistributesItems() {
-        var result = CommandResult()
-        result.output = [.message("out1"), .empty]
-        result.errors = ["err1"]
-        result.infos = ["info1"]
-        result.debugs = ["debug1"]
-
-        renderer.renderResult(result)
-
-        XCTAssertEqual(renderer.collected.count, 2)
-        XCTAssertEqual(renderer.errors, ["err1"])
-        XCTAssertEqual(renderer.infos, ["info1"])
-        XCTAssertEqual(renderer.debugs, ["debug1"])
-    }
-
-    func testMultipleRendersAccumulate() {
-        renderer.render(.empty)
-        renderer.render(.subscriptionList(["2A19"]))
-        renderer.renderError("e1")
-        renderer.renderError("e2")
-        XCTAssertEqual(renderer.collected.count, 2)
-        XCTAssertEqual(renderer.errors.count, 2)
-    }
-
-    func testResetThenRenderStartsFresh() {
-        renderer.renderError("old")
-        renderer.reset()
-        renderer.renderError("new")
-        XCTAssertEqual(renderer.errors, ["new"])
-    }
-}
-
 // MARK: - MCPEncodeStructuredContentTests
 
 final class MCPEncodeStructuredContentTests: XCTestCase {
@@ -893,24 +804,7 @@ final class MCPToolDispatchTests: XCTestCase {
         }
     }
 
-    // MARK: executeTool / buildMCPResult
-
-    func testExecuteToolMergesStreamedOutput() {
-        let collector = CollectingRenderer()
-        let globals = try! GlobalOptions.parse([])
-        let router = CommandRouter(globals: globals, isInteractiveMode: true, renderer: collector)
-        let server = BlewMCPServer()
-
-        // Simulate: collector has streamed output before block runs
-        collector.render(.message("streamed"))
-        // executeTool resets collector first, then runs the block
-        // So pre-populating doesn't matter; what matters is what the block's run*() call generates
-        // Instead test the merge by running a command that generates output
-        let result = server.executeTool {
-            router.runPeriph(["status"])
-        }
-        _ = result  // Just verifies it doesn't crash; output content covered in other tests
-    }
+    // MARK: buildMCPResult
 
     func testBuildMCPResultSuccessIsNotError() {
         var commandResult = CommandResult()

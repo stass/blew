@@ -67,9 +67,9 @@ final class CommandRouter {
         case "write":
             result = runWrite(Array(tokens.dropFirst()))
         case "sub":
-            result = runSub(Array(tokens.dropFirst()))
+            result = runSub(Array(tokens.dropFirst()), emit: { [self] item in renderer.render(item) })
         case "periph":
-            result = runPeriph(Array(tokens.dropFirst()))
+            result = runPeriph(Array(tokens.dropFirst()), emit: { [self] item in renderer.render(item) })
         case "sleep":
             result = runSleep(Array(tokens.dropFirst()))
         case "help":
@@ -860,7 +860,7 @@ final class CommandRouter {
         return result
     }
 
-    func runSub(_ args: [String]) -> CommandResult {
+    func runSub(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
         let args = expandArgs(args)
         if let first = args.first {
             switch first {
@@ -933,9 +933,8 @@ final class CommandRouter {
             return result
         }
 
-        // Foreground subscription: streaming command, renders each notification live
+        // Foreground subscription: streaming command, emits each notification to caller
         let semaphore = DispatchSemaphore(value: 0)
-        let capturedRenderer = self.renderer
 
         let task = Task {
             defer { semaphore.signal() }
@@ -949,7 +948,7 @@ final class CommandRouter {
                     let formatted = DataFormatter.format(data, as: fmt)
                     let ts = ISO8601DateFormatter.shared.string(from: Date())
                     let nv = NotificationValue(timestamp: ts, char: charUUID, name: charName, value: formatted)
-                    capturedRenderer.render(.notification(nv))
+                    emit(.notification(nv))
 
                     count += 1
                     if let maxCount = maxCount, count >= maxCount { break }
@@ -1310,7 +1309,7 @@ extension CommandRouter {
 // MARK: - Peripheral commands
 
 extension CommandRouter {
-    func runPeriph(_ args: [String]) -> CommandResult {
+    func runPeriph(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
         guard let sub = args.first else {
             var result = CommandResult()
             result.errors.append("missing subcommand")
@@ -1321,9 +1320,9 @@ extension CommandRouter {
 
         switch sub {
         case "adv":
-            return runPeriphAdv(Array(args.dropFirst()))
+            return runPeriphAdv(Array(args.dropFirst()), emit: emit)
         case "clone":
-            return runPeriphClone(Array(args.dropFirst()))
+            return runPeriphClone(Array(args.dropFirst()), emit: emit)
         case "stop":
             return runPeriphStop(Array(args.dropFirst()))
         case "set":
@@ -1341,7 +1340,7 @@ extension CommandRouter {
         }
     }
 
-    func runPeriphAdv(_ args: [String]) -> CommandResult {
+    func runPeriphAdv(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
         var result = CommandResult()
         let configPath = parseStringOption(args, short: "-c", long: "--config")
 
@@ -1451,14 +1450,13 @@ extension CommandRouter {
             if result.exitCode != 0 { return result }
         }
 
-        // Phase 2: event loop -- streaming, renders each event live
-        let capturedRenderer = self.renderer
+        // Phase 2: event loop -- streaming, emits each event to caller
         if isInteractiveMode {
             backgroundPeriphTask = Task {
                 let eventStream = peripheral.events()
                 for await event in eventStream {
                     let ts = ISO8601DateFormatter.shared.string(from: Date())
-                    capturedRenderer.render(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
+                    emit(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
                 }
             }
             result.output.append(.message("Advertising in background. Use 'periph stop' to stop."))
@@ -1470,7 +1468,7 @@ extension CommandRouter {
                 let eventStream = peripheral.events()
                 for await event in eventStream {
                     let ts = ISO8601DateFormatter.shared.string(from: Date())
-                    capturedRenderer.render(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
+                    emit(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
                     if Task.isCancelled { break }
                 }
             }
@@ -1482,7 +1480,7 @@ extension CommandRouter {
         }
     }
 
-    func runPeriphClone(_ args: [String]) -> CommandResult {
+    func runPeriphClone(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
         var result = CommandResult()
         let savePath = parseStringOption(args, short: "-o", long: "--save")
 
@@ -1614,13 +1612,12 @@ extension CommandRouter {
             if result.exitCode != 0 { return result }
         }
 
-        let capturedRenderer = self.renderer
         if isInteractiveMode {
             backgroundPeriphTask = Task {
                 let eventStream = peripheral.events()
                 for await event in eventStream {
                     let ts = ISO8601DateFormatter.shared.string(from: Date())
-                    capturedRenderer.render(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
+                    emit(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
                 }
             }
             result.output.append(.message("Advertising in background. Use 'periph stop' to stop."))
@@ -1632,7 +1629,7 @@ extension CommandRouter {
                 let eventStream = peripheral.events()
                 for await event in eventStream {
                     let ts = ISO8601DateFormatter.shared.string(from: Date())
-                    capturedRenderer.render(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
+                    emit(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
                     if Task.isCancelled { break }
                 }
             }

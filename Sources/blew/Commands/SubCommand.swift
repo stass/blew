@@ -28,7 +28,7 @@ struct SubCommand: ParsableCommand {
         args += ["-f", format, char]
         if let d = duration { args += ["-d", "\(d)"] }
         if let c = count { args += ["-c", "\(c)"] }
-        let result = router.runSub(args)
+        let result = router.runSub(args, emit: { router.renderer.render($0) })
         router.renderer.renderResult(result)
         if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
     }
