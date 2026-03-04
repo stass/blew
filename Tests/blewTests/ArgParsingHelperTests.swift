@@ -163,6 +163,51 @@ final class ArgParsingHelperTests: XCTestCase {
         let opts: Set<String> = ["-S", "--service"]
         XCTAssertEqual(router.positionalArgs(args, optionsWithValue: opts), ["tree"])
     }
+
+    // MARK: - expandArgs
+
+    func testExpandArgsCombinedTwoFlags() {
+        XCTAssertEqual(router.expandArgs(["-dr"]), ["-d", "-r"])
+    }
+
+    func testExpandArgsCombinedThreeFlags() {
+        XCTAssertEqual(router.expandArgs(["-drw"]), ["-d", "-r", "-w"])
+    }
+
+    func testExpandArgsSingleFlagPassthrough() {
+        XCTAssertEqual(router.expandArgs(["-d"]), ["-d"])
+    }
+
+    func testExpandArgsLongFlagPassthrough() {
+        XCTAssertEqual(router.expandArgs(["--descriptors"]), ["--descriptors"])
+    }
+
+    func testExpandArgsMixedArray() {
+        let args = ["-n", "Thingy", "-dr", "--read", "positional"]
+        XCTAssertEqual(router.expandArgs(args), ["-n", "Thingy", "-d", "-r", "--read", "positional"])
+    }
+
+    func testExpandArgsEmpty() {
+        XCTAssertEqual(router.expandArgs([]), [])
+    }
+
+    func testExpandArgsNonFlagPassthrough() {
+        XCTAssertEqual(router.expandArgs(["tree", "2A19"]), ["tree", "2A19"])
+    }
+
+    // MARK: - Combined flags end-to-end (flag detection after expansion)
+
+    func testContainsDetectsCombinedFlag() {
+        let expanded = router.expandArgs(["-dr"])
+        XCTAssertTrue(expanded.contains("-d"))
+        XCTAssertTrue(expanded.contains("-r"))
+    }
+
+    func testContainsDoesNotFalsePositive() {
+        let expanded = router.expandArgs(["-d"])
+        XCTAssertTrue(expanded.contains("-d"))
+        XCTAssertFalse(expanded.contains("-r"))
+    }
 }
 
 // MARK: - Helpers

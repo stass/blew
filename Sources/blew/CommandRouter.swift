@@ -152,6 +152,7 @@ final class CommandRouter {
     // MARK: - Command runners (called from REPL/exec)
 
     func runScan(_ args: [String]) -> CommandResult {
+        let args = expandArgs(args)
         let watchMode = args.contains("--watch") || args.contains("-w")
         let nameFilter = parseStringOption(args, short: "-n", long: "--name")
         let rssiMin = parseIntOption(args, short: "-R", long: "--rssi-min")
@@ -533,6 +534,7 @@ final class CommandRouter {
     }
 
     func runGATT(_ args: [String]) -> CommandResult {
+        let args = expandArgs(args)
         let targetingOpts: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
         guard let sub = positionalArgs(args, optionsWithValue: targetingOpts).first else {
             var result = CommandResult()
@@ -783,6 +785,7 @@ final class CommandRouter {
     }
 
     func runWrite(_ args: [String]) -> CommandResult {
+        let args = expandArgs(args)
         let connectResult = ensureConnected(args: args)
         guard connectResult.exitCode == 0 else { return connectResult }
 
@@ -858,6 +861,7 @@ final class CommandRouter {
     }
 
     func runSub(_ args: [String]) -> CommandResult {
+        let args = expandArgs(args)
         if let first = args.first {
             switch first {
             case "stop":   return runSubStop(Array(args.dropFirst()))
@@ -1130,6 +1134,23 @@ final class CommandRouter {
     }
 
     // MARK: - Argument parsing helpers
+
+    /// Expand combined single-dash short flags into individual flags.
+    /// For example, `["-dr"]` becomes `["-d", "-r"]`. Long flags (`--foo`)
+    /// and single-char flags (`-d`) are passed through unchanged.
+    func expandArgs(_ args: [String]) -> [String] {
+        var result: [String] = []
+        for arg in args {
+            if arg.hasPrefix("-") && !arg.hasPrefix("--") && arg.count > 2 {
+                for ch in arg.dropFirst() {
+                    result.append("-\(ch)")
+                }
+            } else {
+                result.append(arg)
+            }
+        }
+        return result
+    }
 
     /// Collect non-flag positional tokens from args. Options listed in
     /// `optionsWithValue` consume their following token and are skipped.
