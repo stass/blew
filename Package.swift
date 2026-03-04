@@ -47,7 +47,10 @@ let package = Package(
         ),
         .testTarget(
             name: "blewTests",
-            dependencies: ["blew"],
+            dependencies: [
+                "blew",
+                .product(name: "MCP", package: "swift-sdk"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]

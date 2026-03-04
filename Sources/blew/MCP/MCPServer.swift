@@ -44,7 +44,7 @@ final class BlewMCPServer {
 
     // MARK: - Tool call dispatch
 
-    private func handleToolCall(_ params: CallTool.Parameters) async throws -> CallTool.Result {
+    func handleToolCall(_ params: CallTool.Parameters) async throws -> CallTool.Result {
         let args = params.arguments ?? [:]
 
         let result: CommandResult
@@ -104,7 +104,7 @@ final class BlewMCPServer {
 
     /// Run a command, merging batch output from the returned result with any
     /// streamed output captured by the CollectingRenderer.
-    private func executeTool(_ block: () -> CommandResult) -> CommandResult {
+    func executeTool(_ block: () -> CommandResult) -> CommandResult {
         collector.reset()
         var result = block()
         let streamed = collector.collected
@@ -126,7 +126,7 @@ final class BlewMCPServer {
         return enc
     }()
 
-    private func buildMCPResult(_ result: CommandResult) -> CallTool.Result {
+    func buildMCPResult(_ result: CommandResult) -> CallTool.Result {
         let isError = result.exitCode != 0
         let structured = encodeStructuredContent(result.output)
         let text = buildTextContent(result, structured: structured)
@@ -149,7 +149,7 @@ final class BlewMCPServer {
         )
     }
 
-    private func encodeStructuredContent(_ output: [CommandOutput]) -> StructuredResult? {
+    func encodeStructuredContent(_ output: [CommandOutput]) -> StructuredResult? {
         guard !output.isEmpty else { return nil }
 
         for item in output {
@@ -205,7 +205,7 @@ final class BlewMCPServer {
     /// Build the text content for the MCP result. When structured data is
     /// available, serialize it as JSON so agents that only read `content`
     /// still get the full data instead of a useless summary.
-    private func buildTextContent(_ result: CommandResult, structured: StructuredResult?) -> String {
+    func buildTextContent(_ result: CommandResult, structured: StructuredResult?) -> String {
         var parts: [String] = []
 
         for msg in result.errors {
@@ -227,7 +227,7 @@ final class BlewMCPServer {
         return parts.isEmpty ? "OK" : parts.joined(separator: "\n")
     }
 
-    private func peripheralEventText(_ event: PeripheralEvent) -> String {
+    func peripheralEventText(_ event: PeripheralEvent) -> String {
         switch event {
         case .stateChanged:            return "state changed"
         case .advertisingStarted:      return "advertising started"
@@ -244,7 +244,7 @@ final class BlewMCPServer {
 
     // MARK: - Argument builders
 
-    private func buildTargetingArgs(_ args: [String: Value]) -> [String] {
+    func buildTargetingArgs(_ args: [String: Value]) -> [String] {
         var result: [String] = []
         if let name = args["name"]?.stringValue { result += ["-n", name] }
         if let id = args["device_id"]?.stringValue { result += ["-i", id] }
@@ -255,7 +255,7 @@ final class BlewMCPServer {
         return result
     }
 
-    private func buildScanArgs(_ args: [String: Value]) -> [String] {
+    func buildScanArgs(_ args: [String: Value]) -> [String] {
         var result = buildTargetingArgs(args)
         if let timeout = args["timeout"]?.doubleValue ?? args["timeout"]?.intValue.map(Double.init) {
             result += ["-t", "\(timeout)"]
@@ -263,7 +263,7 @@ final class BlewMCPServer {
         return result
     }
 
-    private func buildConnectArgs(_ args: [String: Value]) -> [String] {
+    func buildConnectArgs(_ args: [String: Value]) -> [String] {
         var result = buildTargetingArgs(args)
         if let id = args["device_id"]?.stringValue, !result.contains("-i") {
             result.append(id)
@@ -271,14 +271,14 @@ final class BlewMCPServer {
         return result
     }
 
-    private func buildReadArgs(_ args: [String: Value]) -> [String] {
+    func buildReadArgs(_ args: [String: Value]) -> [String] {
         var result = buildTargetingArgs(args)
         if let fmt = args["format"]?.stringValue { result += ["-f", fmt] }
         if let char = args["char_uuid"]?.stringValue { result.append(char) }
         return result
     }
 
-    private func buildWriteArgs(_ args: [String: Value]) -> [String] {
+    func buildWriteArgs(_ args: [String: Value]) -> [String] {
         var result = buildTargetingArgs(args)
         if let fmt = args["format"]?.stringValue { result += ["-f", fmt] }
         if args["with_response"]?.boolValue == true { result.append("-r") }
@@ -288,7 +288,7 @@ final class BlewMCPServer {
         return result
     }
 
-    private func buildSubArgs(_ args: [String: Value]) -> [String] {
+    func buildSubArgs(_ args: [String: Value]) -> [String] {
         var result = buildTargetingArgs(args)
         if let fmt = args["format"]?.stringValue { result += ["-f", fmt] }
         if let dur = args["duration"]?.doubleValue ?? args["duration"]?.intValue.map(Double.init) {
@@ -303,7 +303,7 @@ final class BlewMCPServer {
         return result
     }
 
-    private func buildPeriphAdvArgs(_ args: [String: Value]) -> [String] {
+    func buildPeriphAdvArgs(_ args: [String: Value]) -> [String] {
         var result = ["adv"]
         if let name = args["name"]?.stringValue { result += ["-n", name] }
         if let svcs = args["services"]?.arrayValue {
@@ -315,13 +315,13 @@ final class BlewMCPServer {
         return result
     }
 
-    private func buildPeriphCloneArgs(_ args: [String: Value]) -> [String] {
+    func buildPeriphCloneArgs(_ args: [String: Value]) -> [String] {
         var result = ["clone"] + buildTargetingArgs(args)
         if let file = args["save_file"]?.stringValue { result += ["-o", file] }
         return result
     }
 
-    private func buildPeriphSetArgs(_ cmd: String, _ args: [String: Value]) -> [String] {
+    func buildPeriphSetArgs(_ cmd: String, _ args: [String: Value]) -> [String] {
         var result = [cmd]
         if let fmt = args["format"]?.stringValue { result += ["-f", fmt] }
         if let char = args["char_uuid"]?.stringValue { result.append(char) }
@@ -332,7 +332,7 @@ final class BlewMCPServer {
 
 // MARK: - Structured result wrapper
 
-private enum StructuredResult: Codable {
+enum StructuredResult: Codable {
     case devices([DeviceRow])
     case services([ServiceRow])
     case characteristics([CharacteristicRow])
@@ -435,7 +435,7 @@ private enum StructuredResult: Codable {
     }
 }
 
-private struct WriteSuccessResult: Codable {
+struct WriteSuccessResult: Codable {
     let char: String
     let name: String?
 }
@@ -655,7 +655,7 @@ extension BlewMCPServer {
         ),
     ]
 
-    private static let targetingProperties: [String: Value] = [
+    static let targetingProperties: [String: Value] = [
         "name":         .object(["type": .string("string"), "description": .string("Device name filter (substring match)")]),
         "device_id":    .object(["type": .string("string"), "description": .string("Device UUID")]),
         "service":      .object(["type": .string("string"), "description": .string("Service UUID filter")]),

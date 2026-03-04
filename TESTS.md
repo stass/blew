@@ -18,7 +18,7 @@ All tests live in `Tests/blewTests/`. The target is declared in `Package.swift` 
 
 ## Architecture
 
-The test target depends directly on the `blew` executable and uses `@testable import blew` for white-box access. A handful of `CommandRouter` helpers are `internal` (rather than `private`) so they can be exercised directly from tests; everything else is accessed through public interfaces or by running the compiled binary as a subprocess.
+The test target depends directly on the `blew` executable and uses `@testable import blew` for white-box access. A handful of `CommandRouter` and `BlewMCPServer` helpers are `internal` (rather than `private`) so they can be exercised directly from tests; everything else is accessed through public interfaces or by running the compiled binary as a subprocess.
 
 Tests that instantiate `CommandRouter` use `GlobalOptions.parse([])` to get a properly initialized options struct — ArgumentParser property wrappers require parsing to initialize, so direct construction is not used.
 
@@ -65,3 +65,19 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 **End-to-end integration**
 
 `CLIIntegrationTests` — launches the compiled `.build/debug/blew` binary as a subprocess using `Process` and checks exit codes and stdout/stderr content. Tests are skipped automatically if the binary has not been built. Covers: `--help`, `--version`, `gatt info` (known and unknown UUIDs), `exec --dry-run`, and invalid subcommands.
+
+**MCP server**
+
+`MCPArgBuilderTests` — unit tests for all nine argument builder methods on `BlewMCPServer` (`buildTargetingArgs`, `buildScanArgs`, `buildConnectArgs`, `buildReadArgs`, `buildWriteArgs`, `buildSubArgs`, `buildPeriphAdvArgs`, `buildPeriphCloneArgs`, `buildPeriphSetArgs`). Exercises each option combination and verifies the resulting `[String]` arrays.
+
+`MCPStructuredResultTests` — `Codable` round-trip tests for every `StructuredResult` case. Each case is encoded to JSON, verified to have the correct `type` discriminator, decoded back, and checked for field equality.
+
+`MCPCollectingRendererTests` — unit tests for `CollectingRenderer`: verifies that `render`, `renderError`, `renderInfo`, `renderDebug`, `renderLive` (no-op), `reset`, and `renderResult` behave correctly.
+
+`MCPEncodeStructuredContentTests` — tests for `BlewMCPServer.encodeStructuredContent(_:)`: empty arrays, `empty`-only arrays, individual output cases, notification aggregation (multiple `.notification` items collapsed into `.notifications([...])`), and peripheral-event aggregation.
+
+`MCPToolDispatchTests` — exercises `handleToolCall` for commands that do not require a BLE connection: `ble_gatt_info` (known UUID, unknown UUID, missing param), `ble_status`, `ble_periph_status`, `ble_periph_stop`, and unknown tool name (expects `MCPError.methodNotFound`). Also tests `executeTool`, `buildMCPResult`, and `buildTextContent` directly.
+
+`MCPToolDefinitionTests` — verifies the static `toolDefinitions` array: correct count (18 tools), all expected tool names present, `readOnlyHint` and `idempotentHint` annotations, and required-field schemas for `ble_gatt_info`, `ble_write`, and `ble_gatt_chars`.
+
+`MCPIntegrationTests` — launches `blew mcp` as a subprocess and communicates via JSON-RPC over stdio. Tests the full MCP protocol handshake (`initialize`), tool listing (`tools/list`, 18 tools), and a `tools/call` for `ble_gatt_info` verifying structured content and text output. Tests are skipped if the binary is not built.
