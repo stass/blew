@@ -195,6 +195,33 @@ final class ArgParsingHelperTests: XCTestCase {
         XCTAssertEqual(router.expandArgs(["tree", "2A19"]), ["tree", "2A19"])
     }
 
+    func testExpandArgsValueAfterOptionNotExpanded() {
+        // -70 following -R (a value-taking option) must pass through unchanged
+        XCTAssertEqual(
+            router.expandArgs(["-R", "-70"], optionsWithValue: ["-R"]),
+            ["-R", "-70"]
+        )
+    }
+
+    func testExpandArgsCombinedFlagFollowedByValue() {
+        // -wR expands to [-w, -R]; then -70 is the value for -R and must not be expanded
+        XCTAssertEqual(
+            router.expandArgs(["-wR", "-70"], optionsWithValue: ["-R"]),
+            ["-w", "-R", "-70"]
+        )
+    }
+
+    func testExpandArgsValueLikeArgWithoutOptionSetIsExpanded() {
+        // Without optionsWithValue, a dash-prefixed multi-char arg is still expanded
+        // (documents default behaviour; callers must pass the set to prevent this)
+        XCTAssertEqual(router.expandArgs(["-ab"]), ["-a", "-b"])
+    }
+
+    func testExpandArgsNegativeNumberSingleDigit() {
+        // Single-char dash args are always passed through regardless of the set
+        XCTAssertEqual(router.expandArgs(["-7"]), ["-7"])
+    }
+
     // MARK: - Combined flags end-to-end (flag detection after expansion)
 
     func testContainsDetectsCombinedFlag() {

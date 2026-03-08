@@ -152,7 +152,8 @@ final class CommandRouter {
     // MARK: - Command runners (called from REPL/exec)
 
     func runScan(_ args: [String]) -> CommandResult {
-        let args = expandArgs(args)
+        let scanOpts: Set<String> = ["-n", "--name", "-R", "--rssi-min", "-t", "--timeout", "-S", "--service", "-m", "--manufacturer", "-p", "--pick", "-i", "--id"]
+        let args = expandArgs(args, optionsWithValue: scanOpts)
         let watchMode = args.contains("--watch") || args.contains("-w")
         let nameFilter = parseStringOption(args, short: "-n", long: "--name")
         let rssiMin = parseIntOption(args, short: "-R", long: "--rssi-min")
@@ -534,8 +535,8 @@ final class CommandRouter {
     }
 
     func runGATT(_ args: [String]) -> CommandResult {
-        let args = expandArgs(args)
         let targetingOpts: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+        let args = expandArgs(args, optionsWithValue: targetingOpts)
         guard let sub = positionalArgs(args, optionsWithValue: targetingOpts).first else {
             var result = CommandResult()
             result.errors.append("missing subcommand")
@@ -785,12 +786,12 @@ final class CommandRouter {
     }
 
     func runWrite(_ args: [String]) -> CommandResult {
-        let args = expandArgs(args)
+        let writeOpts: Set<String> = ["-f", "--format", "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+        let args = expandArgs(args, optionsWithValue: writeOpts)
         let connectResult = ensureConnected(args: args)
         guard connectResult.exitCode == 0 else { return connectResult }
 
         var result = CommandResult()
-        let writeOpts: Set<String> = ["-f", "--format", "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
         let positional = positionalArgs(args, optionsWithValue: writeOpts)
         guard positional.count >= 2 else {
             if positional.isEmpty {
@@ -861,7 +862,8 @@ final class CommandRouter {
     }
 
     func runSub(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
-        let args = expandArgs(args)
+        let subOpts: Set<String> = ["-f", "--format", "-d", "--duration", "-c", "--count", "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+        let args = expandArgs(args, optionsWithValue: subOpts)
         if let first = args.first {
             switch first {
             case "stop":   return runSubStop(Array(args.dropFirst()))
@@ -874,7 +876,6 @@ final class CommandRouter {
         guard connectResult.exitCode == 0 else { return connectResult }
 
         var result = CommandResult()
-        let subOpts: Set<String> = ["-f", "--format", "-d", "--duration", "-c", "--count", "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
         let background = args.contains("--bg") || args.contains("-b")
         let positionals = positionalArgs(args.filter { $0 != "--bg" && $0 != "-b" }, optionsWithValue: subOpts)
         guard let charInput = positionals.first else {
@@ -1137,15 +1138,24 @@ final class CommandRouter {
     /// Expand combined single-dash short flags into individual flags.
     /// For example, `["-dr"]` becomes `["-d", "-r"]`. Long flags (`--foo`)
     /// and single-char flags (`-d`) are passed through unchanged.
-    func expandArgs(_ args: [String]) -> [String] {
+    func expandArgs(_ args: [String], optionsWithValue: Set<String> = []) -> [String] {
         var result: [String] = []
+        var skipNext = false
         for arg in args {
+            if skipNext {
+                result.append(arg)
+                skipNext = false
+                continue
+            }
             if arg.hasPrefix("-") && !arg.hasPrefix("--") && arg.count > 2 {
                 for ch in arg.dropFirst() {
                     result.append("-\(ch)")
                 }
             } else {
                 result.append(arg)
+            }
+            if let last = result.last, optionsWithValue.contains(last) {
+                skipNext = true
             }
         }
         return result
