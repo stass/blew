@@ -15,7 +15,7 @@ data_dir    = ARGV[0]
 output_file = ARGV[1]
 
 def load_gss(path)
-  raw = JSON.parse(File.read(path))
+  raw = JSON.parse(File.read(path, encoding: 'utf-8'))
   # Use a hash to deduplicate by UUID (last entry wins, matching JSON semantics).
   pairs = {}
   raw.select { |e| e["source"] == "gss" }
