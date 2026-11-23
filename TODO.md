@@ -26,18 +26,6 @@ later release. Delete an item in the commit that fixes it, citing its ID
   continuations are not failed, the scan and notification streams are not
   finished, and the connection state is not cleared. `sub`, `nus` and
   `scan -w` hang, and `status` still says connected.
-- [ ] **B4. Scan ignores `-S`, `-m`, `-i` and `-p`.**
-  `Sources/blew/CommandRouter.swift:157-221`,
-  `BLEManager.swift:88-90` (`withServices: nil`). Those options are parsed
-  into `scanOpts` but never used. `connect -S 180F` (a README example) and
-  `write -m 89 fff1 01` pick the strongest device of any kind. Bare `nus`
-  does not require a device that advertises NUS.
-- [ ] **B5. When a device is already connected, auto-connect ignores the
-  requested target.** `CommandRouter.swift:1091-1100`, `:407-414`.
-  `exec "connect -n A; write -n B fff1 01"` writes to A and exits 0, and
-  `connect -n B` while connected to A does nothing. MCP `ble_nus` has the
-  same flaw. Fix: compare the target with the connected device; fail, or
-  switch devices.
 - [ ] **B6. Ctrl-C in one-shot commands bypasses all interrupt handling.**
   `Sources/blew/Blew.swift:65`. `installSignalHandlers` runs only on the REPL
   path. In CLI mode SIGINT kills the process, so there is no exit code 130,
@@ -53,17 +41,17 @@ later release. Delete an item in the commit that fixes it, citing its ID
   `lastScanResults`, `backgroundSubTasks`, `commandIsRunning` and
   `interruptRequested` race. Handlers that block on `DispatchSemaphore` hold
   threads from the cooperative pool; enough stuck calls deadlock the whole
-  server *(plausible)*. Fix: serialize `handleToolCall`, and stop blocking
-  pool threads on semaphores.
+  server *(plausible)*. Auto-connect replaces a connected device that does
+  not match a call's targeting, so a concurrent `ble_read` with `name: B`
+  disconnects the device a running `ble_subscribe` or `ble_nus` on A uses.
+  Fix: serialize `handleToolCall`, and stop blocking pool threads on
+  semaphores.
 - [ ] **B8. `ble_subscribe` has no deadline and cannot be cancelled.**
   `MCPServer.swift:310-316`, `CommandRouter.swift:965`. With no `duration`
   only `-c 10` is passed, and MCP `notifications/cancelled` does not reach the
   inner Task. `duration: "5"` (a string) passes neither `-c` nor `-d`, so the
   subscription is unbounded. Subscription setup and NUS writes also have no
   operation deadline (`CommandRouter.swift:948`).
-- [ ] **B11. `blew -t inf scan -w` crashes.** `CommandRouter.swift:164`,
-  `:265`, `:349` → `BLEManager.swift:99`. Watch mode skips
-  `isValidDuration`, and `UInt64(inf * 1e9)` traps.
 
 ## P1: important (0.3.0)
 
@@ -135,12 +123,10 @@ later release. Delete an item in the commit that fixes it, citing its ID
 - [ ] **E5. SIGTERM exits 0.** `Blew.swift:90-99`. The handlers call
   async-signal-unsafe code (Task, semaphores, print). A SIGINT outside
   `waitInterruptible` `_exit`s the REPL without saving history.
-- [ ] **E6. `--pick first` behaves like `strongest`.**
-  `CommandRouter.swift:1142-1147`, sort at `:237`.
 - [ ] **E7. Invalid option values are silently accepted.**
-  `CommandRouter.swift:912`, `:1167`; `Sources/blew/DataFormatter.swift:29-30,59-60`.
-  `-p bogus` means strongest. `-c abc` means unlimited. An unknown `-f`
-  means hex. An unknown config `format` means hex.
+  `CommandRouter.swift:886`; `Sources/blew/DataFormatter.swift:29-30,59-60`.
+  `-c abc` means unlimited. An unknown `-f` means hex. An unknown config
+  `format` means hex.
 
 ### NUS bridge
 
@@ -204,6 +190,30 @@ later release. Delete an item in the commit that fixes it, citing its ID
 - [ ] **C4. Values starting with `-` cannot be written.**
   `CommandRouter.swift:799`, `:804`. `write -f float32le fff1 -1.5` fails,
   even after `--`.
+- [ ] **C5. An advertised name can capture `-i` and MCP `device_id`.**
+  `CommandRouter.swift:1249` (`resolveDevice`), called for `-i` at `:1083`.
+  Resolution tries an exact identifier, then a name substring, then an
+  identifier fragment, all over `lastScanResults`. Scenario: `read -i
+  1234ABCD 2a19` meant as an identifier fragment; a nearby device named
+  `1234ABCD` resolves first, and blew connects to it and reads from it. A
+  full identifier missing from the last scan can be captured by a device
+  whose cached GAP name contains it. Fix: for `-i`, never match names;
+  match identifier fragments only, and an input that parses as a UUID only
+  exactly.
+- [ ] **C6. `-i` does not resolve against the connected device.**
+  `CommandRouter.swift:1081-1087`. A name or fragment given to `-i` is
+  resolved only against `lastScanResults`. Scenario: `connect -n Thingy`,
+  `scan` (the connected Thingy no longer advertises, so it is missing from
+  the results), `read -i Thing 2a19`: the fragment does not resolve, fails as
+  not found, although the connected device is the one meant; if another
+  "Thingy 2" was in the scan, blew switches to it. Fix: move resolution into
+  `DeviceSelection.swift` and include the connected device as a candidate.
+- [ ] **C7. A device switch by auto-connect is reported only at `-v`.**
+  `CommandRouter.swift:1120` uses `renderInfo`; MCP renders nothing, and
+  callers drop the `ensureConnected` result on success. Scenario: an MCP
+  agent or an `exec` script loses its connection and background
+  subscriptions on the old device with no sign in its output. Fix: carry the
+  notice in the command's result (MCP `content`) and show it without `-v`.
 
 ### Decoding and code generation
 

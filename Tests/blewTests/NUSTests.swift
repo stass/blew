@@ -348,7 +348,8 @@ final class NUSOptionTests: XCTestCase {
     }
 
     func testOptionValuesAreNeverReadAsOptions() throws {
-        XCTAssertEqual(try parse(["-p", "--file=/etc/hosts"]).endpoint, .stdio)
+        XCTAssertEqual(try parse(["-i", "--file=/etc/hosts"]).endpoint, .stdio)
+        XCTAssertThrowsError(try parse(["-p", "--file=/etc/hosts"]), "a pick value is checked, not read as --file")
         XCTAssertEqual(try parse(["-n", "--pty"]).endpoint, .stdio)
         XCTAssertEqual(try parse(["-s", "--listen=7000"]).endpoint, .fixed(bytes("--listen=7000")))
     }
@@ -359,13 +360,18 @@ final class NUSOptionTests: XCTestCase {
         }
     }
 
-    func testTargetingDefaultsToTheNUSServiceFilter() {
-        XCTAssertEqual(try parse(["-p", "only"]).targeting, ["-p", "only", "-S", NUS.service])
+    /// The NUS service filter is applied by `ensureConnected` only when the
+    /// targeting names no device (see AutoConnectPlanTests), so the targeting
+    /// passes through unchanged; its values are checked before any endpoint opens.
+    func testTargetingIsCheckedAndPassedThrough() throws {
+        XCTAssertEqual(try parse(["-p", "only"]).targeting, ["-p", "only"])
         XCTAssertEqual(try parse(["-n", "erxos"]).targeting, ["-n", "erxos"])
-        XCTAssertEqual(try parse(["--id=ABC"]).targeting, ["--id=ABC"])
-        XCTAssertEqual(try parse(["-S", "180D"]).targeting, ["-S", "180D"])
-        XCTAssertEqual(try parse(["-p", "-n"]).targeting, ["-p", "-n", "-S", NUS.service])
-        XCTAssertEqual(try parse(["-e", "--name=x"]).targeting, ["-e", "--name=x", "-S", NUS.service])
+        XCTAssertEqual(try parse(["-e", "--name=x"]).targeting, ["-e", "--name=x"])
+        XCTAssertThrowsError(try parse(["-p", "-n"]))
+        XCTAssertThrowsError(try parse(["-S", "not-a-uuid"]))
+        XCTAssertEqual(BLENames.canonicalUUID(NUS.service), NUS.service,
+                       "the default filter compares canonical UUIDs")
+        XCTAssertEqual(NUSOptions.deviceFilter, DeviceFilter(services: [NUS.service]))
     }
 
     func testDispatchRejectsBadOptionsWithoutTouchingBluetooth() {
@@ -474,9 +480,11 @@ final class NUSMCPTests: XCTestCase {
     }
 
     func testFreeTextFieldsNeverBecomeOptions() throws {
-        let o = try BlewMCPServer().buildNUSOptions(["pick": .string("--file=/etc/hosts")])
-        XCTAssertEqual(o.endpoint, .fixed(Data()), "the pick value was read as --file")
-        XCTAssertEqual(o.targeting, ["-p", "--file=/etc/hosts", "-S", NUS.service])
+        let o = try BlewMCPServer().buildNUSOptions(["pick": .string("first"), "name": .string("--file=/etc/hosts")])
+        XCTAssertEqual(o.endpoint, .fixed(Data()), "the name value was read as --file")
+        XCTAssertEqual(o.targeting, ["-n", "--file=/etc/hosts", "-p", "first"])
+        XCTAssertThrowsError(try BlewMCPServer().buildNUSOptions(["pick": .string("--file=/etc/hosts")]),
+                             "a pick value is checked")
     }
 
     func testNUSOutputIsOneTranscript() throws {

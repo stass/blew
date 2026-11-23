@@ -31,8 +31,8 @@ struct DeviceTargetingOptions: ParsableArguments {
     @Option(name: [.customShort("R"), .customLong("rssi-min")], parsing: .unconditional, help: "Minimum RSSI in dBm.")
     var rssiMin: Int?
 
-    @Option(name: [.short, .long], help: "Device pick strategy: strongest, first, or only.")
-    var pick: PickStrategy = .strongest
+    @Option(name: [.short, .long], help: "Device pick strategy: strongest (the default), first, or only.")
+    var pick: PickStrategy?
 
     /// Serialize non-nil targeting values into a flat string array suitable for passing to CommandRouter run* methods.
     func toArgs() -> [String] {
@@ -42,7 +42,7 @@ struct DeviceTargetingOptions: ParsableArguments {
         for uuid in service { args += ["-S", uuid] }
         if let m = manufacturer { args += ["-m", "\(m)"] }
         if let r = rssiMin { args += ["-R", "\(r)"] }
-        if pick != .strongest { args += ["-p", pick.rawValue] }
+        if let pick { args += ["-p", pick.rawValue] }
         return args
     }
 }

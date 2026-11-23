@@ -489,7 +489,7 @@ extension BlewMCPServer {
                     "service":      .object(["type": .string("string"), "description": .string("Filter by advertised service UUID")]),
                     "rssi_min":     .object(["type": .string("integer"), "description": .string("Minimum RSSI threshold (e.g. -70)")]),
                     "manufacturer": .object(["type": .string("integer"), "description": .string("Filter by manufacturer ID")]),
-                    "pick":         .object(["type": .string("string"), "enum": .array([.string("strongest"), .string("first"), .string("only")]), "description": .string("Auto-select strategy when multiple devices match")]),
+                    "pick":         .object(["type": .string("string"), "enum": .array([.string("strongest"), .string("first"), .string("only")]), "description": .string("Return only the device this strategy picks: strongest RSSI, first discovered, or the only match (error when several match)")]),
                     "timeout":      .object(["type": .string("number"), "description": .string("Scan duration in seconds (default: 5)")]),
                 ]),
             ]),

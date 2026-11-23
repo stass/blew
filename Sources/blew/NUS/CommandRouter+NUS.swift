@@ -19,8 +19,9 @@ struct NUSOptions {
         case tcp(host: String, port: UInt16)
     }
 
-    /// Device-targeting arguments for `ensureConnected`; the NUS service
-    /// filter when the user named no device.
+    /// Device-targeting arguments for `ensureConnected`. With none that
+    /// name a device, `nus` uses the connected device or scans for
+    /// `deviceFilter`.
     var targeting: [String]
     var endpoint: Endpoint
     var expect: Data?
@@ -34,8 +35,8 @@ struct NUSOptions {
     static let defaultExpectTimeout: TimeInterval = 5
     static let defaultBind = "127.0.0.1"
 
-    static let targetingOptions: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service",
-                                                "-m", "--manufacturer", "-R", "--rssi-min"]
+    /// The devices bare `nus` looks for: those advertising the Nordic UART Service.
+    static let deviceFilter = DeviceFilter(services: [NUS.service])
 
     /// Check the raw values of a `nus` command and build its options.
     /// `stdinAvailable` is false in the REPL, `exec` and MCP, where standard
@@ -87,10 +88,13 @@ struct NUSOptions {
         default: break
         }
 
-        let named = CommandRouter.scanOptions(targeting, optionsWithValue: CommandRouter.nusOptionsWithValue)
-            .contains { targetingOptions.contains($0.name) }
+        do {
+            _ = try DeviceTarget.parse(targeting, optionsWithValue: CommandRouter.nusOptionsWithValue)
+        } catch {
+            throw fail("\(error)")
+        }
         return NUSOptions(
-            targeting: named ? targeting : targeting + ["-S", NUS.service],
+            targeting: targeting,
             endpoint: endpoint,
             expect: expected,
             linger: duration ?? (expected == nil ? defaultLinger : defaultExpectTimeout),
@@ -232,7 +236,8 @@ extension CommandRouter {
         var targeting = options.targeting
         var connectedOnce = false
         while true {
-            let connectResult = ensureConnected(args: targeting, optionsWithValue: Self.nusOptionsWithValue)
+            let connectResult = ensureConnected(args: targeting, optionsWithValue: Self.nusOptionsWithValue,
+                                                defaultFilter: NUSOptions.deviceFilter)
             if connectResult.exitCode != 0 {
                 guard NUSOptions.retries(afterConnectFailure: connectResult.exitCode,
                                          reconnect: options.reconnect, connectedOnce: connectedOnce) else {

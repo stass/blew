@@ -53,4 +53,26 @@ enum BLENames {
         guard let n = name(for: uuid, category: category) else { return uuid }
         return "\(uuid) (\(n))"
     }
+
+    /// The form CoreBluetooth gives a UUID (`CBUUID.uuidString`), so two
+    /// spellings of one UUID compare equal: 4 hex digits for a 16-bit
+    /// Bluetooth Base UUID, 8 for a 32-bit one, otherwise the 36-character
+    /// 128-bit form, all uppercase. Accepts each of those forms and the
+    /// 128-bit spelling of a Base UUID. Nil when `uuid` is none of them.
+    static func canonicalUUID(_ uuid: String) -> String? {
+        let upper = uuid.uppercased()
+        let isHex = upper.unicodeScalars.allSatisfy { ("0"..."9").contains($0) || ("A"..."F").contains($0) }
+        switch upper.count {
+        case 4 where isHex:
+            return upper
+        case 8 where isHex:
+            return upper.hasPrefix("0000") ? String(upper.suffix(4)) : upper
+        case 36:
+            guard UUID(uuidString: upper) != nil else { return nil }
+            guard upper.hasSuffix(baseSuffix) else { return upper }
+            return canonicalUUID(String(upper.prefix(8)))
+        default:
+            return nil
+        }
+    }
 }

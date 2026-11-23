@@ -7,7 +7,11 @@ final class CommandRouter {
     let output: OutputFormatter
     let renderer: OutputRenderer
     let isInteractiveMode: Bool
+    /// The devices the last scan matched, in the order first seen.
     var lastScanResults: [DiscoveredDevice] = []
+    /// The scan record of the device `connect(to:)` last connected, so a
+    /// later scan that no longer sees it does not lose what it advertised.
+    private var connectedAdvertisement: DiscoveredDevice?
     private var backgroundPeriphTask: Task<Void, Never>?
     private var backgroundSubTasks: [String: Task<Void, Never>] = [:]
 
@@ -154,66 +158,96 @@ final class CommandRouter {
 
     // MARK: - Command runners (called from REPL/exec)
 
+    /// Options of `scan` that take a value.
+    static let scanOptionsWithValue: Set<String> = targetingOptionsWithValue.union(["-t", "--timeout"])
+
     func runScan(_ args: [String]) -> CommandResult {
-        let scanOpts: Set<String> = ["-n", "--name", "-R", "--rssi-min", "-t", "--timeout", "-S", "--service", "-m", "--manufacturer", "-p", "--pick", "-i", "--id"]
-        let args = expandArgs(args, optionsWithValue: scanOpts)
-        let watchMode = hasFlag(args, short: "-w", long: "--watch", optionsWithValue: scanOpts)
-        let nameFilter = parseStringOption(args, short: "-n", long: "--name", optionsWithValue: scanOpts)
-        let rssiMin = parseIntOption(args, short: "-R", long: "--rssi-min", optionsWithValue: scanOpts)
-
-        if watchMode {
-            return runScanWatch(nameFilter: nameFilter, rssiMin: rssiMin)
+        let args = expandArgs(args, optionsWithValue: Self.scanOptionsWithValue)
+        let target: DeviceTarget
+        let duration: TimeInterval?
+        do {
+            target = try DeviceTarget.parse(args, optionsWithValue: Self.scanOptionsWithValue)
+            duration = try scanDuration(args)
+        } catch {
+            return Self.invalidArguments("\(error)")
         }
 
-        let scanTimeout = parseDoubleOption(args, short: "-t", long: "--timeout", optionsWithValue: scanOpts) ?? globals.timeout ?? 5.0
-        guard Self.isValidDuration(scanTimeout) else {
-            var result = CommandResult()
-            result.errors.append("invalid timeout '\(scanTimeout)' (use 0 to \(Int(Self.maxDuration)) seconds)")
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
+        if hasFlag(args, short: "-w", long: "--watch", optionsWithValue: Self.scanOptionsWithValue) {
+            guard target.pick == nil else {
+                return Self.invalidArguments("--pick chooses one device; it does not apply to --watch")
+            }
+            return runScanWatch(filter: target.filter, timeout: duration)
         }
 
+        var (devices, result) = scanForDevices(timeout: duration ?? 5.0, filter: target.filter)
+        guard result.exitCode == 0 else { return result }
+        if let pick = target.pick {
+            guard let device = choose(pick, from: devices, into: &result) else { return result }
+            devices = [device]
+        }
+        result.output.append(.devices(Self.deviceRows(devices.byRSSI)))
+        return result
+    }
+
+    /// The scan duration: `scan -t` in `args`, else the global `-t`; nil
+    /// when neither is given. Throws when the value is not a duration
+    /// `isValidDuration` accepts, since a scan stop is scheduled with a
+    /// nanosecond sleep.
+    private func scanDuration(_ args: [String]) throws -> TimeInterval? {
+        let local = parseStringOption(args, short: "-t", long: "--timeout", optionsWithValue: Self.scanOptionsWithValue)
+        guard let text = local ?? globals.timeout.map({ "\($0)" }) else { return nil }
+        guard let seconds = Double(text), Self.isValidDuration(seconds) else {
+            throw InvalidArgument("invalid timeout '\(text)' (use 0 to \(Int(Self.maxDuration)) seconds)")
+        }
+        return seconds
+    }
+
+    /// The scan duration auto-connect uses: the global `-t`, else 5 seconds.
+    private func autoConnectScanDuration() throws -> TimeInterval {
+        try scanDuration([]) ?? 5.0
+    }
+
+    private static func invalidArguments(_ message: String) -> CommandResult {
+        var result = CommandResult()
+        result.errors.append(message)
+        result.exitCode = BlewExitCode.invalidArguments.code
+        return result
+    }
+
+    private static func deviceRows(_ devices: [DiscoveredDevice]) -> [DeviceRow] {
+        devices.map { d in
+            DeviceRow(id: d.identifier, name: d.name, rssi: d.rssi,
+                      serviceUUIDs: d.serviceUUIDs,
+                      serviceDisplayNames: d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) })
+        }
+    }
+
+    /// Scan for `timeout` seconds (a duration `isValidDuration` accepts) and
+    /// return the devices that match `filter`, in the order first seen; they
+    /// also become `lastScanResults`. A failed or interrupted scan, or one
+    /// that finds no matching device, gives a nonzero exit code.
+    private func scanForDevices(timeout: TimeInterval, filter: DeviceFilter) -> (devices: [DiscoveredDevice], result: CommandResult) {
         let interactive = isatty(fileno(stderr)) != 0
-        let spinner: ScanSpinner? = interactive ? ScanSpinner(timeout: scanTimeout) : nil
+        let spinner: ScanSpinner? = interactive ? ScanSpinner(timeout: timeout) : nil
         if !interactive {
-            renderer.renderInfo("scanning for \(scanTimeout)s...")
+            renderer.renderInfo("scanning for \(timeout)s...")
         }
         spinner?.start()
 
         let semaphore = DispatchSemaphore(value: 0)
-        var deviceMap: [String: DiscoveredDevice] = [:]
+        var results = ScanResults()
         var result = CommandResult()
 
         let task = Task {
             defer { semaphore.signal() }
             do {
-                let stream = try await manager.scan(timeout: scanTimeout)
+                let stream = try await manager.scan(timeout: timeout)
                 for await device in stream {
-                    if let nameFilter = nameFilter {
-                        guard let dName = device.name, dName.localizedCaseInsensitiveContains(nameFilter) else { continue }
-                    }
-                    if let rssiMin = rssiMin {
-                        guard device.rssi >= rssiMin else { continue }
-                    }
-                    if let existing = deviceMap[device.identifier] {
-                        var updated = device
-                        if updated.name == nil && existing.name != nil {
-                            updated = DiscoveredDevice(
-                                identifier: updated.identifier,
-                                name: existing.name,
-                                rssi: updated.rssi,
-                                serviceUUIDs: updated.serviceUUIDs.isEmpty ? existing.serviceUUIDs : updated.serviceUUIDs,
-                                manufacturerData: updated.manufacturerData ?? existing.manufacturerData
-                            )
-                        }
-                        deviceMap[device.identifier] = updated
-                    } else {
-                        deviceMap[device.identifier] = device
-                    }
-                    spinner?.deviceCount = deviceMap.count
+                    results.add(device)
+                    spinner?.deviceCount = results.matching(filter).count
                 }
             } catch is CancellationError {
-                // scan interrupted; partial results will still be printed below
+                // interrupted; reported below
             } catch {
                 result.errors.append("\(error)")
                 result.exitCode = BlewExitCode.operationFailed.code
@@ -223,83 +257,60 @@ final class CommandRouter {
         let outcome = waitInterruptible(task, semaphore: semaphore)
         spinner?.stop()
 
-        if case .interrupted = outcome { result.exitCode = 130; return result }
+        if case .interrupted = outcome { result.exitCode = 130; return ([], result) }
+        if result.exitCode != 0 { return ([], result) }
 
-        if result.exitCode != 0 { return result }
-
-        let devices = Array(deviceMap.values)
+        let devices = results.matching(filter)
+        lastScanResults = devices
         if devices.isEmpty {
             result.errors.append("no devices found")
             result.exitCode = BlewExitCode.notFound.code
-            return result
         }
-
-        let sorted = devices.sorted { $0.rssi > $1.rssi }
-        lastScanResults = sorted
-
-        let deviceRows = sorted.map { d in
-            DeviceRow(
-                id: d.identifier,
-                name: d.name,
-                rssi: d.rssi,
-                serviceUUIDs: d.serviceUUIDs,
-                serviceDisplayNames: d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) }
-            )
-        }
-        result.output.append(.devices(deviceRows))
-        return result
+        return (devices, result)
     }
 
-    private func runScanWatch(nameFilter: String?, rssiMin: Int?) -> CommandResult {
+    /// The device `pick` chooses from `candidates` (in the order first seen),
+    /// or nil with the error and exit code recorded in `result`.
+    private func choose(_ pick: PickStrategy, from candidates: [DiscoveredDevice],
+                        into result: inout CommandResult) -> DiscoveredDevice? {
+        switch pick.choose(from: candidates) {
+        case .picked(let device):
+            return device
+        case .noDevices:
+            result.errors.append("no devices found")
+        case .several(let devices):
+            result.errors.append("--pick only: \(devices.count) devices found, expected exactly one")
+            for d in devices {
+                result.errors.append("  " + (d.name.map { "\($0) (\(d.identifier))" } ?? d.identifier))
+            }
+        }
+        result.exitCode = BlewExitCode.notFound.code
+        return nil
+    }
+
+    private func runScanWatch(filter: DeviceFilter, timeout: TimeInterval?) -> CommandResult {
         if output.format == .kv {
-            return runScanWatchKV(nameFilter: nameFilter, rssiMin: rssiMin)
+            return runScanWatchKV(filter: filter, timeout: timeout)
         }
 
         guard isatty(fileno(stdout)) != 0 else {
-            var r = CommandResult()
-            r.errors.append("scan --watch in text mode requires an interactive terminal; use -o kv for piped output")
-            r.exitCode = BlewExitCode.invalidArguments.code
-            return r
+            return Self.invalidArguments("scan --watch in text mode requires an interactive terminal; use -o kv for piped output")
         }
-
-        let watchTimeout: TimeInterval? = globals.timeout
 
         let display = ScanWatchDisplay(formatter: output)
         display.start()
 
         let semaphore = DispatchSemaphore(value: 0)
         var scanError: Int32 = 0
-        var deviceMap: [String: DiscoveredDevice] = [:]
+        var results = ScanResults()
 
         let task = Task {
             defer { semaphore.signal() }
             do {
-                let stream = try await manager.scan(timeout: watchTimeout, allowDuplicates: true)
+                let stream = try await manager.scan(timeout: timeout, allowDuplicates: true)
                 for await device in stream {
-                    if let nameFilter = nameFilter {
-                        guard let dName = device.name, dName.localizedCaseInsensitiveContains(nameFilter) else { continue }
-                    }
-                    if let rssiMin = rssiMin {
-                        guard device.rssi >= rssiMin else { continue }
-                    }
-                    // Merge: preserve name/services/manufacturer seen in earlier advertisements.
-                    if let existing = deviceMap[device.identifier] {
-                        var updated = device
-                        if updated.name == nil && existing.name != nil {
-                            updated = DiscoveredDevice(
-                                identifier: updated.identifier,
-                                name: existing.name,
-                                rssi: updated.rssi,
-                                serviceUUIDs: updated.serviceUUIDs.isEmpty ? existing.serviceUUIDs : updated.serviceUUIDs,
-                                manufacturerData: updated.manufacturerData ?? existing.manufacturerData
-                            )
-                        }
-                        deviceMap[device.identifier] = updated
-                    } else {
-                        deviceMap[device.identifier] = device
-                    }
-                    let sorted = deviceMap.values.sorted { $0.rssi > $1.rssi }
-                    display.update(devices: sorted)
+                    results.add(device)
+                    display.update(devices: results.matching(filter).byRSSI)
                 }
             } catch is CancellationError {
                 // normal exit path
@@ -313,17 +324,12 @@ final class CommandRouter {
         display.stop()
 
         var result = CommandResult()
-        let sorted = deviceMap.values.sorted { $0.rssi > $1.rssi }
-        lastScanResults = sorted
+        let devices = results.matching(filter)
+        lastScanResults = devices
 
         if case .interrupted = outcome {
-            if !sorted.isEmpty {
-                let rows = sorted.map { d in
-                    DeviceRow(id: d.identifier, name: d.name, rssi: d.rssi,
-                              serviceUUIDs: d.serviceUUIDs,
-                              serviceDisplayNames: d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) })
-                }
-                result.output.append(.devices(rows))
+            if !devices.isEmpty {
+                result.output.append(.devices(Self.deviceRows(devices.byRSSI)))
             }
             result.exitCode = 130
             return result
@@ -331,58 +337,28 @@ final class CommandRouter {
 
         if scanError != 0 { result.exitCode = scanError; return result }
 
-        if sorted.isEmpty {
+        if devices.isEmpty {
             result.errors.append("no devices found")
             result.exitCode = BlewExitCode.notFound.code
             return result
         }
-        let rows = sorted.map { d in
-            DeviceRow(id: d.identifier, name: d.name, rssi: d.rssi,
-                      serviceUUIDs: d.serviceUUIDs,
-                      serviceDisplayNames: d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) })
-        }
-        result.output.append(.devices(rows))
+        result.output.append(.devices(Self.deviceRows(devices.byRSSI)))
         return result
     }
 
-    private func runScanWatchKV(nameFilter: String?, rssiMin: Int?) -> CommandResult {
-        let watchTimeout: TimeInterval? = globals.timeout
-
+    private func runScanWatchKV(filter: DeviceFilter, timeout: TimeInterval?) -> CommandResult {
         let semaphore = DispatchSemaphore(value: 0)
         var scanError: Int32 = 0
-        var deviceMap: [String: DiscoveredDevice] = [:]
+        var results = ScanResults()
 
         let task = Task {
             defer { semaphore.signal() }
             do {
-                let stream = try await manager.scan(timeout: watchTimeout, allowDuplicates: true)
+                let stream = try await manager.scan(timeout: timeout, allowDuplicates: true)
                 for await device in stream {
-                    if let nameFilter = nameFilter {
-                        guard let dName = device.name, dName.localizedCaseInsensitiveContains(nameFilter) else { continue }
-                    }
-                    if let rssiMin = rssiMin {
-                        guard device.rssi >= rssiMin else { continue }
-                    }
-                    if let existing = deviceMap[device.identifier] {
-                        var updated = device
-                        if updated.name == nil && existing.name != nil {
-                            updated = DiscoveredDevice(
-                                identifier: updated.identifier,
-                                name: existing.name,
-                                rssi: updated.rssi,
-                                serviceUUIDs: updated.serviceUUIDs.isEmpty ? existing.serviceUUIDs : updated.serviceUUIDs,
-                                manufacturerData: updated.manufacturerData ?? existing.manufacturerData
-                            )
-                        }
-                        deviceMap[device.identifier] = updated
-                    } else {
-                        deviceMap[device.identifier] = device
-                    }
-                    let d = deviceMap[device.identifier]!
-                    let row = DeviceRow(id: d.identifier, name: d.name, rssi: d.rssi,
-                                        serviceUUIDs: d.serviceUUIDs,
-                                        serviceDisplayNames: d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) })
-                    renderer.render(.devices([row]))
+                    let merged = results.add(device)
+                    guard filter.matches(merged) else { continue }
+                    renderer.render(.devices(Self.deviceRows([merged])))
                 }
             } catch is CancellationError {
                 // normal exit
@@ -394,48 +370,36 @@ final class CommandRouter {
 
         var result = CommandResult()
         let outcome = waitInterruptible(task, semaphore: semaphore)
+        lastScanResults = results.matching(filter)
         if case .interrupted = outcome {
-            lastScanResults = deviceMap.values.sorted { $0.rssi > $1.rssi }
             result.exitCode = 130
             return result
         }
         if scanError != 0 { result.exitCode = scanError; return result }
-        lastScanResults = deviceMap.values.sorted { $0.rssi > $1.rssi }
         return result
     }
 
+    /// `connect <device>` (or `-i`) connects to that device; `connect` with
+    /// selectors scans for one. Either way the device is connected afresh,
+    /// replacing the connected one once it is found; `connect` with no
+    /// device named keeps a connected device.
     func runConnect(_ args: [String]) -> CommandResult {
-        let positional = positionalArgs(args, optionsWithValue: Self.targetingOptionsWithValue)
-        let deviceId = positional.first ?? parseStringOption(args, short: "-i", long: "--id", optionsWithValue: Self.targetingOptionsWithValue)
+        let options = Self.targetingOptionsWithValue
+        if let device = positionalArgs(args, optionsWithValue: options).first {
+            return ensureConnected(args: ["-i", device], optionsWithValue: options, reconnect: true)
+        }
+        return ensureConnected(args: args, optionsWithValue: options, reconnect: true)
+    }
+
+    /// Connect to the device with identifier `targetId`, and remember its
+    /// record from the last scan as the connected device's advertisement.
+    private func connect(to targetId: String) -> CommandResult {
         let connectTimeout = globals.timeout ?? 10.0
-
-        guard let rawInput = deviceId else {
-            return ensureConnected(args: args, optionsWithValue: Self.targetingOptionsWithValue)
-        }
-
         var result = CommandResult()
+        let record = lastScanResults.first { $0.identifier.caseInsensitiveCompare(targetId) == .orderedSame }
 
-        let resolved = resolveDevice(rawInput)
-        if case .ambiguous(let matches) = resolved {
-            result.errors.append("ambiguous device '\(rawInput)' -- matches:")
-            for d in matches {
-                let label = d.name.map { "\($0) (\(d.identifier))" } ?? d.identifier
-                result.errors.append("  \(label)")
-            }
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
-        }
-
-        let targetId: String
-        if case .resolved(let device) = resolved {
-            let label = device.name.map { "\($0) (\(device.identifier))" } ?? device.identifier
-            result.infos.append("resolved '\(rawInput)' -> \(label)")
-            targetId = device.identifier
-        } else {
-            targetId = rawInput
-        }
-
-        result.infos.append("connecting to \(targetId)...")
+        let label = record?.name.map { "\($0) (\(targetId))" } ?? targetId
+        result.infos.append("connecting to \(label)...")
 
         let semaphore = DispatchSemaphore(value: 0)
 
@@ -456,12 +420,23 @@ final class CommandRouter {
         }
 
         switch waitInterruptible(task, semaphore: semaphore, timeout: connectTimeout) {
-        case .completed: break
+        case .completed: if result.exitCode == 0 { connectedAdvertisement = record }
         case .interrupted: result.exitCode = 130
         case .timedOut:
             result.errors.append("connection timed out")
             result.exitCode = BlewExitCode.timeout.code
         }
+        return result
+    }
+
+    private static func ambiguousDevice(_ input: String, _ matches: [DiscoveredDevice]) -> CommandResult {
+        var result = CommandResult()
+        result.errors.append("ambiguous device '\(input)' -- matches:")
+        for d in matches {
+            let label = d.name.map { "\($0) (\(d.identifier))" } ?? d.identifier
+            result.errors.append("  \(label)")
+        }
+        result.exitCode = BlewExitCode.invalidArguments.code
         return result
     }
 
@@ -563,6 +538,16 @@ final class CommandRouter {
                 return result
             }
             return runGATTInfo(charInput)
+        }
+
+        // Arguments are checked before auto-connect, which may replace the connected device.
+        guard ["svcs", "tree", "chars", "desc"].contains(sub) else {
+            var result = Self.invalidArguments("unknown gatt subcommand '\(sub)'")
+            result.output.append(.message("Usage: gatt <svcs|tree|chars|desc|info>"))
+            return result
+        }
+        if sub == "desc", positionalArgs(args, optionsWithValue: targetingOpts).count < 2 {
+            return Self.invalidArguments("missing characteristic UUID")
         }
 
         let connectResult = ensureConnected(args: args, optionsWithValue: targetingOpts)
@@ -743,15 +728,13 @@ final class CommandRouter {
 
     func runRead(_ args: [String]) -> CommandResult {
         let readOpts = Self.targetingOptionsWithValue.union(["-f", "--format"])
+        // Arguments are checked before auto-connect, which may replace the connected device.
+        guard let charInput = positionalArgs(args, optionsWithValue: readOpts).first else {
+            return Self.invalidArguments("missing characteristic UUID")
+        }
         let connectResult = ensureConnected(args: args, optionsWithValue: readOpts)
         guard connectResult.exitCode == 0 else { return connectResult }
 
-        guard let charInput = positionalArgs(args, optionsWithValue: readOpts).first else {
-            var result = CommandResult()
-            result.errors.append("missing characteristic UUID")
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
-        }
         var result = CommandResult()
         let charUUID: String
         switch resolveCharacteristic(charInput) {
@@ -797,22 +780,21 @@ final class CommandRouter {
     func runWrite(_ args: [String]) -> CommandResult {
         let writeOpts = Self.targetingOptionsWithValue.union(["-f", "--format"])
         let args = expandArgs(args, optionsWithValue: writeOpts)
+        // Arguments are checked before auto-connect, which may replace the connected device.
+        let positional = positionalArgs(args, optionsWithValue: writeOpts)
+        guard positional.count >= 2 else {
+            return Self.invalidArguments(positional.isEmpty ? "missing characteristic UUID and data" : "missing data to write")
+        }
+        let charInput = positional[0]
+        let dataStr = positional[1]
+        let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: writeOpts) ?? "hex"
+        guard let data = DataFormatter.parse(dataStr, as: fmt) else {
+            return Self.invalidArguments("invalid data '\(dataStr)' for format '\(fmt)'")
+        }
         let connectResult = ensureConnected(args: args, optionsWithValue: writeOpts)
         guard connectResult.exitCode == 0 else { return connectResult }
 
         var result = CommandResult()
-        let positional = positionalArgs(args, optionsWithValue: writeOpts)
-        guard positional.count >= 2 else {
-            if positional.isEmpty {
-                result.errors.append("missing characteristic UUID and data")
-            } else {
-                result.errors.append("missing data to write")
-            }
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
-        }
-        let charInput = positional[0]
-        let dataStr = positional[1]
         let charUUID: String
         switch resolveCharacteristic(charInput) {
         case .resolved(let uuid): charUUID = uuid
@@ -822,15 +804,8 @@ final class CommandRouter {
             return result
         case .notFound: charUUID = charInput
         }
-        let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: writeOpts) ?? "hex"
         let withResponse = hasFlag(args, short: "-r", long: "--with-response", optionsWithValue: writeOpts)
         let withoutResponse = hasFlag(args, short: "-w", long: "--without-response", optionsWithValue: writeOpts)
-
-        guard let data = DataFormatter.parse(dataStr, as: fmt) else {
-            result.errors.append("invalid data '\(dataStr)' for format '\(fmt)'")
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
-        }
 
         let writeType: WriteType
         if withResponse {
@@ -890,15 +865,14 @@ final class CommandRouter {
             return result
         }
 
-        let connectResult = ensureConnected(args: args, optionsWithValue: subOpts)
-        guard connectResult.exitCode == 0 else { return connectResult }
         let background = args.contains("--bg") || args.contains("-b")
         let positionals = positionalArgs(args.filter { $0 != "--bg" && $0 != "-b" }, optionsWithValue: subOpts)
+        // Arguments are checked before auto-connect, which may replace the connected device.
         guard let charInput = positionals.first else {
-            result.errors.append("missing characteristic UUID")
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
+            return Self.invalidArguments("missing characteristic UUID")
         }
+        let connectResult = ensureConnected(args: args, optionsWithValue: subOpts)
+        guard connectResult.exitCode == 0 else { return connectResult }
         let charUUID: String
         switch resolveCharacteristic(charInput) {
         case .resolved(let uuid): charUUID = uuid
@@ -1074,97 +1048,98 @@ final class CommandRouter {
 
     // MARK: - Auto-connect
 
-    /// Ensure a BLE device is connected before running an operation.
-    ///
-    /// If already connected, returns immediately. Otherwise resolves a target
-    /// device from the args array and connects:
-    ///   - `-i`/`--id`  → direct connect (no scan needed)
-    ///   - `-n`/`--name` / `-S`/`--service` / `-m`/`--manufacturer` / `-R`/`--rssi-min` → scan then pick and connect
-    ///   - none of the above → error
     /// Options of the device-targeting group that take a value.
     static let targetingOptionsWithValue: Set<String> = [
         "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick",
     ]
 
+    /// Make sure the device the targeting options in `args` name is
+    /// connected before an operation. `AutoConnectPlan` decides:
+    ///   - a connected device is used when it is the target, or when the
+    ///     options name no device;
+    ///   - otherwise `-i` connects directly, and the selectors (`-n`, `-S`,
+    ///     `-m`, `-R`) scan and connect to the device `-p` picks;
+    ///   - with nothing connected and nothing named, `defaultFilter` is
+    ///     scanned for when it is set, and otherwise it is an error.
+    /// A connected device that is not the target is disconnected only once
+    /// the new device is known: after `-i` resolved to an identifier, or
+    /// after the scan picked one. A failed lookup leaves it connected.
+    /// With `reconnect`, a target that names a device is connected afresh
+    /// even when it is the connected one (`connect`).
     /// `optionsWithValue` lists the calling command's options that take a
     /// value, so their values are never read as targeting options.
-    func ensureConnected(args: [String], optionsWithValue: Set<String>) -> CommandResult {
-        var isConnected = false
+    func ensureConnected(args: [String], optionsWithValue: Set<String>,
+                         defaultFilter: DeviceFilter = DeviceFilter(), reconnect: Bool = false) -> CommandResult {
+        var target: DeviceTarget
+        do {
+            target = try DeviceTarget.parse(args, optionsWithValue: optionsWithValue)
+        } catch {
+            return Self.invalidArguments("\(error)")
+        }
+        // `-i` also takes a name or an identifier fragment from the last
+        // scan; compare the full identifier it stands for.
+        if let input = target.filter.id {
+            switch resolveDevice(input) {
+            case .resolved(let device): target.filter.id = device.identifier
+            case .ambiguous(let matches): return Self.ambiguousDevice(input, matches)
+            case .notFound: break
+            }
+        }
+
+        let connected = connectedDevice()
+        let deviceId: String
+        switch AutoConnectPlan.make(target: target, defaultFilter: defaultFilter, connected: connected,
+                                    reconnect: reconnect) {
+        case .useConnected:
+            return CommandResult()
+        case .noTarget:
+            return Self.invalidArguments("not connected -- specify a device with --id or --name")
+        case .connect(let id):
+            guard UUID(uuidString: id) != nil else {
+                var result = CommandResult()
+                result.errors.append("device '\(id)' not found: it is not an identifier, and no device of the last scan matches it")
+                result.exitCode = BlewExitCode.notFound.code
+                return result
+            }
+            deviceId = id
+        case .scan(let filter, let pick):
+            let duration: TimeInterval
+            do {
+                duration = try autoConnectScanDuration()
+            } catch {
+                return Self.invalidArguments("\(error)")
+            }
+            var (devices, result) = scanForDevices(timeout: duration, filter: filter)
+            guard result.exitCode == 0 else { return result }
+            guard let device = choose(pick, from: devices, into: &result) else { return result }
+            deviceId = device.identifier
+        }
+
+        // BLECentral.connect disconnects the connected device first.
+        if let connected, connected.id.caseInsensitiveCompare(deviceId) != .orderedSame {
+            renderer.renderInfo("replacing the connected device \(connected.id)")
+        }
+        return connect(to: deviceId)
+    }
+
+    /// The connected device with its advertisement: the record of the scan
+    /// it was connected from, or else of the last scan. Nil when nothing is
+    /// connected.
+    private func connectedDevice() -> ConnectedDevice? {
+        var status: ConnectionStatus?
         let statusSem = DispatchSemaphore(value: 0)
         Task {
-            let s = await manager.status()
-            isConnected = s.isConnected
+            status = await manager.status()
             statusSem.signal()
         }
         statusSem.wait()
-        if isConnected { return CommandResult() }
-
-        if let id = parseStringOption(args, short: "-i", long: "--id", optionsWithValue: optionsWithValue) {
-            return runConnect([id])
+        guard let status, status.isConnected, let id = status.deviceId else { return nil }
+        func isConnected(_ device: DiscoveredDevice) -> Bool {
+            device.identifier.caseInsensitiveCompare(id) == .orderedSame
         }
-
-        let name = parseStringOption(args, short: "-n", long: "--name", optionsWithValue: optionsWithValue)
-        let services = parseAllStringOptions(args, short: "-S", long: "--service", optionsWithValue: optionsWithValue)
-        let manufacturer = parseIntOption(args, short: "-m", long: "--manufacturer", optionsWithValue: optionsWithValue)
-        let rssiMin = parseIntOption(args, short: "-R", long: "--rssi-min", optionsWithValue: optionsWithValue)
-
-        let hasFilters = name != nil || !services.isEmpty || manufacturer != nil || rssiMin != nil
-        guard hasFilters else {
-            var result = CommandResult()
-            result.errors.append("not connected -- specify a device with --id or --name")
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
-        }
-
-        let timeout = globals.timeout ?? 5.0
-        var scanArgs = ["-t", "\(timeout)"]
-        if let n = name { scanArgs += ["-n", n] }
-        for s in services { scanArgs += ["-S", s] }
-        if let m = manufacturer { scanArgs += ["-m", "\(m)"] }
-        if let r = rssiMin { scanArgs += ["-R", "\(r)"] }
-
-        let scanResult = runScan(scanArgs)
-        if scanResult.exitCode != 0 { return scanResult }
-
-        let pick = parsePickStrategy(args, optionsWithValue: optionsWithValue)
-        guard let device = pickDevice(from: lastScanResults, pick: pick) else {
-            var result = CommandResult()
-            result.exitCode = BlewExitCode.notFound.code
-            return result
-        }
-        return runConnect([device.identifier])
-    }
-
-    /// Pick a single device from candidates according to the given strategy.
-    /// Returns `nil` (and prints an appropriate error) if the strategy cannot be satisfied.
-    private func pickDevice(from candidates: [DiscoveredDevice], pick: PickStrategy = .strongest) -> DiscoveredDevice? {
-        switch pick {
-        case .strongest, .first:
-            guard let device = candidates.first else {
-                renderer.renderError("no devices found")
-                return nil
-            }
-            return device
-        case .only:
-            if candidates.isEmpty {
-                renderer.renderError("no devices found")
-                return nil
-            }
-            if candidates.count > 1 {
-                renderer.renderError("--pick only: \(candidates.count) devices found, expected exactly one")
-                for d in candidates {
-                    let label = d.name.map { "\($0) (\(d.identifier))" } ?? d.identifier
-                    renderer.renderError("  \(label)")
-                }
-                return nil
-            }
-            return candidates[0]
-        }
-    }
-
-    private func parsePickStrategy(_ args: [String], optionsWithValue: Set<String>) -> PickStrategy {
-        guard let raw = parseStringOption(args, short: "-p", long: "--pick", optionsWithValue: optionsWithValue) else { return .strongest }
-        return PickStrategy(rawValue: raw) ?? .strongest
+        let record = connectedAdvertisement.flatMap { isConnected($0) ? $0 : nil }
+            ?? lastScanResults.first(where: isConnected)
+        return ConnectedDevice(id: id, advertisement: record)
     }
 
     // MARK: - Argument parsing helpers

@@ -151,16 +151,20 @@ These options apply to all commands and must be placed **before** the subcommand
 
 Commands that connect to a device (`scan`, `connect`, `gatt`, `read`, `write`, `sub`, `periph clone`) accept these options to identify the target. Pass them after the subcommand name.
 
-Use `--id` to target an explicit device, or combine selectors to let blew find a match automatically.
+Use `--id` to target an explicit device, or combine selectors to let blew find a match automatically. A device must pass every selector given.
 
 | Flag | Description |
 |------|-------------|
-| `-i, --id <device-id>` | Target a specific device by its identifier. |
-| `-n, --name <substring>` | Filter by device name (substring match). |
-| `-S, --service <uuid>` | Filter by advertised service UUID. Repeatable. |
-| `-m, --manufacturer <id>` | Filter by manufacturer ID. |
+| `-i, --id <device-id>` | Target a specific device by its identifier. `connect` and auto-connect also take a name or identifier fragment that matches one device of the last scan; with `-i` they connect directly and ignore the other selectors. |
+| `-n, --name <substring>` | Filter by advertised name (case-insensitive substring). |
+| `-S, --service <uuid>` | Filter by advertised service UUID: 4 or 8 hex digits or a 128-bit UUID, so `180F` and `0000180F-0000-1000-8000-00805F9B34FB` are the same service. Repeatable; the device must advertise every one. |
+| `-m, --manufacturer <id>` | Filter by manufacturer: the decimal Bluetooth SIG company identifier at the start of the advertised manufacturer data (e.g. `89` for Nordic Semiconductor, `76` for Apple). |
 | `-R, --rssi-min <dBm>` | Minimum RSSI threshold (e.g. `-R -70`). |
-| `-p, --pick <strategy>` | How to pick when multiple devices match: `strongest` (default, highest RSSI), `first` (first seen), `only` (error if multiple match). |
+| `-p, --pick <strategy>` | How to pick when multiple devices match: `strongest` (default, highest RSSI), `first` (the first discovered in the scan), `only` (error, exit code 2, if more than one matches). |
+
+An invalid value (a malformed UUID, a manufacturer ID outside 0 to 65535, an unknown strategy) or a selector other than `-S` given twice is an error, and nothing is scanned or connected.
+
+When a device is already connected (in `exec`, the REPL or the MCP server), a command other than `connect` uses it if its targeting options name no device, or if the connected device matches them: `-i` compares identifiers, and the selectors are checked against what the device advertised when blew connected to it (or in the last scan); `-p` does not apply then. Otherwise blew finds the device the options name, by identifier or by scanning, and only then disconnects the connected one and connects to it, so `exec "connect -n A; write -n B fff1 01"` writes to B. When the named device is not found, by its identifier or by the scan, the connection is left as it was; once blew starts connecting to the named device, the old connection ends even if that connect then fails.
 
 ---
 
@@ -181,9 +185,9 @@ Scans for advertising BLE peripherals and prints a table of discovered devices. 
 | `-n, --name` | Filter results by device name substring. |
 | `-S, --service` | Filter by advertised service UUID. Repeatable. |
 | `-R, --rssi-min` | Minimum RSSI threshold (e.g. `-R -70`). |
-| `-i, --id` | Show only the device with this identifier. |
-| `-m, --manufacturer` | Filter by manufacturer ID. |
-| `-p, --pick` | Pick strategy: `strongest`, `first`, `only`. |
+| `-i, --id` | Show only the device with this identifier (the full identifier, any case). |
+| `-m, --manufacturer` | Filter by manufacturer ID (decimal company identifier). |
+| `-p, --pick` | Show only the device auto-connect would pick with this strategy: `strongest`, `first`, `only`. Not valid with `-w`. |
 | `-w, --watch` | Continuously scan and show a live-updating device list. Runs until Ctrl-C or `-t` expires. Requires a TTY in text mode; use `-o kv` for piped output. |
 
 **Output columns (text):** ID, Name, RSSI, Signal (visual bar), Services
@@ -198,6 +202,7 @@ Standard Bluetooth SIG service UUIDs in the Services column are shown with their
 % blew -t 30 scan -w                 # Watch for 30 seconds then stop
 % blew scan -n "Heart" -w            # Watch for Heart Rate devices
 % blew scan -S 180D -R -65           # Heart Rate service, RSSI ≥ -65 dBm
+% blew scan -m 89 -p first           # The first Nordic device discovered
 % blew -o kv scan                    # Machine-readable output
 % blew -o kv scan -w                 # Stream device updates (piping-friendly)
 ```
@@ -210,7 +215,7 @@ Standard Bluetooth SIG service UUIDs in the Services column are shown with their
 blew connect [-n <name>] [-S <uuid>] [-i <id>] [<device-id>]
 ```
 
-Explicitly connects to a BLE device and exits. Useful for testing connectivity or pre-warming a connection in `exec` scripts. The device can be specified by positional argument, `--id`, or device-targeting selectors (the tool will scan briefly to resolve them).
+Explicitly connects to a BLE device and exits. Useful for testing connectivity or pre-warming a connection in `exec` scripts. The device can be specified by positional argument, `--id`, or device-targeting selectors (the tool will scan briefly to resolve them). In `exec` or the REPL, a connected device stays connected until the named device is found; with no device named, `connect` keeps it.
 
 For `gatt`, `read`, `write`, and `sub` you do not need to run `connect` first — those commands connect automatically using the same device-targeting options.
 
@@ -466,7 +471,7 @@ blew nus [-n <name>] [-i <id>] [-S <uuid>] [-p <strategy>]
          [-e <text>] [-d <sec>] [--reconnect] [-r|-w]
 ```
 
-Bridges a local endpoint to a device's [Nordic UART Service](https://docs.nordicsemi.com/bundle/ncs-latest/page/nrf/libraries/bluetooth/services/nus.html) (NUS): service `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`, RX characteristic `6E400002-…` (blew writes to it) and TX characteristic `6E400003-…` (the device notifies on it). Connects like `connect`; with no device option at all it picks the strongest device advertising NUS. Writes are split into pieces that fit one ATT packet (the negotiated MTU minus 3), and writes without response wait for the device to be ready rather than being dropped.
+Bridges a local endpoint to a device's [Nordic UART Service](https://docs.nordicsemi.com/bundle/ncs-latest/page/nrf/libraries/bluetooth/services/nus.html) (NUS): service `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`, RX characteristic `6E400002-…` (blew writes to it) and TX characteristic `6E400003-…` (the device notifies on it). Connects like `connect`; with no device option at all it uses the connected device, or else scans for devices advertising NUS and picks the strongest (or the one `-p` picks). Writes are split into pieces that fit one ATT packet (the negotiated MTU minus 3), and writes without response wait for the device to be ready rather than being dropped.
 
 Bytes pass unchanged in both directions: no line-ending translation and no added newline. What arrives from the device is written to stdout as it comes, without a timestamp or newline; with `--out kv`, each notification is a `ts=… rx=<hex>` line instead. Bridge events (`connected`, `disconnected`, the pty path, TCP clients) go to stderr as `nus <event>: <detail>` lines.
 
@@ -894,7 +899,7 @@ The server is stateful: BLE connections and peripheral state persist across tool
 | `ble_periph_status` | Show peripheral state |
 | `ble_nus` | Send text over the Nordic UART Service and collect the reply, optionally waiting for an expected text |
 
-All tools that interact with a remote device accept optional targeting parameters (`name`, `device_id`, `service`, `manufacturer`, `rssi_min`, `pick`) and auto-connect if not already connected.
+All tools that interact with a remote device accept optional targeting parameters (`name`, `device_id`, `service`, `manufacturer`, `rssi_min`, `pick`) and auto-connect if not already connected. A connected device that does not match the parameters given is replaced by the named device (see [Device targeting options](#device-targeting-options)). With `pick`, `ble_scan` returns only the device that strategy picks.
 
 ### Example structured output
 

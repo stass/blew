@@ -48,6 +48,8 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 
 `DeviceResolutionTests` — populates `CommandRouter.lastScanResults` with synthetic `DiscoveredDevice` fixtures and exercises the UUID/name matching logic: exact match, substring match, ambiguous match, and not-found.
 
+`DeviceSelectionTests` — device selection without a radio: `DeviceFilter` matching (every service-UUID spelling, all `-S` required, little-endian company ID, id, name and RSSI), rejected targeting values, `PickStrategy.choose` (`first` is the first seen, not the strongest), `ScanResults` merging and first-seen order, `AutoConnectPlan` (use, switch from or ignore the connected device), `scan` arguments rejected before the radio is touched (an unbounded `-t` in watch mode, `-p` with `-w`), and `read`, `write` and `sub` arguments checked before auto-connect.
+
 **Utility functions**
 
 `RSSIBarAndSplitFieldTests` — covers two pure static functions: `rssiBar()` (signal strength bar rendering) and `splitFieldPart()` (GATT field label parsing).
@@ -105,3 +107,7 @@ Behaviour that needs a real device, exercised before a release:
 
 - **Connect timeout stops connecting.** With device A out of range, `blew -t 3 connect <A>` times out (exit 4). Bring A into range: it does not connect (it stays advertising, and `system_profiler SPBluetoothDataType` does not list it as connected).
 - **Connecting to another device.** In the REPL, `connect <A>`, then `connect <B>`: A is disconnected first and `status` shows B. `connect <B>` again disconnects and reconnects B.
+- **Scan filters.** `blew -o kv scan -S <a service A advertises>` lists only devices advertising it; `blew -o kv scan -m <company id>` only devices whose manufacturer data starts with that company; `blew scan -p first` shows one device, the first discovered (not necessarily the strongest).
+- **Auto-connect switches devices.** `blew -v exec "connect -n A; read -n B <char>; status"` reports replacing A (at `-v`) and `status` shows B. `blew exec -k "connect -n A; read -n NoSuchDevice <char>; status"` reports no devices found and `status` still shows A.
+- **Bare `nus`.** It picks only a device advertising the Nordic UART Service; with none in range it exits 2.
+- **Unbounded watch.** `blew -t inf -o kv scan -w` exits 6 at once.

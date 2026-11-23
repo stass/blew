@@ -1,7 +1,7 @@
 import Foundation
 import CoreBluetooth
 
-public struct DiscoveredDevice: Sendable {
+public struct DiscoveredDevice: Sendable, Equatable {
     public let identifier: String
     public let name: String?
     public let rssi: Int

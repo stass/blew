@@ -352,7 +352,7 @@ Background sub tasks are stored in `CommandRouter.backgroundSubTasks: [String: T
 
 **Ports outlive connections.** A port reads on one background thread for its whole life and hands each read to the input stream of the current session; every session takes a fresh stream with `input()`. A pty or TCP listener therefore stays open across `--reconnect`, and bytes read while no session runs are dropped. The pty port keeps its own slave descriptor open, so a terminal program may close and reopen the path. Writes to a pty or TCP client are non-blocking and drop what does not fit, so a stalled local reader never stalls the BLE side.
 
-**Loop.** `runNUS` builds the port, then repeats: `ensureConnected` (adding `-S <NUS service>` when the user gave no device option), check that RX and TX exist, run one session through the usual Task, semaphore and `waitInterruptible` bridge. `matched`/`inputEnded` exit 0, `expectMissed` exits 4, `linkLost` exits 5 unless `--reconnect`, which reconnects (retrying each second) with the same port. Output goes through `emit`: `.nusData` (received bytes; the text renderer writes them raw to stdout, KV prints `ts=… rx=<hex>`) and `.nusStatus` (bridge events; stderr in text mode). In interactive mode (REPL, `exec`, MCP) standard input is not bridged; with no `--send`/`--file` the session only listens.
+**Loop.** `runNUS` builds the port, then repeats: `ensureConnected` (with `NUSOptions.deviceFilter`, the NUS service, as the filter to scan with when the user gave no device option), check that RX and TX exist, run one session through the usual Task, semaphore and `waitInterruptible` bridge. `matched`/`inputEnded` exit 0, `expectMissed` exits 4, `linkLost` exits 5 unless `--reconnect`, which reconnects (retrying each second) with the same port. Output goes through `emit`: `.nusData` (received bytes; the text renderer writes them raw to stdout, KV prints `ts=… rx=<hex>`) and `.nusStatus` (bridge events; stderr in text mode). In interactive mode (REPL, `exec`, MCP) standard input is not bridged; with no `--send`/`--file` the session only listens.
 
 ### 4.4 Implicit auto-connect
 
@@ -363,15 +363,15 @@ blew gatt tree -i <uuid>
 blew read -n "My Device" 2A19
 ```
 
-`ensureConnected(args:)` is a no-op when a connection is already established (REPL / `exec` after an explicit `connect`). When not connected it resolves the target device from the args array:
+The decisions are pure functions in `Sources/blew/DeviceSelection.swift`, tested without a radio; `ensureConnected` only runs the scans, disconnects and connects they call for:
 
-1. `-i`/`--id` present → connect directly
-2. Any scan filter present (`-n`, `-S`, `-m`, `-R`) → build scan args, run a scan, apply `-p` pick strategy to select one device, then connect
-3. Neither → error: user must specify a device
+- `DeviceTarget.parse` reads the targeting options into a `DeviceFilter` (`-i`, `-n`, `-S`, `-m`, `-R`) and an optional `PickStrategy`, rejecting a value it cannot use. Service UUIDs are compared in the form `BLENames.canonicalUUID` gives, the form `CBUUID.uuidString` has.
+- `AutoConnectPlan.make` takes the target, the `ConnectedDevice` (its identifier and scan record) and a default filter (`nus` passes the NUS service). A connected device is used when the target names no device or accepts it (`-i` compares identifiers; the selectors are matched against the scan record, and an unknown record matches nothing). Otherwise: `-i` connects directly; the selectors, or the default filter when nothing is named, scan and pick; with neither it is an error.
+- `ensureConnected` resolves `-i` against the last scan first, and calls `BLECentral.connect` (which disconnects the current device) only once the new device is known: an `-i` that is not an identifier fails as not found, and the scan runs (CoreBluetooth scans while connected) and picks first. A failed lookup leaves the connection alone. Commands check their own arguments (characteristic, data, format) before calling it.
+- The connected device's scan record is the one `connect(to:)` saved when it connected (`connectedAdvertisement`), else its entry in `lastScanResults`, so a later scan that no longer sees the device (a connected device usually stops advertising) does not make it unknown.
+- `PickStrategy.choose` picks from candidates in first-seen order: `strongest` the highest RSSI (the earlier seen on a tie), `first` the first seen, `only` the single candidate or an error listing all of them.
 
-The `pickDevice(from:pick:)` helper applies the pick parameter:
-- `strongest` / `first` → first element of the RSSI-sorted scan results
-- `only` → the single result, or an error listing all candidates if more than one was found
+`runConnect` goes through the same plan, with a positional device treated as `-i` and `reconnect: true`: a named device is connected afresh even when it is the connected one (by its identifier, without a scan, since a connected device usually stops advertising), as `BLECentral.connect` documents; `connect` with no device named keeps the connected device.
 
 ### 4.5 CommandRouter
 
@@ -403,7 +403,7 @@ This semaphore pattern bridges Swift's structured concurrency into the synchrono
 - `resolveDevice(_:)`: tries (in order) exact UUID match → name substring match → UUID substring match (hyphens stripped). Returns `.resolved`, `.ambiguous`, or `.notFound`.
 - `resolveCharacteristic(_:)` / `resolveService(_:)`: prefix-matches against the `BLECentral`-cached UUID lists. After `connect`, all characteristic UUIDs are known, enabling short-prefix convenience like `2A` to match `2A19`.
 
-**Scan results cache** — `lastScanResults: [DiscoveredDevice]` is updated after every successful scan. Used for device resolution in `connect` and for REPL tab completion.
+**Scan results cache** — `lastScanResults: [DiscoveredDevice]` holds the devices the last scan matched, in the order first seen (tables sort them by RSSI for display). Used for device resolution in `connect`, for checking a connected device against a target, and for REPL tab completion. A scan collects advertisements in `ScanResults`, which merges each device's advertisements (latest RSSI, and the latest name, service list and manufacturer data, so one missing from an advertisement keeps the earlier value) before the filter is applied. Lists are replaced, never accumulated, so a device that changes its advertisement cannot grow its record. Filtering is done on these records, not by CoreBluetooth (`scanForPeripherals(withServices: nil)`), so `-n`, `-m` and `-R` combine with `-S` in one place.
 
 **Scan UI** — uses the `ScanSpinner` (a `DispatchSourceTimer`-based braille spinner on stderr) when stdout is a TTY and a scan is running. In `--watch` mode, uses `ScanWatchDisplay` instead — a timer-based renderer that redraws the device table in-place on stderr every 250 ms using ANSI cursor movement. When the watch loop exits (Ctrl-C or timeout), the final table is printed once to stdout so it persists in scroll history.
 

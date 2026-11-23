@@ -127,12 +127,16 @@ final class DeviceTargetingOptionsTests: XCTestCase {
         XCTAssertTrue(args.contains("-70"))
     }
 
-    func testDefaultPickStrategyNotIncluded() {
-        var opts = try! DeviceTargetingOptions.parse([])
-        opts.pick = .strongest  // default
-        let args = opts.toArgs()
-        XCTAssertFalse(args.contains("-p"))
-        XCTAssertFalse(args.contains("strongest"))
+    func testAbsentPickStrategyNotIncluded() {
+        let opts = try! DeviceTargetingOptions.parse([])
+        XCTAssertFalse(opts.toArgs().contains("-p"))
+    }
+
+    /// `scan -p strongest` shows only the strongest device, so an explicit
+    /// default is passed on.
+    func testExplicitStrongestPickStrategySerialized() {
+        let opts = try! DeviceTargetingOptions.parse(["-p", "strongest"])
+        XCTAssertEqual(opts.toArgs(), ["-p", "strongest"])
     }
 
     func testNonDefaultPickStrategySerialized() {
