@@ -97,6 +97,7 @@ didDiscoverDescriptors(peripheralId, characteristicUUID, descriptorUUIDs, error)
 didUpdateValue(peripheralId, characteristicUUID, value, error)
 didWriteValue(peripheralId, characteristicUUID, error)
 didUpdateNotificationState(peripheralId, characteristicUUID, isNotifying, error)
+isReadyToSendWriteWithoutResponse(peripheralId)
 ```
 
 ### 3.3 BLEEventQueue
@@ -127,6 +128,7 @@ Runs a permanent `while running` loop on a dedicated `Thread` named `blew.event-
 | read | `[charUUID: CheckedContinuation<Data, Error>]` |
 | write (with response) | `[charUUID: CheckedContinuation<Void, Error>]` |
 | subscribe (enable notify) | `[charUUID: CheckedContinuation<Void, Error>]` |
+| write without response (wait until ready) | `CheckedContinuation<Void, Error>` |
 
 **Ongoing `AsyncStream` continuations** (for streaming operations):
 
@@ -137,7 +139,7 @@ Runs a permanent `while running` loop on a dedicated `Thread` named `blew.event-
 
 `didUpdateValue` is the one event that serves two purposes: if a one-shot read continuation is registered for that UUID it is fulfilled and removed; otherwise the value is yielded to the notification stream.
 
-On `didDisconnect`, all active notification streams are finished and any pending continuations are failed.
+On `didDisconnect`, all active notification streams are finished and any pending continuations are failed. Registered disconnect callbacks run too, so `BLECentral` forgets a connection the device or the link ended, not only one it ended itself: `status()` then reports it and auto-connect starts afresh.
 
 ### 3.5 BLECentral (central facade)
 
@@ -154,6 +156,8 @@ Key behaviors:
 
 - **`scan(timeout:allowDuplicates:)`** — starts `CBCentralManager.scanForPeripherals`, returns `AsyncStream<DiscoveredDevice>`. When `timeout` is non-nil, a background `Task` stops scanning after that many seconds and finishes the stream. When `timeout` is `nil` the stream runs until the caller cancels (used by `--watch` mode). `allowDuplicates` maps directly to `CBCentralManagerScanOptionAllowDuplicatesKey`; watch mode passes `true` so RSSI updates arrive continuously.
 - **`connect(deviceId:timeout:)`** — looks up the peripheral in the delegate's cache or via `retrievePeripherals(withIdentifiers:)`, connects, then immediately runs full GATT discovery (all services, all characteristics for each service) so subsequent read/write/subscribe calls can proceed without additional discovery round-trips.
+- **`writeCharacteristic(_:data:type:)`** — a write with response waits for `didWriteValue`. A write without response first waits until `canSendWriteWithoutResponse` is true (polled on `blew.cb` after any earlier write, or signalled by `peripheralIsReady(toSendWriteWithoutResponse:)`), because CoreBluetooth silently drops one issued while it is false.
+- **`maximumWriteLength(withResponse:)`** — `maximumWriteValueLength(for:)` of the connection; without response it is the ATT MTU minus 3.
 - **`subscribe(characteristicUUID:)`** — enables notifications via `setNotifyValue(true)`, waits for the state-change callback to confirm, then returns `AsyncStream<Data>`. On stream termination, disables notifications and removes the subscription.
 
 ### 3.6 BLEPeripheral subsystem
@@ -281,6 +285,8 @@ gatt
 read    [-n/-S/-i/-m/-p] [-f <fmt>] <char-uuid>
 write   [-n/-S/-i/-m/-p] [-f <fmt>] [-r|-w] <char-uuid> <data>
 sub     [-n/-S/-i/-m/-p] [-f <fmt>] [-d <sec>] [-c <count>] [-b] <char-uuid>
+nus     [-n/-S/-i/-m/-p] [-s <text>... | --file <path> | --pty | -l <port> [--bind <addr>]]
+        [-e <text>] [-d <sec>] [--reconnect] [-r|-w]
 periph
   adv   [-n <name>] [-S <uuid>...] [-c/--config <file>]
   clone [-n/-S/-i/-m/-p] [-o/--save <file>]
@@ -322,6 +328,22 @@ sub status               — list active background subscriptions
 ```
 
 Background sub tasks are stored in `CommandRouter.backgroundSubTasks: [String: Task<Void, Never>]`, following the same pattern as `backgroundPeriphTask`. Starting a new `-b` sub on an already-subscribed UUID cancels and replaces the previous task. Background tasks are implicitly cleaned up when the notification stream ends (e.g. on disconnect).
+
+### 4.3a `nus` — Nordic UART Service bridge
+
+`nus` moves bytes between a local endpoint and a device's Nordic UART Service (RX `6E400002-…` written by blew, TX `6E400003-…` notified by the device). Bytes pass unchanged. Its files, under `Sources/blew/NUS/`:
+
+| File | Role |
+|------|------|
+| `NUSBridge.swift` | CoreBluetooth-free core: the NUS UUIDs, `NUS.chunks` (split a write into pieces of at most the negotiated length), `NUS.unescape` (printf-style escapes of `--send`/`--expect`), `NUSExpect` (finds the expected bytes across notification boundaries, keeping only `pattern.count - 1` bytes of history) and `NUSSession`. |
+| `NUSPort.swift` | The local endpoint: fixed bytes (`--send`, `--file`), standard input, a raw-mode pseudo-terminal (`openpty`), or a TCP listener bridging one client at a time. |
+| `CommandRouter+NUS.swift` | Option parsing (`parseNUSOptions`), the default NUS service filter, and `runNUS`, the connect/session/reconnect loop. |
+
+**Session.** `NUSSession.run()` races two child tasks: the downlink delivers each TX notification and feeds `NUSExpect`; the uplink sends each piece of local input (the router's `send` chunks it to `maximumWriteLength(withResponse: false)`, so the device never needs a long write, and awaits each write, which gives flow control). The first to finish decides the `NUSOutcome`: `matched`, `inputEnded` (input ended and `linger` seconds passed), `expectMissed`, or `linkLost` (the TX stream finished because the device disconnected, or a write failed). It is tested with in-memory streams.
+
+**Ports outlive connections.** A port reads on one background thread for its whole life and hands each read to the input stream of the current session; every session takes a fresh stream with `input()`. A pty or TCP listener therefore stays open across `--reconnect`, and bytes read while no session runs are dropped. The pty port keeps its own slave descriptor open, so a terminal program may close and reopen the path. Writes to a pty or TCP client are non-blocking and drop what does not fit, so a stalled local reader never stalls the BLE side.
+
+**Loop.** `runNUS` builds the port, then repeats: `ensureConnected` (adding `-S <NUS service>` when the user gave no device option), check that RX and TX exist, run one session through the usual Task, semaphore and `waitInterruptible` bridge. `matched`/`inputEnded` exit 0, `expectMissed` exits 4, `linkLost` exits 5 unless `--reconnect`, which reconnects (retrying each second) with the same port. Output goes through `emit`: `.nusData` (received bytes; the text renderer writes them raw to stdout, KV prints `ts=… rx=<hex>`) and `.nusStatus` (bridge events; stderr in text mode). In interactive mode (REPL, `exec`, MCP) standard input is not bridged; with no `--send`/`--file` the session only listens.
 
 ### 4.4 Implicit auto-connect
 
@@ -616,6 +638,7 @@ Each tool result includes both `structuredContent` (typed JSON via `Codable`) an
 | `ble_periph_set` | `periph set` | char_uuid, value, format? |
 | `ble_periph_notify` | `periph notify` | char_uuid, value, format? |
 | `ble_periph_status` | `periph status` | (none) |
+| `ble_nus` | `nus --send` | targeting options, send?, expect?, duration?, with_response? |
 
 **Subscribe behavior:** `ble_subscribe` collects notifications for the specified `duration` or `count`. If neither is specified, defaults to `count: 10` to prevent infinite blocking. All values are returned at once as a `[NotificationValue]` array.
 

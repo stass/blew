@@ -38,29 +38,28 @@ final class NUSPort: @unchecked Sendable {
     /// ends for good; a stream taken after that is already finished.
     func input() -> AsyncStream<Data> {
         let (stream, cont) = AsyncStream<Data>.makeStream()
-        let gen: Int = lock.withLock {
-            continuation?.finish()
+        // Continuations are finished and yielded to outside the lock:
+        // finish() runs onTermination, which takes the lock.
+        let (gen, previous, alreadyEnded): (Int, AsyncStream<Data>.Continuation?, Bool) = lock.withLock {
+            let previous = continuation
             generation += 1
-            if ended {
-                cont.finish()
-                continuation = nil
-            } else {
-                continuation = cont
-            }
+            continuation = ended ? nil : cont
             if !started {
                 started = true
                 let thread = Thread { [self] in readLoop() }
                 thread.name = "blew.nus-port"
                 thread.start()
             }
-            return generation
+            return (generation, previous, ended)
         }
+        previous?.finish()
         cont.onTermination = { [weak self] _ in
             guard let self else { return }
             lock.withLock {
                 if self.generation == gen { self.continuation = nil }
             }
         }
+        if alreadyEnded { cont.finish() }
         return stream
     }
 
@@ -71,13 +70,14 @@ final class NUSPort: @unchecked Sendable {
 
     private func readLoop() {
         while let data = readChunk() {
-            lock.withLock { _ = continuation?.yield(data) }
+            lock.withLock { continuation }?.yield(data)
         }
-        lock.withLock {
+        let last: AsyncStream<Data>.Continuation? = lock.withLock {
             ended = true
-            continuation?.finish()
-            continuation = nil
+            defer { continuation = nil }
+            return continuation
         }
+        last?.finish()
     }
 }
 

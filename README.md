@@ -56,7 +56,15 @@ Stop fumbling with GUI apps to debug Bluetooth Low Energy devices. `blew` gives 
 % blew -o kv sub -n "Sensor" -f uint16le -d 3600 fff1 >> hourly.log
 ```
 
-**Spin up a virtual BLE device from a JSON file.** Define services, characteristics, properties, and initial values in a config file and start advertising in one command:
+**Talk to a Nordic UART Service device like a serial port.** Type at it, script it with an expected reply, or hand a pseudo-terminal to `screen`, `cu` or `picocom`:
+
+```sh
+% blew nus -n "erxos"                                  # stdin to the device, its output to stdout
+% blew nus -n "erxos" -s 'ping\n' -e ping && echo ok   # exit status says whether the echo came back
+% blew nus -n "erxos" --pty --reconnect                # prints e.g. /dev/ttys012 for screen/cu/picocom
+```
+
+**Spin up a virtual BLE device from a JSON file.**  Define services, characteristics, properties, and initial values in a config file and start advertising in one command:
 
 ```sh
 % blew periph adv --config health-thermometer.json
@@ -448,6 +456,52 @@ Stopped all background subscriptions.
 
 ---
 
+### `nus` — Nordic UART Service bridge
+
+```
+blew nus [-n <name>] [-i <id>] [-S <uuid>] [-p <strategy>]
+         [-s <text>]... | [--file <path>] | [--pty] | [-l <port> [--bind <addr>]]
+         [-e <text>] [-d <sec>] [--reconnect] [-r|-w]
+```
+
+Bridges a local endpoint to a device's [Nordic UART Service](https://docs.nordicsemi.com/bundle/ncs-latest/page/nrf/libraries/bluetooth/services/nus.html) (NUS): service `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`, RX characteristic `6E400002-…` (blew writes to it) and TX characteristic `6E400003-…` (the device notifies on it). Connects like `connect`; with no device option at all it picks the strongest device advertising NUS. Writes are split into pieces that fit one ATT packet (the negotiated MTU minus 3), and writes without response wait for the device to be ready rather than being dropped.
+
+Bytes pass unchanged in both directions: no line-ending translation and no added newline. What arrives from the device is written to stdout as it comes, without a timestamp or newline; with `--out kv`, each notification is a `ts=… rx=<hex>` line instead. Bridge events (`connected`, `disconnected`, the pty path, TCP clients) go to stderr as `nus <event>: <detail>` lines.
+
+The local endpoint is one of:
+
+| Endpoint | Description |
+|----------|-------------|
+| standard input/output | The default. Each read from stdin goes to the device; the session ends at end of input plus `--duration` seconds, so `echo hi \| blew nus -n dev` prints the reply. |
+| `-s, --send <text>` | Send this text instead of reading stdin (repeatable). Escapes `\n \r \t \0 \\ \xHH` are decoded, so `-s 'ping\n'` sends a line in any shell. |
+| `--file <path>` | Send the file's bytes instead of reading stdin. |
+| `--pty` | Open a pseudo-terminal in raw mode and print its path (e.g. `/dev/ttys012`). Programs that expect a serial port (`screen`, `cu -l`, `picocom`, `minicom`) open it as they would a USB-serial adapter, and may close and reopen it while the bridge runs. |
+| `-l, --listen <port>` | Listen for TCP on `127.0.0.1:<port>` and bridge one client at a time (`nc localhost <port>`); the next client is accepted after the current one disconnects. `--bind <addr>` listens on another address; there is no authentication, so blew warns when it is not a loopback address. |
+
+| Flag | Description |
+|------|-------------|
+| `-e, --expect <text>` | Succeed as soon as this text (same escapes as `--send`) has arrived, even split across notifications; exit with code 4 (timeout) if it has not arrived `--duration` seconds after the input ends. Works with stdin, `--send` and `--file`. |
+| `-d, --duration <sec>` | Seconds to keep listening after the input ends. Default 1; with `--expect`, the deadline for the expected text, default 5. |
+| `--reconnect` | When the device disconnects, report it, reconnect with the same targeting options and keep the endpoint (pty or TCP listener) open. Without it, a disconnect ends the command with exit code 5. |
+| `-r, --with-response` / `-w, --without-response` | Write type for RX. Default: without response when RX supports it. |
+
+A pty or TCP bridge runs until `Ctrl-C` (or until the device disconnects, without `--reconnect`). If the local program is not reading, bytes from the device that do not fit the pty or socket buffer are dropped, as on a serial line.
+
+In the REPL and `exec`, standard input belongs to blew, so `nus` there sends only `--send`/`--file` bytes, or just listens for `--duration` seconds; `--pty` and `--listen` block the prompt until `Ctrl-C`.
+
+**Examples:**
+```sh
+% blew nus -n erxos                                    # interactive line terminal (Ctrl-D, then 1 s, to end)
+% blew nus -n erxos -s 'hello\n' -e 'hello\n'          # scripted echo test; exit 0 when the echo arrives
+% blew nus -s 'status\r\n' -d 3 > reply.txt            # strongest NUS device; capture 3 s of reply
+% blew nus -n erxos --file firmware.txt -w             # stream a file without response
+% blew nus -n erxos --pty --reconnect                  # then: screen /dev/ttys012 115200
+% blew nus -n erxos -l 7000 &  nc localhost 7000       # TCP bridge
+% blew exec "connect -n erxos; nus -s 'ping\n' -e ping; nus -s 'pong\n' -e pong"
+```
+
+---
+
 ## Interactive REPL
 
 Run `blew` with no arguments (or with global options but no subcommand) to start the interactive REPL:
@@ -477,6 +531,7 @@ The REPL provides:
 | `sub [-b] [-f <fmt>] [-d <s>] [-c <n>] <uuid>` | Subscribe in background; prompt remains available |
 | `sub stop [<uuid>]` | Stop one or all background subscriptions |
 | `sub status` | List active background subscriptions |
+| `nus [-s <text>] [--file <f>] [-e <text>] [-d <s>] [--pty] [-l <port>]` | Nordic UART Service bridge (see `nus`) |
 | `periph adv [-n <n>] [-S <uuid>] [--config <f>]` | Start advertising as a virtual peripheral |
 | `periph clone [--save <f>]` | Clone a real device's GATT |
 | `periph stop` | Stop advertising |
@@ -821,6 +876,7 @@ The server is stateful: BLE connections and peripheral state persist across tool
 | `ble_periph_set` | Update a peripheral characteristic value |
 | `ble_periph_notify` | Update value and notify subscribers |
 | `ble_periph_status` | Show peripheral state |
+| `ble_nus` | Send text over the Nordic UART Service and collect the reply, optionally waiting for an expected text |
 
 All tools that interact with a remote device accept optional targeting parameters (`name`, `device_id`, `service`, `manufacturer`, `rssi_min`, `pick`) and auto-connect if not already connected.
 

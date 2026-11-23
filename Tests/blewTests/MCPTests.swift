@@ -861,7 +861,7 @@ final class MCPToolDefinitionTests: XCTestCase {
     }
 
     func testToolCount() {
-        XCTAssertEqual(tools.count, 18)
+        XCTAssertEqual(tools.count, 19)
     }
 
     func testAllExpectedToolsPresent() {
@@ -871,7 +871,7 @@ final class MCPToolDefinitionTests: XCTestCase {
             "ble_gatt_descriptors", "ble_gatt_info",
             "ble_read", "ble_write", "ble_subscribe",
             "ble_periph_advertise", "ble_periph_clone", "ble_periph_stop",
-            "ble_periph_set", "ble_periph_notify", "ble_periph_status",
+            "ble_periph_set", "ble_periph_notify", "ble_periph_status", "ble_nus",
         ]
         for name in expectedNames {
             XCTAssertNotNil(toolsByName[name], "Missing tool: \(name)")
@@ -1066,7 +1066,7 @@ final class MCPIntegrationTests: XCTestCase {
         let result = listResponse?["result"] as? [String: Any]
         let toolsArray = result?["tools"] as? [[String: Any]]
         XCTAssertNotNil(toolsArray, "tools array should be present")
-        XCTAssertEqual(toolsArray?.count, 18, "Should have 18 tools")
+        XCTAssertEqual(toolsArray?.count, 19, "Should have 19 tools")
     }
 
     func testGATTInfoToolCallReturnsCharacteristicInfo() throws {

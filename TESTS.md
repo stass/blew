@@ -58,6 +58,10 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 
 `OutputFormatterTests` — captures stdout via `dup`/`pipe` and verifies KV and text record formatting, table alignment, and quoting rules. Captures are flushed before each redirect to prevent bleed between tests.
 
+**Nordic UART Service**
+
+`NUSTests` — the `nus` core without CoreBluetooth: chunking, escape decoding, `NUSExpect` (matches split across chunks, no false matches from discarded bytes), `NUSSession` against in-memory streams (ordering, unchanged delivery, expect matched and missed, device disconnect, write failure), the ports (fixed input ends once and stays ended; a pty and a TCP listener on an ephemeral port are exercised over loopback, including a second TCP client after the first leaves), `parseNUSOptions` defaults and rejected combinations, the default NUS service filter, ArgumentParser parsing, and the `ble_nus` MCP argument builder and transcript.
+
 **CLI argument parsing**
 
 `CLIParsingTests` — calls `Blew.parseAsRoot()` for every subcommand and flag combination to verify that ArgumentParser accepts valid inputs and rejects invalid ones. Nothing is executed; only parsing is validated.
@@ -78,6 +82,6 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 
 `MCPToolDispatchTests` — exercises `handleToolCall` for commands that do not require a BLE connection: `ble_gatt_info` (known UUID, unknown UUID, missing param), `ble_status`, `ble_periph_status`, `ble_periph_stop`, and unknown tool name (expects `MCPError.methodNotFound`). Also tests `executeTool`, `buildMCPResult`, and `buildTextContent` directly.
 
-`MCPToolDefinitionTests` — verifies the static `toolDefinitions` array: correct count (18 tools), all expected tool names present, `readOnlyHint` and `idempotentHint` annotations, and required-field schemas for `ble_gatt_info`, `ble_write`, and `ble_gatt_chars`.
+`MCPToolDefinitionTests` — verifies the static `toolDefinitions` array: correct count (19 tools), all expected tool names present, `readOnlyHint` and `idempotentHint` annotations, and required-field schemas for `ble_gatt_info`, `ble_write`, and `ble_gatt_chars`.
 
-`MCPIntegrationTests` — launches `blew mcp` as a subprocess and communicates via JSON-RPC over stdio. Tests the full MCP protocol handshake (`initialize`), tool listing (`tools/list`, 18 tools), and a `tools/call` for `ble_gatt_info` verifying structured content and text output. Tests are skipped if the binary is not built.
+`MCPIntegrationTests` — launches `blew mcp` as a subprocess and communicates via JSON-RPC over stdio. Tests the full MCP protocol handshake (`initialize`), tool listing (`tools/list`, 19 tools), and a `tools/call` for `ble_gatt_info` verifying structured content and text output. Tests are skipped if the binary is not built.
