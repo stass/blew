@@ -113,7 +113,12 @@ final class BlewMCPServer {
             result = router.runPeriph(["status"])
         case "ble_nus":
             let collector = StreamCollector()
-            var r = router.runNUS(buildNUSArgs(args), emit: { collector.collect($0) })
+            var r: CommandResult
+            do {
+                r = router.runNUS(try buildNUSOptions(args), emit: { collector.collect($0) })
+            } catch {
+                r = CommandRouter.nusInvalid(error)
+            }
             r.output = collector.items + r.output
             result = r
         default:
@@ -314,17 +319,18 @@ final class BlewMCPServer {
         return result
     }
 
-    func buildNUSArgs(_ args: [String: Value]) -> [String] {
-        var result = buildTargetingArgs(args)
-        if let send = args["send"]?.stringValue { result += ["--send", send] }
-        if let expect = args["expect"]?.stringValue { result += ["--expect", expect] }
-        if let dur = args["duration"]?.doubleValue ?? args["duration"]?.intValue.map(Double.init) {
-            result += ["-d", "\(dur)"]
-        }
-        if let wr = args["with_response"]?.boolValue {
-            result.append(wr ? "--with-response" : "--without-response")
-        }
-        return result
+    /// The options of a `ble_nus` call, built from typed fields: free text
+    /// goes only where its field says, never through a command line.
+    func buildNUSOptions(_ args: [String: Value]) throws -> NUSOptions {
+        let withResponse = args["with_response"]?.boolValue
+        return try NUSOptions.make(
+            targeting: buildTargetingArgs(args),
+            sends: args["send"]?.stringValue.map { [$0] } ?? [],
+            expect: args["expect"]?.stringValue,
+            duration: args["duration"]?.doubleValue ?? args["duration"]?.intValue.map(Double.init),
+            withResponse: withResponse == true,
+            withoutResponse: withResponse == false,
+            stdinAvailable: false)
     }
 
     func buildPeriphAdvArgs(_ args: [String: Value]) -> [String] {

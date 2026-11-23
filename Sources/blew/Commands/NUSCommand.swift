@@ -58,18 +58,16 @@ struct NUSCommand: ParsableCommand {
 
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
-        var args = targeting.toArgs()
-        for text in send { args += ["--send", text] }
-        if let file { args += ["--file", file] }
-        if let expect { args += ["--expect", expect] }
-        if let duration { args += ["-d", "\(duration)"] }
-        if pty { args.append("--pty") }
-        if let listen { args += ["--listen", "\(listen)"] }
-        if let bind { args += ["--bind", bind] }
-        if reconnect { args.append("--reconnect") }
-        if withResponse { args.append("-r") }
-        if withoutResponse { args.append("-w") }
-        let result = router.runNUS(args, emit: { router.renderer.render($0) })
+        let result: CommandResult
+        do {
+            let options = try NUSOptions.make(
+                targeting: targeting.toArgs(), sends: send, file: file, expect: expect, duration: duration,
+                pty: pty, listen: listen, bind: bind, reconnect: reconnect,
+                withResponse: withResponse, withoutResponse: withoutResponse, stdinAvailable: true)
+            result = router.runNUS(options, emit: { router.renderer.render($0) })
+        } catch {
+            result = CommandRouter.nusInvalid(error)
+        }
         router.renderer.renderResult(result)
         if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
     }

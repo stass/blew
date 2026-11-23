@@ -423,7 +423,7 @@ Subscribes to a characteristic and streams received values to stdout, one event 
 | Flag | Description |
 |------|-------------|
 | `-f, --format <fmt>` | Value format (same values as `read`). Default: `hex`. |
-| `-d, --duration <sec>` | Stop after this many seconds. |
+| `-d, --duration <sec>` | Stop after this many seconds, whether or not notifications arrive (at most a year). |
 | `-c, --count <n>` | Stop after receiving this many notifications. |
 | `-b, --bg` | Run in background (REPL and `exec` mode only). Returns the prompt immediately; notifications are printed as they arrive. Use `sub stop` to cancel. |
 
@@ -481,8 +481,8 @@ The local endpoint is one of:
 | Flag | Description |
 |------|-------------|
 | `-e, --expect <text>` | Succeed as soon as this text (same escapes as `--send`) has arrived, even split across notifications; exit with code 4 (timeout) if it has not arrived `--duration` seconds after the input ends. Works with stdin, `--send` and `--file`. |
-| `-d, --duration <sec>` | Seconds to keep listening after the input ends. Default 1; with `--expect`, the deadline for the expected text, default 5. |
-| `--reconnect` | When the device disconnects, report it, reconnect with the same targeting options and keep the endpoint (pty or TCP listener) open. Without it, a disconnect ends the command with exit code 5. |
+| `-d, --duration <sec>` | Seconds to keep listening after the input ends. Default 1; with `--expect`, the deadline for the expected text, default 5. At most a year. |
+| `--reconnect` | When the device disconnects, report it, reconnect to that same device (by its identifier, whatever else now matches the targeting options) and keep the endpoint (pty or TCP listener) open. Without it, a disconnect ends the command with exit code 5; so does a subscribe or write failure while the device is still connected, with or without it. |
 | `-r, --with-response` / `-w, --without-response` | Write type for RX. Default: without response when RX supports it. |
 
 A pty or TCP bridge runs until `Ctrl-C` (or until the device disconnects, without `--reconnect`). If the local program is not reading, bytes from the device that do not fit the pty or socket buffer are dropped, as on a serial line.

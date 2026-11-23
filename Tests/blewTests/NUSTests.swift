@@ -347,17 +347,95 @@ final class NUSOptionTests: XCTestCase {
         }
     }
 
+    func testOptionValuesAreNeverReadAsOptions() throws {
+        XCTAssertEqual(try parse(["-p", "--file=/etc/hosts"]).endpoint, .stdio)
+        XCTAssertEqual(try parse(["-n", "--pty"]).endpoint, .stdio)
+        XCTAssertEqual(try parse(["-s", "--listen=7000"]).endpoint, .fixed(bytes("--listen=7000")))
+    }
+
+    func testDurationMustBeFiniteAndBounded() {
+        for text in ["inf", "nan", "1e30"] {
+            XCTAssertThrowsError(try parse(["-d", text]), "-d \(text) should be rejected")
+        }
+    }
+
     func testTargetingDefaultsToTheNUSServiceFilter() {
-        let router = makeRouter()
-        XCTAssertEqual(router.nusTargetingArgs(["-p", "only"]), ["-p", "only", "-S", NUS.service])
-        XCTAssertEqual(router.nusTargetingArgs(["-n", "erxos"]), ["-n", "erxos"])
-        XCTAssertEqual(router.nusTargetingArgs(["--id=ABC"]), ["--id=ABC"])
-        XCTAssertEqual(router.nusTargetingArgs(["-S", "180D"]), ["-S", "180D"])
+        XCTAssertEqual(try parse(["-p", "only"]).targeting, ["-p", "only", "-S", NUS.service])
+        XCTAssertEqual(try parse(["-n", "erxos"]).targeting, ["-n", "erxos"])
+        XCTAssertEqual(try parse(["--id=ABC"]).targeting, ["--id=ABC"])
+        XCTAssertEqual(try parse(["-S", "180D"]).targeting, ["-S", "180D"])
+        XCTAssertEqual(try parse(["-p", "-n"]).targeting, ["-p", "-n", "-S", NUS.service])
+        XCTAssertEqual(try parse(["-e", "--name=x"]).targeting, ["-e", "--name=x", "-S", NUS.service])
     }
 
     func testDispatchRejectsBadOptionsWithoutTouchingBluetooth() {
         let result = makeRouter(interactive: true).dispatch("nus --pty --expect x")
         XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code)
+    }
+}
+
+// MARK: - Reconnect decisions
+
+final class NUSStepTests: XCTestCase {
+    private let failed = BlewExitCode.operationFailed.code
+
+    func testConnectFailureRetriesOnlyUnderReconnectAfterAFirstConnection() {
+        XCTAssertTrue(NUSOptions.retries(afterConnectFailure: failed, reconnect: true, connectedOnce: true))
+        XCTAssertFalse(NUSOptions.retries(afterConnectFailure: failed, reconnect: true, connectedOnce: false))
+        XCTAssertFalse(NUSOptions.retries(afterConnectFailure: failed, reconnect: false, connectedOnce: true))
+    }
+
+    func testCtrlCDuringAReconnectScanEnds() {
+        XCTAssertFalse(NUSOptions.retries(afterConnectFailure: 130, reconnect: true, connectedOnce: true))
+    }
+
+    func testDisconnectReconnectsOnlyUnderReconnect() {
+        let lost = NUSOutcome.linkLost("device disconnected")
+        XCTAssertEqual(NUSOptions.step(after: lost, stillConnected: false, linger: 1, reconnect: true), .reconnect)
+        XCTAssertEqual(NUSOptions.step(after: lost, stillConnected: false, linger: 1, reconnect: false),
+                       .finish(exitCode: failed, error: "device disconnected"))
+    }
+
+    func testFailureWhileStillConnectedEndsEvenUnderReconnect() {
+        let failure = NUSOutcome.linkLost("write failed: busy")
+        XCTAssertEqual(NUSOptions.step(after: failure, stillConnected: true, linger: 1, reconnect: true),
+                       .finish(exitCode: failed, error: "write failed: busy"))
+    }
+
+    func testSessionEnds() {
+        XCTAssertEqual(NUSOptions.step(after: nil, stillConnected: true, linger: 1, reconnect: true),
+                       .finish(exitCode: 130, error: nil))
+        XCTAssertEqual(NUSOptions.step(after: .matched, stillConnected: true, linger: 1, reconnect: true),
+                       .finish(exitCode: 0, error: nil))
+        XCTAssertEqual(NUSOptions.step(after: .expectMissed, stillConnected: true, linger: 2, reconnect: true),
+                       .finish(exitCode: BlewExitCode.timeout.code, error: "expected text not received within 2.0s"))
+    }
+}
+
+// MARK: - sub deadline
+
+final class SubDeadlineTests: XCTestCase {
+    func testDurationEndsASubscriptionThatReceivesNothing() async {
+        let (stream, continuation) = AsyncStream<Data>.makeStream()
+        let start = Date()
+        await CommandRouter.forEachNotification(stream, maxCount: nil, duration: 0.2) { _ in }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+        continuation.finish()
+    }
+
+    func testCountEndsTheSubscription() async {
+        let (stream, continuation) = AsyncStream<Data>.makeStream()
+        for byte in 0..<5 { continuation.yield(Data([UInt8(byte)])) }
+        let sink = Sink()
+        await CommandRouter.forEachNotification(stream, maxCount: 3, duration: nil) { sink.append($0) }
+        XCTAssertEqual(sink.data, Data([0, 1, 2]))
+    }
+
+    func testHugeDurationsAreRejectedBeforeBluetooth() {
+        for command in ["sub -d 1e30 2A19", "sub -d inf 2A19", "sleep inf", "sleep 1e30", "scan -t inf", "scan -t -1"] {
+            let result = makeRouter(interactive: true).dispatch(command)
+            XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code, command)
+        }
     }
 }
 
@@ -383,12 +461,22 @@ final class NUSCLIParsingTests: XCTestCase {
 import MCP
 
 final class NUSMCPTests: XCTestCase {
-    func testBuildNUSArgs() {
-        let args = BlewMCPServer().buildNUSArgs([
-            "name": .string("erxos"), "send": .string("ping\\n"), "expect": .string("ping"),
+    func testBuildNUSOptions() throws {
+        let o = try BlewMCPServer().buildNUSOptions([
+            "name": .string("erxos"), "send": .string("ping\n"), "expect": .string("ping"),
             "duration": .double(2), "with_response": .bool(false),
         ])
-        XCTAssertEqual(args, ["-n", "erxos", "--send", "ping\\n", "--expect", "ping", "-d", "2.0", "--without-response"])
+        XCTAssertEqual(o.targeting, ["-n", "erxos"])
+        XCTAssertEqual(o.endpoint, .fixed(Data("ping\n".utf8)))
+        XCTAssertEqual(o.expect, Data("ping".utf8))
+        XCTAssertEqual(o.linger, 2)
+        XCTAssertEqual(o.writeType, .withoutResponse)
+    }
+
+    func testFreeTextFieldsNeverBecomeOptions() throws {
+        let o = try BlewMCPServer().buildNUSOptions(["pick": .string("--file=/etc/hosts")])
+        XCTAssertEqual(o.endpoint, .fixed(Data()), "the pick value was read as --file")
+        XCTAssertEqual(o.targeting, ["-p", "--file=/etc/hosts", "-S", NUS.service])
     }
 
     func testNUSOutputIsOneTranscript() throws {

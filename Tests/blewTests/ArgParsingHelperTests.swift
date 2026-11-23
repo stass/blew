@@ -11,118 +11,127 @@ final class ArgParsingHelperTests: XCTestCase {
 
     func testParseStringOptionShortForm() {
         let args = ["-n", "Thingy", "other"]
-        XCTAssertEqual(router.parseStringOption(args, short: "-n", long: "--name"), "Thingy")
+        XCTAssertEqual(router.parseStringOption(args, short: "-n", long: "--name", optionsWithValue: []), "Thingy")
     }
 
     func testParseStringOptionLongForm() {
         let args = ["--name", "Thingy"]
-        XCTAssertEqual(router.parseStringOption(args, short: "-n", long: "--name"), "Thingy")
+        XCTAssertEqual(router.parseStringOption(args, short: "-n", long: "--name", optionsWithValue: []), "Thingy")
     }
 
     func testParseStringOptionEqualsForm() {
         let args = ["--name=Thingy"]
-        XCTAssertEqual(router.parseStringOption(args, short: "-n", long: "--name"), "Thingy")
+        XCTAssertEqual(router.parseStringOption(args, short: "-n", long: "--name", optionsWithValue: []), "Thingy")
     }
 
     func testParseStringOptionEqualsFormWithSpaceInValue() {
         let args = ["--name=My Device"]
-        XCTAssertEqual(router.parseStringOption(args, short: "-n", long: "--name"), "My Device")
+        XCTAssertEqual(router.parseStringOption(args, short: "-n", long: "--name", optionsWithValue: []), "My Device")
     }
 
     func testParseStringOptionMissingReturnsNil() {
         let args = ["-f", "hex", "2A19"]
-        XCTAssertNil(router.parseStringOption(args, short: "-n", long: "--name"))
+        XCTAssertNil(router.parseStringOption(args, short: "-n", long: "--name", optionsWithValue: []))
     }
 
     func testParseStringOptionAtEndOfArgsReturnsNil() {
         // Flag at end with no value
         let args = ["-n"]
-        XCTAssertNil(router.parseStringOption(args, short: "-n", long: "--name"))
+        XCTAssertNil(router.parseStringOption(args, short: "-n", long: "--name", optionsWithValue: []))
     }
 
     func testParseStringOptionFirstOccurrenceWins() {
         let args = ["-n", "First", "-n", "Second"]
-        XCTAssertEqual(router.parseStringOption(args, short: "-n", long: "--name"), "First")
+        XCTAssertEqual(router.parseStringOption(args, short: "-n", long: "--name", optionsWithValue: []), "First")
     }
+
+func testOptionValuesAreNeverReadAsOptions() {
+    let args = ["-p", "--name=Spoof", "-n", "-S", "-S", "180F"]
+    let options = CommandRouter.targetingOptionsWithValue
+    XCTAssertEqual(router.parseStringOption(args, short: "-n", long: "--name", optionsWithValue: options), "-S")
+    XCTAssertEqual(router.parseAllStringOptions(args, short: "-S", long: "--service", optionsWithValue: options), ["180F"])
+    XCTAssertFalse(router.hasFlag(["-n", "-r"], short: "-r", long: "--read", optionsWithValue: options))
+    XCTAssertTrue(router.hasFlag(["-n", "x", "-r"], short: "-r", long: "--read", optionsWithValue: options))
+}
 
     // MARK: - parseIntOption
 
     func testParseIntOptionValid() {
         let args = ["-R", "-65"]
-        XCTAssertEqual(router.parseIntOption(args, short: "-R", long: "--rssi-min"), -65)
+        XCTAssertEqual(router.parseIntOption(args, short: "-R", long: "--rssi-min", optionsWithValue: []), -65)
     }
 
     func testParseIntOptionZero() {
         let args = ["--rssi-min", "0"]
-        XCTAssertEqual(router.parseIntOption(args, short: "-R", long: "--rssi-min"), 0)
+        XCTAssertEqual(router.parseIntOption(args, short: "-R", long: "--rssi-min", optionsWithValue: []), 0)
     }
 
     func testParseIntOptionInvalidStringReturnsNil() {
         let args = ["-R", "notanint"]
-        XCTAssertNil(router.parseIntOption(args, short: "-R", long: "--rssi-min"))
+        XCTAssertNil(router.parseIntOption(args, short: "-R", long: "--rssi-min", optionsWithValue: []))
     }
 
     func testParseIntOptionMissingReturnsNil() {
-        XCTAssertNil(router.parseIntOption([], short: "-R", long: "--rssi-min"))
+        XCTAssertNil(router.parseIntOption([], short: "-R", long: "--rssi-min", optionsWithValue: []))
     }
 
     func testParseIntOptionFloat() {
         // Int() does not parse "3.5"
         let args = ["-R", "3.5"]
-        XCTAssertNil(router.parseIntOption(args, short: "-R", long: "--rssi-min"))
+        XCTAssertNil(router.parseIntOption(args, short: "-R", long: "--rssi-min", optionsWithValue: []))
     }
 
     // MARK: - parseDoubleOption
 
     func testParseDoubleOptionValid() {
         let args = ["-t", "5.0"]
-        XCTAssertEqual(router.parseDoubleOption(args, short: "-t", long: "--timeout"), 5.0)
+        XCTAssertEqual(router.parseDoubleOption(args, short: "-t", long: "--timeout", optionsWithValue: []), 5.0)
     }
 
     func testParseDoubleOptionInteger() {
         let args = ["-t", "10"]
-        XCTAssertEqual(router.parseDoubleOption(args, short: "-t", long: "--timeout"), 10.0)
+        XCTAssertEqual(router.parseDoubleOption(args, short: "-t", long: "--timeout", optionsWithValue: []), 10.0)
     }
 
     func testParseDoubleOptionInvalidReturnsNil() {
         let args = ["-t", "abc"]
-        XCTAssertNil(router.parseDoubleOption(args, short: "-t", long: "--timeout"))
+        XCTAssertNil(router.parseDoubleOption(args, short: "-t", long: "--timeout", optionsWithValue: []))
     }
 
     func testParseDoubleOptionMissingReturnsNil() {
-        XCTAssertNil(router.parseDoubleOption([], short: "-t", long: "--timeout"))
+        XCTAssertNil(router.parseDoubleOption([], short: "-t", long: "--timeout", optionsWithValue: []))
     }
 
     // MARK: - parseAllStringOptions
 
     func testParseAllStringOptionsNonePresent() {
         let args = ["-n", "Thingy"]
-        let result = router.parseAllStringOptions(args, short: "-S", long: "--service")
+        let result = router.parseAllStringOptions(args, short: "-S", long: "--service", optionsWithValue: [])
         XCTAssertEqual(result, [])
     }
 
     func testParseAllStringOptionsSingle() {
         let args = ["-S", "180F"]
-        XCTAssertEqual(router.parseAllStringOptions(args, short: "-S", long: "--service"), ["180F"])
+        XCTAssertEqual(router.parseAllStringOptions(args, short: "-S", long: "--service", optionsWithValue: []), ["180F"])
     }
 
     func testParseAllStringOptionsMultiple() {
         let args = ["-S", "180F", "-S", "180A", "-n", "Thingy"]
-        XCTAssertEqual(router.parseAllStringOptions(args, short: "-S", long: "--service"), ["180F", "180A"])
+        XCTAssertEqual(router.parseAllStringOptions(args, short: "-S", long: "--service", optionsWithValue: []), ["180F", "180A"])
     }
 
     func testParseAllStringOptionsLongForm() {
         let args = ["--service", "180F", "--service", "180D"]
-        XCTAssertEqual(router.parseAllStringOptions(args, short: "-S", long: "--service"), ["180F", "180D"])
+        XCTAssertEqual(router.parseAllStringOptions(args, short: "-S", long: "--service", optionsWithValue: []), ["180F", "180D"])
     }
 
     func testParseAllStringOptionsMixedShortAndLong() {
         let args = ["-S", "180F", "--service", "180D"]
-        XCTAssertEqual(router.parseAllStringOptions(args, short: "-S", long: "--service"), ["180F", "180D"])
+        XCTAssertEqual(router.parseAllStringOptions(args, short: "-S", long: "--service", optionsWithValue: []), ["180F", "180D"])
     }
 
     func testParseAllStringOptionsEmpty() {
-        XCTAssertEqual(router.parseAllStringOptions([], short: "-S", long: "--service"), [])
+        XCTAssertEqual(router.parseAllStringOptions([], short: "-S", long: "--service", optionsWithValue: []), [])
     }
 
     // MARK: - positionalArgs

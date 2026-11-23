@@ -60,7 +60,11 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 
 **Nordic UART Service**
 
-`NUSTests` — the `nus` core without CoreBluetooth: chunking, escape decoding, `NUSExpect` (matches split across chunks, no false matches from discarded bytes), `NUSSession` against in-memory streams (ordering, unchanged delivery, expect matched and missed, device disconnect, write failure), the ports (fixed input ends once and stays ended; a pty and a TCP listener on an ephemeral port are exercised over loopback, including a second TCP client after the first leaves), `parseNUSOptions` defaults and rejected combinations, the default NUS service filter, ArgumentParser parsing, and the `ble_nus` MCP argument builder and transcript.
+`NUSTests` — the `nus` core without CoreBluetooth: chunking, escape decoding, `NUSExpect` (matches split across chunks, no false matches from discarded bytes), `NUSSession` against in-memory streams (ordering, unchanged delivery, expect matched and missed, device disconnect, write failure), the ports (fixed input ends once and stays ended; a pty and a TCP listener on an ephemeral port are exercised over loopback, including a second TCP client after the first leaves), `parseNUSOptions` defaults and rejected combinations (an option value is never read as an option; `-d` must be finite and at most a year), the default NUS service filter, the pure reconnect decisions of `NUSOptions.step` (Ctrl-C during a reconnect scan ends; a failure while still connected ends), ArgumentParser parsing, and the `ble_nus` MCP options builder (a free-text field never becomes an option) and transcript. `SubDeadlineTests` checks that `sub -d` ends a subscription that receives nothing.
+
+**Event processor**
+
+`BLEEventProcessorTests` — hands `BLEEventProcessor` events directly, without CoreBluetooth: a disconnect ends notification streams and runs disconnect callbacks that re-enter the processor without deadlock, and `handleEvent` returns its effects for the caller to run after unlocking.
 
 **CLI argument parsing**
 

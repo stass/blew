@@ -157,15 +157,21 @@ final class CommandRouter {
     func runScan(_ args: [String]) -> CommandResult {
         let scanOpts: Set<String> = ["-n", "--name", "-R", "--rssi-min", "-t", "--timeout", "-S", "--service", "-m", "--manufacturer", "-p", "--pick", "-i", "--id"]
         let args = expandArgs(args, optionsWithValue: scanOpts)
-        let watchMode = args.contains("--watch") || args.contains("-w")
-        let nameFilter = parseStringOption(args, short: "-n", long: "--name")
-        let rssiMin = parseIntOption(args, short: "-R", long: "--rssi-min")
+        let watchMode = hasFlag(args, short: "-w", long: "--watch", optionsWithValue: scanOpts)
+        let nameFilter = parseStringOption(args, short: "-n", long: "--name", optionsWithValue: scanOpts)
+        let rssiMin = parseIntOption(args, short: "-R", long: "--rssi-min", optionsWithValue: scanOpts)
 
         if watchMode {
             return runScanWatch(nameFilter: nameFilter, rssiMin: rssiMin)
         }
 
-        let scanTimeout = parseDoubleOption(args, short: "-t", long: "--timeout") ?? globals.timeout ?? 5.0
+        let scanTimeout = parseDoubleOption(args, short: "-t", long: "--timeout", optionsWithValue: scanOpts) ?? globals.timeout ?? 5.0
+        guard Self.isValidDuration(scanTimeout) else {
+            var result = CommandResult()
+            result.errors.append("invalid timeout '\(scanTimeout)' (use 0 to \(Int(Self.maxDuration)) seconds)")
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
+        }
 
         let interactive = isatty(fileno(stderr)) != 0
         let spinner: ScanSpinner? = interactive ? ScanSpinner(timeout: scanTimeout) : nil
@@ -399,12 +405,12 @@ final class CommandRouter {
     }
 
     func runConnect(_ args: [String]) -> CommandResult {
-        let positional = positionalArgs(args, optionsWithValue: ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"])
-        let deviceId = positional.first ?? parseStringOption(args, short: "-i", long: "--id")
+        let positional = positionalArgs(args, optionsWithValue: Self.targetingOptionsWithValue)
+        let deviceId = positional.first ?? parseStringOption(args, short: "-i", long: "--id", optionsWithValue: Self.targetingOptionsWithValue)
         let connectTimeout = globals.timeout ?? 10.0
 
         guard let rawInput = deviceId else {
-            return ensureConnected(args: args)
+            return ensureConnected(args: args, optionsWithValue: Self.targetingOptionsWithValue)
         }
 
         var result = CommandResult()
@@ -510,8 +516,8 @@ final class CommandRouter {
             result.exitCode = BlewExitCode.invalidArguments.code
             return result
         }
-        guard seconds >= 0 else {
-            result.errors.append("sleep duration must be >= 0")
+        guard Self.isValidDuration(seconds) else {
+            result.errors.append("sleep duration must be 0 to \(Int(Self.maxDuration)) seconds")
             result.exitCode = BlewExitCode.invalidArguments.code
             return result
         }
@@ -538,7 +544,7 @@ final class CommandRouter {
     }
 
     func runGATT(_ args: [String]) -> CommandResult {
-        let targetingOpts: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+        let targetingOpts = Self.targetingOptionsWithValue
         let args = expandArgs(args, optionsWithValue: targetingOpts)
         guard let sub = positionalArgs(args, optionsWithValue: targetingOpts).first else {
             var result = CommandResult()
@@ -559,7 +565,7 @@ final class CommandRouter {
             return runGATTInfo(charInput)
         }
 
-        let connectResult = ensureConnected(args: args)
+        let connectResult = ensureConnected(args: args, optionsWithValue: targetingOpts)
         guard connectResult.exitCode == 0 else { return connectResult }
 
         var result = CommandResult()
@@ -625,7 +631,7 @@ final class CommandRouter {
                     result.output.append(.gattTree(treeServices))
 
                 case "chars":
-                    let charsOpts: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+                    let charsOpts = Self.targetingOptionsWithValue
                     let charsPositional = positionalArgs(args, optionsWithValue: charsOpts).dropFirst()
                     guard let svcInput = charsPositional.first else {
                         result.errors.append("missing service UUID")
@@ -672,7 +678,7 @@ final class CommandRouter {
                     result.output.append(.characteristics(charRows))
 
                 case "desc":
-                    let descOpts: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+                    let descOpts = Self.targetingOptionsWithValue
                     let descPositional = positionalArgs(args, optionsWithValue: descOpts).dropFirst()
                     guard let charInput = descPositional.first else {
                         result.errors.append("missing characteristic UUID")
@@ -736,10 +742,10 @@ final class CommandRouter {
     }
 
     func runRead(_ args: [String]) -> CommandResult {
-        let connectResult = ensureConnected(args: args)
+        let readOpts = Self.targetingOptionsWithValue.union(["-f", "--format"])
+        let connectResult = ensureConnected(args: args, optionsWithValue: readOpts)
         guard connectResult.exitCode == 0 else { return connectResult }
 
-        let readOpts: Set<String> = ["-f", "--format", "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
         guard let charInput = positionalArgs(args, optionsWithValue: readOpts).first else {
             var result = CommandResult()
             result.errors.append("missing characteristic UUID")
@@ -756,7 +762,7 @@ final class CommandRouter {
             return result
         case .notFound: charUUID = charInput
         }
-        let fmt = parseStringOption(args, short: "-f", long: "--format") ?? "hex"
+        let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: readOpts) ?? "hex"
 
         let semaphore = DispatchSemaphore(value: 0)
 
@@ -789,9 +795,9 @@ final class CommandRouter {
     }
 
     func runWrite(_ args: [String]) -> CommandResult {
-        let writeOpts: Set<String> = ["-f", "--format", "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+        let writeOpts = Self.targetingOptionsWithValue.union(["-f", "--format"])
         let args = expandArgs(args, optionsWithValue: writeOpts)
-        let connectResult = ensureConnected(args: args)
+        let connectResult = ensureConnected(args: args, optionsWithValue: writeOpts)
         guard connectResult.exitCode == 0 else { return connectResult }
 
         var result = CommandResult()
@@ -816,9 +822,9 @@ final class CommandRouter {
             return result
         case .notFound: charUUID = charInput
         }
-        let fmt = parseStringOption(args, short: "-f", long: "--format") ?? "hex"
-        let withResponse = args.contains("-r") || args.contains("--with-response")
-        let withoutResponse = args.contains("-w") || args.contains("--without-response")
+        let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: writeOpts) ?? "hex"
+        let withResponse = hasFlag(args, short: "-r", long: "--with-response", optionsWithValue: writeOpts)
+        let withoutResponse = hasFlag(args, short: "-w", long: "--without-response", optionsWithValue: writeOpts)
 
         guard let data = DataFormatter.parse(dataStr, as: fmt) else {
             result.errors.append("invalid data '\(dataStr)' for format '\(fmt)'")
@@ -865,7 +871,7 @@ final class CommandRouter {
     }
 
     func runSub(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
-        let subOpts: Set<String> = ["-f", "--format", "-d", "--duration", "-c", "--count", "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick"]
+        let subOpts = Self.targetingOptionsWithValue.union(["-f", "--format", "-d", "--duration", "-c", "--count"])
         let args = expandArgs(args, optionsWithValue: subOpts)
         if let first = args.first {
             switch first {
@@ -875,10 +881,17 @@ final class CommandRouter {
             }
         }
 
-        let connectResult = ensureConnected(args: args)
-        guard connectResult.exitCode == 0 else { return connectResult }
-
         var result = CommandResult()
+        let durationText = parseStringOption(args, short: "-d", long: "--duration", optionsWithValue: subOpts)
+        let duration = durationText.flatMap(Double.init)
+        if let durationText, !(duration.map(Self.isValidDuration) ?? false) {
+            result.errors.append("invalid duration '\(durationText)' (use 0 to \(Int(Self.maxDuration)) seconds)")
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
+        }
+
+        let connectResult = ensureConnected(args: args, optionsWithValue: subOpts)
+        guard connectResult.exitCode == 0 else { return connectResult }
         let background = args.contains("--bg") || args.contains("-b")
         let positionals = positionalArgs(args.filter { $0 != "--bg" && $0 != "-b" }, optionsWithValue: subOpts)
         guard let charInput = positionals.first else {
@@ -895,9 +908,8 @@ final class CommandRouter {
             return result
         case .notFound: charUUID = charInput
         }
-        let fmt = parseStringOption(args, short: "-f", long: "--format") ?? "hex"
-        let duration = parseDoubleOption(args, short: "-d", long: "--duration")
-        let maxCount = parseIntOption(args, short: "-c", long: "--count")
+        let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: subOpts) ?? "hex"
+        let maxCount = parseIntOption(args, short: "-c", long: "--count", optionsWithValue: subOpts)
 
         if background {
             guard isInteractiveMode else {
@@ -910,18 +922,8 @@ final class CommandRouter {
             backgroundSubTasks[charUUID] = Task {
                 do {
                     let stream = try await manager.subscribe(characteristicUUID: charUUID)
-                    var count = 0
-                    let startTime = Date()
-                    let charName = BLENames.name(for: charUUID, category: .characteristic)
-                    for await data in stream {
-                        let formatted = DataFormatter.format(data, as: fmt)
-                        let ts = ISO8601DateFormatter.shared.string(from: Date())
-                        let nv = NotificationValue(timestamp: ts, char: charUUID, name: charName, value: formatted)
-                        capturedRenderer.renderLive("[\(charUUID)] \(formatted)")
-                        _ = nv
-                        count += 1
-                        if let maxCount = maxCount, count >= maxCount { break }
-                        if let duration = duration, Date().timeIntervalSince(startTime) >= duration { break }
+                    await Self.forEachNotification(stream, maxCount: maxCount, duration: duration) { data in
+                        capturedRenderer.renderLive("[\(charUUID)] \(DataFormatter.format(data, as: fmt))")
                     }
                 } catch is CancellationError {
                     // stopped
@@ -944,19 +946,11 @@ final class CommandRouter {
             defer { semaphore.signal() }
             do {
                 let stream = try await manager.subscribe(characteristicUUID: charUUID)
-                var count = 0
-                let startTime = Date()
                 let charName = BLENames.name(for: charUUID, category: .characteristic)
-
-                for await data in stream {
-                    let formatted = DataFormatter.format(data, as: fmt)
+                await Self.forEachNotification(stream, maxCount: maxCount, duration: duration) { data in
                     let ts = ISO8601DateFormatter.shared.string(from: Date())
-                    let nv = NotificationValue(timestamp: ts, char: charUUID, name: charName, value: formatted)
-                    emit(.notification(nv))
-
-                    count += 1
-                    if let maxCount = maxCount, count >= maxCount { break }
-                    if let duration = duration, Date().timeIntervalSince(startTime) >= duration { break }
+                    emit(.notification(NotificationValue(timestamp: ts, char: charUUID, name: charName,
+                                                         value: DataFormatter.format(data, as: fmt))))
                 }
             } catch is CancellationError {
                 // interrupted
@@ -1014,6 +1008,36 @@ final class CommandRouter {
         return result
     }
 
+    /// The longest `-d` a command accepts: a year, well inside what the
+    /// nanosecond sleep conversion can hold.
+    static let maxDuration: TimeInterval = 365 * 24 * 3600
+
+    static func isValidDuration(_ seconds: TimeInterval) -> Bool {
+        seconds.isFinite && seconds >= 0 && seconds <= maxDuration
+    }
+
+    /// Pass each notification of `stream` to `handle` until `maxCount` have
+    /// arrived, `duration` seconds have passed (whether or not any arrive) or
+    /// the stream ends. Ending the iteration ends the subscription.
+    static func forEachNotification(_ stream: AsyncStream<Data>, maxCount: Int?, duration: TimeInterval?,
+                                    _ handle: @escaping @Sendable (Data) -> Void) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                var count = 0
+                for await data in stream {
+                    handle(data)
+                    count += 1
+                    if let maxCount, count >= maxCount { return }
+                }
+            }
+            if let duration {
+                group.addTask { try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000)) }
+            }
+            await group.next()
+            group.cancelAll()
+        }
+    }
+
     // MARK: - Interrupt-aware wait
 
     enum CommandOutcome { case completed, interrupted, timedOut }
@@ -1057,7 +1081,14 @@ final class CommandRouter {
     ///   - `-i`/`--id`  → direct connect (no scan needed)
     ///   - `-n`/`--name` / `-S`/`--service` / `-m`/`--manufacturer` / `-R`/`--rssi-min` → scan then pick and connect
     ///   - none of the above → error
-    func ensureConnected(args: [String] = []) -> CommandResult {
+    /// Options of the device-targeting group that take a value.
+    static let targetingOptionsWithValue: Set<String> = [
+        "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick",
+    ]
+
+    /// `optionsWithValue` lists the calling command's options that take a
+    /// value, so their values are never read as targeting options.
+    func ensureConnected(args: [String], optionsWithValue: Set<String>) -> CommandResult {
         var isConnected = false
         let statusSem = DispatchSemaphore(value: 0)
         Task {
@@ -1068,14 +1099,14 @@ final class CommandRouter {
         statusSem.wait()
         if isConnected { return CommandResult() }
 
-        if let id = parseStringOption(args, short: "-i", long: "--id") {
+        if let id = parseStringOption(args, short: "-i", long: "--id", optionsWithValue: optionsWithValue) {
             return runConnect([id])
         }
 
-        let name = parseStringOption(args, short: "-n", long: "--name")
-        let services = parseAllStringOptions(args, short: "-S", long: "--service")
-        let manufacturer = parseIntOption(args, short: "-m", long: "--manufacturer")
-        let rssiMin = parseIntOption(args, short: "-R", long: "--rssi-min")
+        let name = parseStringOption(args, short: "-n", long: "--name", optionsWithValue: optionsWithValue)
+        let services = parseAllStringOptions(args, short: "-S", long: "--service", optionsWithValue: optionsWithValue)
+        let manufacturer = parseIntOption(args, short: "-m", long: "--manufacturer", optionsWithValue: optionsWithValue)
+        let rssiMin = parseIntOption(args, short: "-R", long: "--rssi-min", optionsWithValue: optionsWithValue)
 
         let hasFilters = name != nil || !services.isEmpty || manufacturer != nil || rssiMin != nil
         guard hasFilters else {
@@ -1095,7 +1126,7 @@ final class CommandRouter {
         let scanResult = runScan(scanArgs)
         if scanResult.exitCode != 0 { return scanResult }
 
-        let pick = parsePickStrategy(args)
+        let pick = parsePickStrategy(args, optionsWithValue: optionsWithValue)
         guard let device = pickDevice(from: lastScanResults, pick: pick) else {
             var result = CommandResult()
             result.exitCode = BlewExitCode.notFound.code
@@ -1131,8 +1162,8 @@ final class CommandRouter {
         }
     }
 
-    private func parsePickStrategy(_ args: [String]) -> PickStrategy {
-        guard let raw = parseStringOption(args, short: "-p", long: "--pick") else { return .strongest }
+    private func parsePickStrategy(_ args: [String], optionsWithValue: Set<String>) -> PickStrategy {
+        guard let raw = parseStringOption(args, short: "-p", long: "--pick", optionsWithValue: optionsWithValue) else { return .strongest }
         return PickStrategy(rawValue: raw) ?? .strongest
     }
 
@@ -1180,41 +1211,52 @@ final class CommandRouter {
         return result
     }
 
-    func parseStringOption(_ args: [String], short: String, long: String) -> String? {
-        for (i, arg) in args.enumerated() {
-            if (arg == short || arg == long) && i + 1 < args.count {
-                return args[i + 1]
-            }
-            if arg.hasPrefix("\(long)=") {
-                return String(arg.dropFirst(long.count + 1))
+    /// The options at option positions of `args`, in order, each with its
+    /// value. An option in `optionsWithValue` takes the next token whatever it
+    /// looks like (nil when there is none), `--long=value` carries its own,
+    /// and any other option is a flag. Positional tokens are skipped. Every
+    /// option lookup goes through this one walk, so a value is never read as
+    /// an option.
+    static func scanOptions(_ args: [String], optionsWithValue: Set<String>) -> [(name: String, value: String?)] {
+        var options: [(name: String, value: String?)] = []
+        var tokens = args[...]
+        while let arg = tokens.popFirst() {
+            guard arg.hasPrefix("-") else { continue }
+            if optionsWithValue.contains(arg) {
+                options.append((arg, tokens.popFirst()))
+            } else if arg.hasPrefix("--"), let equals = arg.firstIndex(of: "=") {
+                options.append((String(arg[..<equals]), String(arg[arg.index(after: equals)...])))
+            } else {
+                options.append((arg, nil))
             }
         }
-        return nil
+        return options
     }
 
-    func parseDoubleOption(_ args: [String], short: String, long: String) -> Double? {
-        guard let str = parseStringOption(args, short: short, long: long) else { return nil }
-        return Double(str)
+    /// The first value of `short` or `long`. `optionsWithValue` lists the
+    /// command's options that take a value, so their values are skipped.
+    func parseStringOption(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) -> String? {
+        parseAllStringOptions(args, short: short, long: long, optionsWithValue: optionsWithValue).first
     }
 
-    func parseIntOption(_ args: [String], short: String, long: String) -> Int? {
-        guard let str = parseStringOption(args, short: short, long: long) else { return nil }
-        return Int(str)
+    func parseDoubleOption(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) -> Double? {
+        parseStringOption(args, short: short, long: long, optionsWithValue: optionsWithValue).flatMap(Double.init)
+    }
+
+    func parseIntOption(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) -> Int? {
+        parseStringOption(args, short: short, long: long, optionsWithValue: optionsWithValue).flatMap { Int($0) }
     }
 
     /// Collect all values for a repeatable option (e.g. `-S uuid1 -S uuid2`).
-    func parseAllStringOptions(_ args: [String], short: String, long: String) -> [String] {
-        var results: [String] = []
-        var i = 0
-        while i < args.count {
-            if (args[i] == short || args[i] == long) && i + 1 < args.count {
-                results.append(args[i + 1])
-                i += 2
-            } else {
-                i += 1
-            }
-        }
-        return results
+    func parseAllStringOptions(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) -> [String] {
+        Self.scanOptions(args, optionsWithValue: optionsWithValue.union([short, long]))
+            .compactMap { $0.name == short || $0.name == long ? $0.value : nil }
+    }
+
+    /// Whether a flag named `short` or `long` is at an option position.
+    func hasFlag(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) -> Bool {
+        Self.scanOptions(args, optionsWithValue: optionsWithValue)
+            .contains { ($0.name == short || $0.name == long) && $0.value == nil }
     }
 }
 
@@ -1355,20 +1397,10 @@ extension CommandRouter {
 
     func runPeriphAdv(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
         var result = CommandResult()
-        let configPath = parseStringOption(args, short: "-c", long: "--config")
-
-        var serviceUUIDs: [String] = []
-        var i = 0
-        while i < args.count {
-            if args[i] == "-S" || args[i] == "--service", i + 1 < args.count {
-                serviceUUIDs.append(args[i + 1])
-                i += 2
-            } else {
-                i += 1
-            }
-        }
-
-        let nameArg = parseStringOption(args, short: "-n", long: "--name")
+        let advOpts: Set<String> = ["-c", "--config", "-n", "--name", "-S", "--service"]
+        let configPath = parseStringOption(args, short: "-c", long: "--config", optionsWithValue: advOpts)
+        var serviceUUIDs = parseAllStringOptions(args, short: "-S", long: "--service", optionsWithValue: advOpts)
+        let nameArg = parseStringOption(args, short: "-n", long: "--name", optionsWithValue: advOpts)
 
         var services: [ServiceDefinition] = []
         var advName: String
@@ -1495,9 +1527,10 @@ extension CommandRouter {
 
     func runPeriphClone(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
         var result = CommandResult()
-        let savePath = parseStringOption(args, short: "-o", long: "--save")
+        let cloneOpts = Self.targetingOptionsWithValue.union(["-o", "--save"])
+        let savePath = parseStringOption(args, short: "-o", long: "--save", optionsWithValue: cloneOpts)
 
-        let connectResult = ensureConnected(args: args)
+        let connectResult = ensureConnected(args: args, optionsWithValue: cloneOpts)
         guard connectResult.exitCode == 0 else { return connectResult }
 
         result.infos.append("snapshotting GATT tree...")
@@ -1675,7 +1708,7 @@ extension CommandRouter {
         }
         let charInput = positional[0]
         let valueStr = positional[1]
-        let fmt = parseStringOption(args, short: "-f", long: "--format") ?? "hex"
+        let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: ["-f", "--format"]) ?? "hex"
 
         let charUUID = resolvePeriphCharacteristic(charInput)
 
@@ -1710,7 +1743,7 @@ extension CommandRouter {
         }
         let charInput = positional[0]
         let valueStr = positional[1]
-        let fmt = parseStringOption(args, short: "-f", long: "--format") ?? "hex"
+        let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: ["-f", "--format"]) ?? "hex"
 
         let charUUID = resolvePeriphCharacteristic(charInput)
 

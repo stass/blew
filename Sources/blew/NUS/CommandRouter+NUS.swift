@@ -3,7 +3,9 @@ import BLEManager
 
 // MARK: - nus: bridge a local port to the device's Nordic UART Service
 
-/// The parsed options of one `nus` command.
+/// The checked options of one `nus` command. `make` is the one constructor:
+/// the REPL's parser, the `nus` subcommand and the MCP tool all build their
+/// options through it, from typed values.
 struct NUSOptions {
     enum Endpoint: Equatable {
         /// Standard input to the device, the device to standard output.
@@ -17,6 +19,9 @@ struct NUSOptions {
         case tcp(host: String, port: UInt16)
     }
 
+    /// Device-targeting arguments for `ensureConnected`; the NUS service
+    /// filter when the user named no device.
+    var targeting: [String]
     var endpoint: Endpoint
     var expect: Data?
     /// Seconds to keep listening after the input ends; with `expect`, the
@@ -28,19 +33,19 @@ struct NUSOptions {
     static let defaultLinger: TimeInterval = 1
     static let defaultExpectTimeout: TimeInterval = 5
     static let defaultBind = "127.0.0.1"
-}
 
-extension CommandRouter {
-    static let nusOptionsWithValue: Set<String> = [
-        "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer",
-        "-R", "--rssi-min", "-p", "--pick",
-        "-s", "--send", "--file", "-e", "--expect", "-d", "--duration", "-l", "--listen", "--bind",
-    ]
+    static let targetingOptions: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service",
+                                                "-m", "--manufacturer", "-R", "--rssi-min"]
 
-    /// Parse `nus` arguments. `stdinAvailable` is false in the REPL, `exec`
-    /// and MCP, where standard input is not the user's to bridge. Throws a
-    /// message for the user on invalid input.
-    func parseNUSOptions(_ args: [String], stdinAvailable: Bool) throws -> NUSOptions {
+    /// Check the raw values of a `nus` command and build its options.
+    /// `stdinAvailable` is false in the REPL, `exec` and MCP, where standard
+    /// input is not the user's to bridge. Throws a message for the user.
+    static func make(
+        targeting: [String], sends: [String] = [], file: String? = nil, expect: String? = nil,
+        duration: Double? = nil, pty: Bool = false, listen: UInt16? = nil, bind: String? = nil,
+        reconnect: Bool = false, withResponse: Bool = false, withoutResponse: Bool = false,
+        stdinAvailable: Bool
+    ) throws -> NUSOptions {
         func fail(_ message: String) -> NUSPortError { NUSPortError(message) }
         func escaped(_ text: String, _ option: String) throws -> Data {
             guard let data = NUS.unescape(text) else {
@@ -49,88 +54,149 @@ extension CommandRouter {
             return data
         }
 
-        if let stray = positionalArgs(args, optionsWithValue: Self.nusOptionsWithValue).first {
-            throw fail("unexpected argument '\(stray)'")
-        }
-        let sends = try parseAllStringOptions(args, short: "-s", long: "--send").map { try escaped($0, "--send") }
-        let file = parseStringOption(args, short: "--file", long: "--file")
-        let usePty = args.contains("--pty")
-        let listen = parseStringOption(args, short: "-l", long: "--listen")
-        let bind = parseStringOption(args, short: "--bind", long: "--bind")
-
-        let sources = [!sends.isEmpty, file != nil, usePty, listen != nil].filter { $0 }.count
+        let sources = [!sends.isEmpty, file != nil, pty, listen != nil].filter { $0 }.count
         guard sources <= 1 else { throw fail("use only one of --send, --file, --pty and --listen") }
         guard bind == nil || listen != nil else { throw fail("--bind needs --listen") }
+        guard !(withResponse && withoutResponse) else {
+            throw fail("use only one of --with-response and --without-response")
+        }
+        if let duration, !CommandRouter.isValidDuration(duration) {
+            throw fail("invalid duration '\(duration)' (use 0 to \(Int(CommandRouter.maxDuration)) seconds)")
+        }
 
-        let endpoint: NUSOptions.Endpoint
+        let endpoint: Endpoint
         if !sends.isEmpty {
-            endpoint = .fixed(sends.reduce(Data(), +))
+            endpoint = .fixed(try sends.map { try escaped($0, "--send") }.reduce(Data(), +))
         } else if let file {
             guard let data = FileManager.default.contents(atPath: file) else {
                 throw fail("cannot read file '\(file)'")
             }
             endpoint = .fixed(data)
-        } else if usePty {
+        } else if pty {
             endpoint = .pty
         } else if let listen {
-            guard let port = UInt16(listen) else { throw fail("invalid port '\(listen)'") }
-            endpoint = .tcp(host: bind ?? NUSOptions.defaultBind, port: port)
+            endpoint = .tcp(host: bind ?? defaultBind, port: listen)
         } else {
             endpoint = stdinAvailable ? .stdio : .fixed(Data())
         }
 
-        let expect = try parseStringOption(args, short: "-e", long: "--expect").map { try escaped($0, "--expect") }
-        switch (expect, endpoint) {
+        let expected = try expect.map { try escaped($0, "--expect") }
+        switch (expected, endpoint) {
         case (.some, .pty), (.some, .tcp):
             throw fail("--expect works only with standard input/output, --send or --file")
         default: break
         }
 
-        let durationText = parseStringOption(args, short: "-d", long: "--duration")
-        let duration = durationText.flatMap(Double.init)
-        guard durationText == nil || (duration ?? -1) >= 0 else {
-            throw fail("invalid duration '\(durationText ?? "")'")
-        }
-
-        let withResponse = args.contains("-r") || args.contains("--with-response")
-        let withoutResponse = args.contains("-w") || args.contains("--without-response")
-        guard !(withResponse && withoutResponse) else {
-            throw fail("use only one of --with-response and --without-response")
-        }
-
+        let named = CommandRouter.scanOptions(targeting, optionsWithValue: CommandRouter.nusOptionsWithValue)
+            .contains { targetingOptions.contains($0.name) }
         return NUSOptions(
+            targeting: named ? targeting : targeting + ["-S", NUS.service],
             endpoint: endpoint,
-            expect: expect,
-            linger: duration ?? (expect == nil ? NUSOptions.defaultLinger : NUSOptions.defaultExpectTimeout),
+            expect: expected,
+            linger: duration ?? (expected == nil ? defaultLinger : defaultExpectTimeout),
             writeType: withResponse ? .withResponse : (withoutResponse ? .withoutResponse : .auto),
-            reconnect: args.contains("--reconnect"))
+            reconnect: reconnect)
     }
 
-    /// Targeting arguments for `nus`: the user's, or the NUS service filter
-    /// when the user named no device at all.
-    func nusTargetingArgs(_ args: [String]) -> [String] {
-        let targeting: Set<String> = ["-i", "--id", "-n", "--name", "-S", "--service",
-                                      "-m", "--manufacturer", "-R", "--rssi-min"]
-        let named = args.contains { arg in
-            targeting.contains(arg) || targeting.contains { arg.hasPrefix("\($0)=") }
+    /// What `nus` does after a session.
+    enum Step: Equatable {
+        /// Connect again.
+        case reconnect
+        /// End with this exit code and, when it failed, this message.
+        case finish(exitCode: Int32, error: String?)
+    }
+
+    /// After a failed connect attempt: retry (after a pause) only under
+    /// `--reconnect`, once a first connection was made, and never after
+    /// Ctrl-C (exit code 130); otherwise end with the attempt's own result.
+    static func retries(afterConnectFailure exitCode: Int32, reconnect: Bool, connectedOnce: Bool) -> Bool {
+        exitCode != 130 && reconnect && connectedOnce
+    }
+
+    /// After a session: nil means interrupted. A lost link reconnects under
+    /// `--reconnect` only when the device really disconnected; a failure
+    /// while still connected (a subscribe or write error) ends the command,
+    /// since reconnecting would not change it.
+    static func step(after outcome: NUSOutcome?, stillConnected: Bool, linger: TimeInterval, reconnect: Bool) -> Step {
+        switch outcome {
+        case nil:
+            return .finish(exitCode: 130, error: nil)
+        case .matched, .inputEnded:
+            return .finish(exitCode: 0, error: nil)
+        case .expectMissed:
+            return .finish(exitCode: BlewExitCode.timeout.code, error: "expected text not received within \(linger)s")
+        case .linkLost(let reason):
+            return reconnect && !stillConnected
+                ? .reconnect
+                : .finish(exitCode: BlewExitCode.operationFailed.code, error: reason)
         }
-        return named ? args : args + ["-S", NUS.service]
+    }
+}
+
+extension CommandRouter {
+    static let nusOptionsWithValue: Set<String> = targetingOptionsWithValue.union([
+        "-s", "--send", "--file", "-e", "--expect", "-d", "--duration", "-l", "--listen", "--bind",
+    ])
+
+    /// Parse `nus` arguments from the REPL or a script. Throws a message for
+    /// the user on invalid input.
+    func parseNUSOptions(_ args: [String], stdinAvailable: Bool) throws -> NUSOptions {
+        let valueOptions = Self.nusOptionsWithValue
+        func value(_ short: String, _ long: String) -> String? {
+            parseStringOption(args, short: short, long: long, optionsWithValue: valueOptions)
+        }
+        func flag(_ short: String, _ long: String) -> Bool {
+            hasFlag(args, short: short, long: long, optionsWithValue: valueOptions)
+        }
+
+        if let stray = positionalArgs(args, optionsWithValue: valueOptions).first {
+            throw NUSPortError("unexpected argument '\(stray)'")
+        }
+        let listen = try value("-l", "--listen").map { text in
+            guard let port = UInt16(text) else { throw NUSPortError("invalid port '\(text)'") }
+            return port
+        }
+        let duration = try value("-d", "--duration").map { text in
+            guard let seconds = Double(text) else { throw NUSPortError("invalid duration '\(text)'") }
+            return seconds
+        }
+        return try NUSOptions.make(
+            targeting: args,
+            sends: parseAllStringOptions(args, short: "-s", long: "--send", optionsWithValue: valueOptions),
+            file: value("--file", "--file"),
+            expect: value("-e", "--expect"),
+            duration: duration,
+            pty: flag("--pty", "--pty"),
+            listen: listen,
+            bind: value("--bind", "--bind"),
+            reconnect: flag("--reconnect", "--reconnect"),
+            withResponse: flag("-r", "--with-response"),
+            withoutResponse: flag("-w", "--without-response"),
+            stdinAvailable: stdinAvailable)
+    }
+
+    /// `nus` from the REPL or a script: parse, then bridge.
+    func runNUS(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
+        let args = expandArgs(args, optionsWithValue: Self.nusOptionsWithValue)
+        do {
+            return runNUS(try parseNUSOptions(args, stdinAvailable: !isInteractiveMode), emit: emit)
+        } catch {
+            return Self.nusInvalid(error)
+        }
+    }
+
+    /// The result for options `NUSOptions.make` refused.
+    static func nusInvalid(_ error: Error) -> CommandResult {
+        var result = CommandResult()
+        result.errors.append("\(error)")
+        result.exitCode = BlewExitCode.invalidArguments.code
+        return result
     }
 
     /// Bridge a local port to the connected device's Nordic UART Service.
     /// Streaming: bytes from the device and bridge events go to `emit`.
-    func runNUS(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
-        let args = expandArgs(args, optionsWithValue: Self.nusOptionsWithValue)
+    func runNUS(_ options: NUSOptions, emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
         var result = CommandResult()
-
-        let options: NUSOptions
-        do {
-            options = try parseNUSOptions(args, stdinAvailable: !isInteractiveMode)
-        } catch {
-            result.errors.append("\(error)")
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
-        }
 
         let status: @Sendable (String, String) -> Void = { event, detail in
             emit(.nusStatus(NUSStatus(event: event, detail: detail)))
@@ -161,19 +227,23 @@ extension CommandRouter {
         case .stdio, .fixed: break
         }
 
-        let targetArgs = nusTargetingArgs(args)
+        // After the first connection, reconnect only to that device, never
+        // to whichever device matching the filter is strongest by then.
+        var targeting = options.targeting
         var connectedOnce = false
         while true {
-            let connectResult = ensureConnected(args: targetArgs)
+            let connectResult = ensureConnected(args: targeting, optionsWithValue: Self.nusOptionsWithValue)
             if connectResult.exitCode != 0 {
-                guard options.reconnect && connectedOnce else { return connectResult }
+                guard NUSOptions.retries(afterConnectFailure: connectResult.exitCode,
+                                         reconnect: options.reconnect, connectedOnce: connectedOnce) else {
+                    return connectResult
+                }
                 if case .interrupted = pauseInterruptibly(seconds: 1) {
                     result.exitCode = 130
                     return result
                 }
                 continue
             }
-            connectedOnce = true
 
             let known = Set(manager.knownCharacteristicUUIDs().map { $0.uppercased() })
             guard known.contains(NUS.rx), known.contains(NUS.tx) else {
@@ -181,26 +251,23 @@ extension CommandRouter {
                 result.exitCode = BlewExitCode.notFound.code
                 return result
             }
-            status("connected", connectedDeviceLabel())
+            let device = connectedDevice()
+            if let id = device.id { targeting = ["-i", id] }
+            connectedOnce = true
+            status("connected", device.label)
 
-            switch runNUSSession(options: options, port: port) {
-            case .none:
-                result.exitCode = 130
-                return result
-            case .matched, .inputEnded:
-                return result
-            case .expectMissed:
-                result.errors.append("expected text not received within \(options.linger)s")
-                result.exitCode = BlewExitCode.timeout.code
-                return result
-            case .linkLost(let reason):
-                status("disconnected", reason)
-                guard options.reconnect else {
-                    result.errors.append(reason)
-                    result.exitCode = BlewExitCode.operationFailed.code
-                    return result
-                }
+            let outcome = runNUSSession(options: options, port: port)
+            let stillConnected = outcome != nil && connectedDevice().id != nil
+            switch NUSOptions.step(after: outcome, stillConnected: stillConnected,
+                                   linger: options.linger, reconnect: options.reconnect) {
+            case .reconnect:
+                if case .linkLost(let reason) = outcome { status("disconnected", reason) }
                 status("reconnecting", "")
+            case .finish(let exitCode, let error):
+                if case .linkLost(let reason) = outcome, !stillConnected { status("disconnected", reason) }
+                result.exitCode = exitCode
+                if let error { result.errors.append(error) }
+                return result
             }
         }
     }
@@ -246,16 +313,19 @@ extension CommandRouter {
         return waitInterruptible(task, semaphore: semaphore)
     }
 
-    private func connectedDeviceLabel() -> String {
+    /// The connected device's label for status lines and its identifier;
+    /// the identifier is nil when no device is connected.
+    private func connectedDevice() -> (label: String, id: String?) {
         let semaphore = DispatchSemaphore(value: 0)
-        let label = Locked("")
+        let device = Locked<(label: String, id: String?)>(("", nil))
         let manager = self.manager
         Task {
             let s = await manager.status()
-            label.set([s.deviceName, s.deviceId.map { "(\($0))" }].compactMap { $0 }.joined(separator: " "))
+            let label = [s.deviceName, s.deviceId.map { "(\($0))" }].compactMap { $0 }.joined(separator: " ")
+            device.set((label, s.isConnected ? s.deviceId : nil))
             semaphore.signal()
         }
         semaphore.wait()
-        return label.value
+        return device.value
     }
 }

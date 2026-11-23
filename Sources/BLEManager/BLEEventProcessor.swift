@@ -196,17 +196,27 @@ final class BLEEventProcessor: @unchecked Sendable {
             guard let event = eventQueue.waitAndDequeue() else {
                 continue
             }
-            handleEvent(event)
+            dispatch(event)
         }
     }
 
-    private func handleEvent(_ event: BLEEvent) {
+    /// Handle one event, then run its effects with the lock released.
+    func dispatch(_ event: BLEEvent) {
+        for effect in handleEvent(event) { effect() }
+    }
+
+    /// Update the registrations for one event under the lock and return its
+    /// effects (yielding to or finishing streams, resuming waits, calling
+    /// callbacks) for the caller to run after unlocking. Effects must not run
+    /// under the lock: a stream's termination handler and a callback may call
+    /// back into the processor, and NSLock is not recursive.
+    func handleEvent(_ event: BLEEvent) -> [() -> Void] {
         lock.lock()
         defer { lock.unlock() }
 
         switch event {
         case .centralStateChanged(let state):
-            for cb in stateCallbacks { cb(state) }
+            return stateCallbacks.map { cb in { cb(state) } }
 
         case .didDiscover(let id, let name, let rssi, let services, let mfgData):
             let device = DiscoveredDevice(
@@ -216,132 +226,91 @@ final class BLEEventProcessor: @unchecked Sendable {
                 serviceUUIDs: services,
                 manufacturerData: mfgData
             )
-            scanContinuation?.yield(device)
+            guard let stream = scanContinuation else { return [] }
+            return [{ stream.yield(device) }]
 
         case .didConnect:
-            if let cont = connectContinuation {
-                connectContinuation = nil
-                cont.resume()
-            }
+            guard let cont = Self.take(&connectContinuation) else { return [] }
+            return [{ cont.resume() }]
 
         case .didFailToConnect(_, let error):
-            if let cont = connectContinuation {
-                connectContinuation = nil
-                cont.resume(throwing: BLEError.connectionFailed(error ?? "unknown"))
-            }
+            guard let cont = Self.take(&connectContinuation) else { return [] }
+            return [{ cont.resume(throwing: BLEError.connectionFailed(error ?? "unknown")) }]
 
         case .didDisconnect(let peripheralId, let error):
-            for cb in disconnectCallbacks { cb(peripheralId) }
-            if let cont = disconnectContinuation {
-                disconnectContinuation = nil
-                cont.resume()
+            var effects: [() -> Void] = disconnectCallbacks.map { cb in { cb(peripheralId) } }
+            if let cont = Self.take(&disconnectContinuation) {
+                effects.append { cont.resume() }
             }
-            // Finish any active notification streams
-            for (_, cont) in notificationContinuations {
-                cont.finish()
-            }
+            // End the notification streams, so `for await` loops finish.
+            effects += notificationContinuations.values.map { stream in { stream.finish() } }
             notificationContinuations.removeAll()
 
-            // Fail all pending one-shot continuations
+            // Fail every pending one-shot wait.
             let connError = BLEError.connectionFailed(error ?? "disconnected")
-            if let cont = connectContinuation {
-                connectContinuation = nil
-                cont.resume(throwing: connError)
+            func fail<T>(_ cont: CheckedContinuation<T, Error>?) {
+                if let cont { effects.append { cont.resume(throwing: connError) } }
             }
-            if let cont = discoverServicesContinuation {
-                discoverServicesContinuation = nil
-                cont.resume(throwing: connError)
-            }
-            for (_, cont) in discoverCharsContinuations {
-                cont.resume(throwing: connError)
-            }
+            fail(Self.take(&connectContinuation))
+            fail(Self.take(&discoverServicesContinuation))
+            fail(Self.take(&writeReadyContinuation))
+            for cont in discoverCharsContinuations.values { fail(cont) }
+            for cont in discoverDescContinuations.values { fail(cont) }
+            for cont in readContinuations.values { fail(cont) }
+            for cont in writeContinuations.values { fail(cont) }
+            for cont in subscribeContinuations.values { fail(cont) }
             discoverCharsContinuations.removeAll()
-            for (_, cont) in discoverDescContinuations {
-                cont.resume(throwing: connError)
-            }
             discoverDescContinuations.removeAll()
-            for (_, cont) in readContinuations {
-                cont.resume(throwing: connError)
-            }
             readContinuations.removeAll()
-            for (_, cont) in writeContinuations {
-                cont.resume(throwing: connError)
-            }
             writeContinuations.removeAll()
-            for (_, cont) in subscribeContinuations {
-                cont.resume(throwing: connError)
-            }
             subscribeContinuations.removeAll()
-            if let cont = writeReadyContinuation {
-                writeReadyContinuation = nil
-                cont.resume(throwing: connError)
-            }
+            return effects
 
         case .didDiscoverServices(_, let uuids, let error):
-            if let cont = discoverServicesContinuation {
-                discoverServicesContinuation = nil
-                if let error = error {
-                    cont.resume(throwing: BLEError.operationFailed(error))
-                } else {
-                    cont.resume(returning: uuids)
-                }
-            }
+            guard let cont = Self.take(&discoverServicesContinuation) else { return [] }
+            return [{ Self.settle(cont, error.map(BLEError.operationFailed), uuids) }]
 
         case .didDiscoverCharacteristics(_, let svcUUID, let chars, let error):
-            if let cont = discoverCharsContinuations.removeValue(forKey: svcUUID) {
-                if let error = error {
-                    cont.resume(throwing: BLEError.operationFailed(error))
-                } else {
-                    cont.resume(returning: chars)
-                }
-            }
+            guard let cont = discoverCharsContinuations.removeValue(forKey: svcUUID) else { return [] }
+            return [{ Self.settle(cont, error.map(BLEError.operationFailed), chars) }]
 
         case .didDiscoverDescriptors(_, let charUUID, let descs, let error):
-            if let cont = discoverDescContinuations.removeValue(forKey: charUUID) {
-                if let error = error {
-                    cont.resume(throwing: BLEError.operationFailed(error))
-                } else {
-                    cont.resume(returning: descs)
-                }
-            }
+            guard let cont = discoverDescContinuations.removeValue(forKey: charUUID) else { return [] }
+            return [{ Self.settle(cont, error.map(BLEError.operationFailed), descs) }]
 
         case .didUpdateValue(_, let charUUID, let value, let error):
-            // If there's a one-shot read continuation, fulfill it
+            // A one-shot read takes the value; otherwise a notification stream does.
             if let cont = readContinuations.removeValue(forKey: charUUID) {
-                if let error = error {
-                    cont.resume(throwing: BLEError.readFailed(error))
-                } else {
-                    cont.resume(returning: value ?? Data())
-                }
+                return [{ Self.settle(cont, error.map(BLEError.readFailed), value ?? Data()) }]
             }
-            // If there's a notification stream, yield to it
-            else if let streamCont = notificationContinuations[charUUID], let value = value {
-                streamCont.yield(value)
-            }
+            guard let stream = notificationContinuations[charUUID], let value else { return [] }
+            return [{ stream.yield(value) }]
 
         case .didWriteValue(_, let charUUID, let error):
-            if let cont = writeContinuations.removeValue(forKey: charUUID) {
-                if let error = error {
-                    cont.resume(throwing: BLEError.writeFailed(error))
-                } else {
-                    cont.resume()
-                }
-            }
+            guard let cont = writeContinuations.removeValue(forKey: charUUID) else { return [] }
+            return [{ Self.settle(cont, error.map(BLEError.writeFailed), ()) }]
 
         case .isReadyToSendWriteWithoutResponse:
-            if let cont = writeReadyContinuation {
-                writeReadyContinuation = nil
-                cont.resume()
-            }
+            guard let cont = Self.take(&writeReadyContinuation) else { return [] }
+            return [{ cont.resume() }]
 
         case .didUpdateNotificationState(_, let charUUID, _, let error):
-            if let cont = subscribeContinuations.removeValue(forKey: charUUID) {
-                if let error = error {
-                    cont.resume(throwing: BLEError.subscribeFailed(error))
-                } else {
-                    cont.resume()
-                }
-            }
+            guard let cont = subscribeContinuations.removeValue(forKey: charUUID) else { return [] }
+            return [{ Self.settle(cont, error.map(BLEError.subscribeFailed), ()) }]
+        }
+    }
+
+    /// Clear a one-shot slot and return what it held.
+    private static func take<T>(_ slot: inout T?) -> T? {
+        defer { slot = nil }
+        return slot
+    }
+
+    private static func settle<T>(_ cont: CheckedContinuation<T, Error>, _ error: BLEError?, _ value: T) {
+        if let error {
+            cont.resume(throwing: error)
+        } else {
+            cont.resume(returning: value)
         }
     }
 }
