@@ -252,7 +252,7 @@ final class DataFormatterTests: XCTestCase {
         let result = DataFormatter.parse("1.0", as: "float32le")
         XCTAssertNotNil(result)
         XCTAssertEqual(result?.count, 4)
-        let value = result!.withUnsafeBytes { $0.load(as: Float32.self) }
+        let value = result!.withUnsafeBytes { $0.loadUnaligned(as: Float32.self) }
         XCTAssertEqual(value, 1.0, accuracy: 0.0001)
     }
 
@@ -302,5 +302,33 @@ final class DataFormatterTests: XCTestCase {
         let formatted = DataFormatter.format(original, as: "raw")
         let parsed = DataFormatter.parse(formatted, as: "raw")
         XCTAssertEqual(parsed, original)
+    }
+}
+
+/// Decoders receive `Data` slices whose bytes need not be aligned for the
+/// integer or float type being read (a notification payload sliced past its
+/// first byte, for example). Reading them must not trap.
+final class UnalignedDecodeTests: XCTestCase {
+
+    /// Heap-backed bytes viewed from offset 1, so the slice's base pointer is
+    /// odd and therefore misaligned for every multi-byte type.
+    private func misaligned(_ bytes: [UInt8]) -> Data {
+        let padded = Data([0xAA] + bytes + [UInt8](repeating: 0, count: 32))
+        return padded.dropFirst().prefix(bytes.count)
+    }
+
+    func testFormatterReadsMisalignedIntegersAndFloats() {
+        XCTAssertEqual(DataFormatter.format(misaligned([0x34, 0x12]), as: "uint16le"), "4660")
+        XCTAssertEqual(DataFormatter.format(misaligned([0x78, 0x56, 0x34, 0x12]), as: "uint32le"), "305419896")
+        XCTAssertEqual(DataFormatter.format(misaligned([0x00, 0x00, 0xC0, 0x3F]), as: "float32le"), "1.5")
+    }
+
+    /// GATTDecoder copies each field into its own buffer before reading it,
+    /// so this checks that decoding a misaligned slice gives the right values
+    /// rather than reaching a misaligned read directly.
+    func testGATTDecoderDecodesMisalignedSlices() {
+        XCTAssertEqual(GATTDecoder.decode(misaligned([0x34, 0x12]), uuid: "2A6E"), "4660")
+        XCTAssertEqual(GATTDecoder.decode(misaligned([0x78, 0x56, 0x34, 0x12]), uuid: "2A6D"), "305419896")
+        XCTAssertEqual(GATTDecoder.decode(misaligned([0x00, 0x72, 0x01, 0x00, 0xFF]), uuid: "2A1C"), "Flags: 0x00 | Temperature Measurement Value (Celsius): 37")
     }
 }

@@ -14,15 +14,15 @@ enum DataFormatter {
             return "\(data[data.startIndex])"
         case "uint16le":
             guard data.count >= 2 else { return "(insufficient data)" }
-            let value = data.withUnsafeBytes { $0.load(as: UInt16.self) }
+            let value = data.withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) }
             return "\(value)"
         case "uint32le":
             guard data.count >= 4 else { return "(insufficient data)" }
-            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+            let value = data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
             return "\(value)"
         case "float32le":
             guard data.count >= 4 else { return "(insufficient data)" }
-            let value = data.withUnsafeBytes { $0.load(as: Float32.self) }
+            let value = data.withUnsafeBytes { $0.loadUnaligned(as: Float32.self) }
             return "\(value)"
         case "raw":
             return data.map { String(format: "%02x", $0) }.joined(separator: " ")

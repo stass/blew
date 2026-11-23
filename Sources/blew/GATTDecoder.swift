@@ -115,10 +115,10 @@ enum GATTDecoder {
                         flags = UInt64(fieldData[fieldData.startIndex])
                         flagsCaptured = true
                     case .boolean16:
-                        flags = fieldData.withUnsafeBytes { UInt64($0.load(as: UInt16.self)) }
+                        flags = fieldData.withUnsafeBytes { UInt64($0.loadUnaligned(as: UInt16.self)) }
                         flagsCaptured = true
                     case .boolean32:
-                        flags = fieldData.withUnsafeBytes { UInt64($0.load(as: UInt32.self)) }
+                        flags = fieldData.withUnsafeBytes { UInt64($0.loadUnaligned(as: UInt32.self)) }
                         flagsCaptured = true
                     default:
                         break
@@ -149,7 +149,7 @@ enum GATTDecoder {
 
         case .uint16:
             guard data.count >= 2 else { return "(short)" }
-            return "\(data.withUnsafeBytes { $0.load(as: UInt16.self) })"
+            return "\(data.withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) })"
 
         case .uint24:
             guard data.count >= 3 else { return "(short)" }
@@ -160,7 +160,7 @@ enum GATTDecoder {
 
         case .uint32:
             guard data.count >= 4 else { return "(short)" }
-            return "\(data.withUnsafeBytes { $0.load(as: UInt32.self) })"
+            return "\(data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) })"
 
         case .uint48:
             guard data.count >= 6 else { return "(short)" }
@@ -172,7 +172,7 @@ enum GATTDecoder {
 
         case .uint64:
             guard data.count >= 8 else { return "(short)" }
-            return "\(data.withUnsafeBytes { $0.load(as: UInt64.self) })"
+            return "\(data.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) })"
 
         case .sint8:
             guard data.count >= 1 else { return "(short)" }
@@ -180,11 +180,11 @@ enum GATTDecoder {
 
         case .sint16:
             guard data.count >= 2 else { return "(short)" }
-            return "\(data.withUnsafeBytes { $0.load(as: Int16.self) })"
+            return "\(data.withUnsafeBytes { $0.loadUnaligned(as: Int16.self) })"
 
         case .sint32:
             guard data.count >= 4 else { return "(short)" }
-            return "\(data.withUnsafeBytes { $0.load(as: Int32.self) })"
+            return "\(data.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) })"
 
         case .boolean8:
             guard data.count >= 1 else { return "(short)" }
@@ -192,11 +192,11 @@ enum GATTDecoder {
 
         case .boolean16:
             guard data.count >= 2 else { return "(short)" }
-            return String(format: "0x%04X", data.withUnsafeBytes { $0.load(as: UInt16.self) })
+            return String(format: "0x%04X", data.withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) })
 
         case .boolean32:
             guard data.count >= 4 else { return "(short)" }
-            return String(format: "0x%08X", data.withUnsafeBytes { $0.load(as: UInt32.self) })
+            return String(format: "0x%08X", data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) })
 
         case .medfloat16:
             return decodeMedfloat16(data)
@@ -216,7 +216,7 @@ enum GATTDecoder {
     // IEEE 11073-20601 SFLOAT-16: 4-bit signed exponent, 12-bit signed mantissa
     private static func decodeMedfloat16(_ data: Data) -> String {
         guard data.count >= 2 else { return "(short)" }
-        let raw = data.withUnsafeBytes { $0.load(as: UInt16.self) }
+        let raw = data.withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) }
         let expRaw = Int(raw >> 12)
         let exp = expRaw > 7 ? expRaw - 16 : expRaw
         let mantRaw = Int(raw & 0x0FFF)
@@ -237,7 +237,7 @@ enum GATTDecoder {
     // IEEE 11073-20601 FLOAT-32: 8-bit signed exponent, 24-bit signed mantissa
     private static func decodeMedfloat32(_ data: Data) -> String {
         guard data.count >= 4 else { return "(short)" }
-        let raw = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+        let raw = data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
         let exp = Int(Int8(bitPattern: UInt8(raw >> 24)))
         let mantRaw = Int(raw & 0x00FFFFFF)
         let mant = mantRaw > 0x007FFFFF ? mantRaw - 0x01000000 : mantRaw

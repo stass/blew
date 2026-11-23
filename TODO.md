@@ -277,8 +277,6 @@ later release. Delete an item in the commit that fixes it, citing its ID
   `generate-ble-names.rb:35`, `generate-ble-characteristics.rb:267-269`.
 - [ ] GATT flags are taken only from the first boolean field, and truncated
   fields are skipped. `GATTDecoder.swift:107-126`.
-- [ ] `load(as:)` on possibly misaligned `Data`; use `loadUnaligned`.
-  `GATTDecoder.swift:118` and others, `DataFormatter.swift:17-25`.
 - [ ] A single field containing " | " is split as several fields.
   `CommandRouter.swift:601-603`, `GATTDecoder.swift:23`.
 - [ ] `parseHex` accepts signed tokens ("+f", "-0"). `DataFormatter.swift:71`.
