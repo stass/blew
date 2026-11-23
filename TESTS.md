@@ -50,6 +50,8 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 
 `PeripheralConfigTests` — JSON decoding of peripheral config files, `resolvedInitialValues()` for all supported data formats, and error handling for missing or malformed files.
 
+`PeripheralUUIDTests` — `BLEUUID` parsing and equality, checked against `CBUUID` equality and `uuidString` (no radio needed); rejection of malformed UUIDs and of descriptors at each peripheral entry point (config file, `periph adv -S`, `periph set`, `ble_periph_advertise`) with exit code 6; and lookups in `GATTStore` and the pending service registrations that match whichever spelling the config used and CoreBluetooth reports.
+
 **Data model**
 
 `ExitCodeAndTargetingTests` — verifies exit code values and `CustomNSError` conformance, and exercises `DeviceTargetingOptions.toArgs()` serialization for all option combinations.

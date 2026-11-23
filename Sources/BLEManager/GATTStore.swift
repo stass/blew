@@ -6,26 +6,28 @@ import CoreBluetooth
 /// `BLEPeripheralDelegate` accesses this from the peripheral manager's dispatch
 /// queue (to respond to read/write requests). `BLEPeripheral` accesses it from
 /// arbitrary threads when updating values. All access is guarded by `NSLock`.
+/// Both tables are keyed by `BLEUUID`, so every spelling of a UUID finds one
+/// entry.
 final class GATTStore: @unchecked Sendable {
     private let lock = NSLock()
-    private var values: [String: Data] = [:]
-    private var subscribers: [String: [CBCentral]] = [:]
+    private var values: [BLEUUID: Data] = [:]
+    private var subscribers: [BLEUUID: [CBCentral]] = [:]
 
     // MARK: - Values
 
-    func getValue(for characteristicUUID: String) -> Data? {
+    func getValue(for characteristic: BLEUUID) -> Data? {
         lock.lock()
         defer { lock.unlock() }
-        return values[normalise(characteristicUUID)]
+        return values[characteristic]
     }
 
-    func setValue(_ data: Data, for characteristicUUID: String) {
+    func setValue(_ data: Data, for characteristic: BLEUUID) {
         lock.lock()
         defer { lock.unlock() }
-        values[normalise(characteristicUUID)] = data
+        values[characteristic] = data
     }
 
-    func allValues() -> [String: Data] {
+    func allValues() -> [BLEUUID: Data] {
         lock.lock()
         defer { lock.unlock() }
         return values
@@ -33,28 +35,26 @@ final class GATTStore: @unchecked Sendable {
 
     // MARK: - Subscribers
 
-    func subscriberList(for characteristicUUID: String) -> [CBCentral] {
+    func subscriberList(for characteristic: BLEUUID) -> [CBCentral] {
         lock.lock()
         defer { lock.unlock() }
-        return subscribers[normalise(characteristicUUID)] ?? []
+        return subscribers[characteristic] ?? []
     }
 
-    func addSubscriber(_ central: CBCentral, for characteristicUUID: String) {
+    func addSubscriber(_ central: CBCentral, for characteristic: BLEUUID) {
         lock.lock()
         defer { lock.unlock() }
-        let key = normalise(characteristicUUID)
-        var list = subscribers[key] ?? []
+        var list = subscribers[characteristic] ?? []
         if !list.contains(where: { $0.identifier == central.identifier }) {
             list.append(central)
         }
-        subscribers[key] = list
+        subscribers[characteristic] = list
     }
 
-    func removeSubscriber(_ central: CBCentral, for characteristicUUID: String) {
+    func removeSubscriber(_ central: CBCentral, for characteristic: BLEUUID) {
         lock.lock()
         defer { lock.unlock() }
-        let key = normalise(characteristicUUID)
-        subscribers[key] = (subscribers[key] ?? []).filter {
+        subscribers[characteristic] = (subscribers[characteristic] ?? []).filter {
             $0.identifier != central.identifier
         }
     }
@@ -86,11 +86,5 @@ final class GATTStore: @unchecked Sendable {
         defer { lock.unlock() }
         values = [:]
         subscribers = [:]
-    }
-
-    // MARK: - Helpers
-
-    private func normalise(_ uuid: String) -> String {
-        uuid.uppercased()
     }
 }

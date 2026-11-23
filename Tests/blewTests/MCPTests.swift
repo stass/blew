@@ -494,8 +494,8 @@ final class MCPStructuredResultTests: XCTestCase {
     }
 
     func testPeripheralSummaryRoundTrip() throws {
-        let charDef = CharacteristicDefinition(uuid: "2A19", properties: [.read])
-        let svcDef = ServiceDefinition(uuid: "180F", primary: true, characteristics: [charDef])
+        let charDef = CharacteristicDefinition(uuid: try BLEUUID(parsing: "2A19"), properties: [.read])
+        let svcDef = ServiceDefinition(uuid: try BLEUUID(parsing: "180F"), primary: true, characteristics: [charDef])
         let summary = PeriphSummaryResult(name: "TestPeripheral", serviceUUIDs: ["180F"], services: [svcDef])
         let original = StructuredResult.peripheralSummary(summary)
         let json = try jsonString(original)

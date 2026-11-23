@@ -188,8 +188,13 @@ CLI / REPL  ──async/await──►  BLEPeripheral (singleton)
 | `BLEPeripheral.swift` | Public singleton facade. Owns `CBPeripheralManager`, `GATTStore`, delegate. API: `configure`, `startAdvertising`, `stopAdvertising`, `updateValue`, `events()`, `peripheralStatus()`. |
 | `BLEPeripheralDelegate.swift` | `CBPeripheralManagerDelegate`. Answers read/write requests synchronously via `GATTStore`. Emits `PeripheralEvent` to stream. |
 | `GATTStore.swift` | Thread-safe value map + subscriber map. Accessed from `blew.pm` queue (delegate) and any thread (CLI commands). Guarded by `NSLock`. |
-| `PeripheralTypes.swift` | `ServiceDefinition`, `CharacteristicDefinition`, `CharacteristicProperty`, `PeripheralStatus` — all `Sendable` value types. |
+| `PeripheralTypes.swift` | `ServiceDefinition`, `CharacteristicDefinition`, `CharacteristicProperty`, `PeripheralStatus` — all `Sendable` value types. Decoding a `CharacteristicDefinition` rejects descriptors (see below). |
+| `BLEUUID.swift` | `BLEUUID`, the validated UUID every peripheral definition, table key and API argument uses. |
 | `PeripheralEvent.swift` | `PeripheralEvent` enum: `stateChanged`, `advertisingStarted`, `serviceAdded`, `centralConnected`, `centralDisconnected`, `readRequest`, `writeRequest`, `subscribed`, `unsubscribed`, `notificationSent`. |
+
+**UUIDs on the peripheral side.** `CBUUID(string:)` raises an Objective-C exception on malformed text and silently rewrites some text it accepts (`0x180F`, ` 180F`). Every UUID that reaches the peripheral from a config file, a command-line argument or an MCP argument is therefore parsed once into a `BLEUUID` (`init(parsing:)` or `Decodable`), which accepts exactly 4 or 8 ASCII hex digits or the 8-4-4-4-12 form; only BLEManager turns a `BLEUUID` into a `CBUUID`. `BLEUUID` keeps the spelling as written (uppercased), because CoreBluetooth registers a service in the form it is given, and compares and hashes by its shortest spelling, as `CBUUID` equality does. `GATTStore`, the registered-characteristic table and the pending service registrations are keyed by `BLEUUID`, and the delegate converts each callback's `CBUUID` the same way, so `180F`, `0000180F` and `0000180F-0000-1000-8000-00805F9B34FB` find one entry whichever spelling the config used and CoreBluetooth reports. Because these tables key by UUID alone, a config that names one characteristic UUID twice, in any spelling, is rejected when it is loaded.
+
+**Descriptors.** CoreBluetooth creates 2900 and 2902 itself from the characteristic's properties, hosts no other descriptor except 2901 and 2904, and raises for those two without a value. The config format carries no descriptor values, so a config that lists any descriptor is rejected when it is loaded.
 
 **CoreBluetooth peripheral limitations:**
 

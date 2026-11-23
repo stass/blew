@@ -1,4 +1,5 @@
 import XCTest
+import BLEManager
 @testable import blew
 
 final class PeripheralConfigTests: XCTestCase {
@@ -42,7 +43,7 @@ final class PeripheralConfigTests: XCTestCase {
         """
         let config = try decodeConfig(json)
         XCTAssertEqual(config.services.count, 1)
-        XCTAssertEqual(config.services[0].uuid, "180F")
+        XCTAssertEqual(config.services[0].uuid.string, "180F")
         XCTAssertTrue(config.services[0].primary)
         XCTAssertEqual(config.services[0].characteristics.count, 0)
     }
@@ -68,7 +69,7 @@ final class PeripheralConfigTests: XCTestCase {
         """
         let config = try decodeConfig(json)
         let char = config.services[0].characteristics[0]
-        XCTAssertEqual(char.uuid, "2A19")
+        XCTAssertEqual(char.uuid.string, "2A19")
         XCTAssertEqual(char.properties.map { $0.rawValue }, ["read", "notify"])
         XCTAssertEqual(char.value, "55")
         XCTAssertEqual(char.format, "uint8")
@@ -85,8 +86,8 @@ final class PeripheralConfigTests: XCTestCase {
         """
         let config = try decodeConfig(json)
         XCTAssertEqual(config.services.count, 2)
-        XCTAssertEqual(config.services[0].uuid, "180F")
-        XCTAssertEqual(config.services[1].uuid, "180A")
+        XCTAssertEqual(config.services[0].uuid.string, "180F")
+        XCTAssertEqual(config.services[1].uuid.string, "180A")
     }
 
     func testParseConfigHexValue() throws {
@@ -163,7 +164,7 @@ final class PeripheralConfigTests: XCTestCase {
         """
         let config = try decodeConfig(json)
         let values = try config.resolvedInitialValues()
-        XCTAssertEqual(values["FFF1"], Data([0xDE, 0xAD, 0xBE, 0xEF]))
+        XCTAssertEqual(values[uuid("FFF1")], Data([0xDE, 0xAD, 0xBE, 0xEF]))
     }
 
     func testResolvedInitialValuesUint8() throws {
@@ -183,7 +184,7 @@ final class PeripheralConfigTests: XCTestCase {
         """
         let config = try decodeConfig(json)
         let values = try config.resolvedInitialValues()
-        XCTAssertEqual(values["2A19"], Data([85]))
+        XCTAssertEqual(values[uuid("2A19")], Data([85]))
     }
 
     func testResolvedInitialValuesDefaultFormatIsHex() throws {
@@ -203,7 +204,7 @@ final class PeripheralConfigTests: XCTestCase {
         """
         let config = try decodeConfig(json)
         let values = try config.resolvedInitialValues()
-        XCTAssertEqual(values["FFF1"], Data([0xFF]))
+        XCTAssertEqual(values[uuid("FFF1")], Data([0xFF]))
     }
 
     func testResolvedInitialValuesUUIDUppercased() throws {
@@ -223,9 +224,9 @@ final class PeripheralConfigTests: XCTestCase {
         """
         let config = try decodeConfig(json)
         let values = try config.resolvedInitialValues()
-        // UUID key should be uppercased
-        XCTAssertNotNil(values["FFF1"])
-        XCTAssertNil(values["fff1"])
+        // The key keeps the spelling uppercased; lookups ignore case.
+        XCTAssertEqual(values.keys.map(\.string), ["FFF1"])
+        XCTAssertNotNil(values[uuid("fff1")])
     }
 
     func testResolvedInitialValuesNoValueSkipped() throws {
@@ -243,7 +244,7 @@ final class PeripheralConfigTests: XCTestCase {
         """
         let config = try decodeConfig(json)
         let values = try config.resolvedInitialValues()
-        XCTAssertNil(values["FFF1"])
+        XCTAssertNil(values[uuid("FFF1")])
     }
 
     func testResolvedInitialValuesInvalidValueThrows() throws {
@@ -283,10 +284,10 @@ final class PeripheralConfigTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: url) }
         XCTAssertThrowsError(try PeripheralConfig.load(from: url.path)) { error in
             if let configError = error as? PeripheralConfig.ConfigError,
-               case .invalidJSON = configError {
+               case .invalidConfig = configError {
                 // pass
             } else {
-                XCTFail("Expected ConfigError.invalidJSON, got \(error)")
+                XCTFail("Expected ConfigError.invalidConfig, got \(error)")
             }
         }
     }
@@ -339,4 +340,8 @@ private func findExamplesDir() -> URL? {
         }
     }
     return nil
+}
+
+private func uuid(_ text: String) -> BLEUUID {
+    try! BLEUUID(parsing: text)
 }

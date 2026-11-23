@@ -262,10 +262,10 @@ final class TextRenderer: OutputRenderer {
         Swift.print("Advertising \"\(summary.name)\" [\(displayUUIDs)]")
 
         for svc in summary.services where !svc.characteristics.isEmpty {
-            let svcDisplay = BLENames.displayUUID(svc.uuid, category: .service)
+            let svcDisplay = BLENames.displayUUID(svc.uuid.string, category: .service)
             Swift.print("  Service \(svcDisplay)")
             for char in svc.characteristics {
-                let charDisplay = BLENames.displayUUID(char.uuid, category: .characteristic)
+                let charDisplay = BLENames.displayUUID(char.uuid.string, category: .characteristic)
                 let props = char.properties.map { $0.rawValue }.joined(separator: ", ")
                 Swift.print("  +-- \(charDisplay) [\(props)]")
             }

@@ -81,25 +81,9 @@ later release. Delete an item in the commit that fixes it, citing its ID
   - `EditState.swift:53-67,114`: backspace and delete leave stale indices
     *(plausible)*.
   - Commit a3d3d69 fixed only the names generator script.
-- [ ] **B10. Invalid UUIDs and unsupported descriptors crash the process**
-  *(plausible)*. `Sources/BLEManager/BLEPeripheral.swift:56,88,191,200`.
-  - Config, CLI and MCP UUID strings go straight to `CBUUID(string:)`, which
-    raises an Objective-C exception (`"uuid": "180G"`). This kills the MCP
-    server too.
-  - Descriptors other than 2901 and 2904 (e.g. 2902) are passed to
-    `CBMutableDescriptor`, which raises.
-  - Fix: validate in `Sources/blew/PeripheralConfig.swift` and at CLI/MCP
-    entry.
 - [ ] **B11. `blew -t inf scan -w` crashes.** `CommandRouter.swift:164`,
   `:265`, `:349` → `BLEManager.swift:99`. Watch mode skips
   `isValidDuration`, and `UInt64(inf * 1e9)` traps.
-- [ ] **B12. Peripheral `configure` hangs when a UUID is written in a form
-  CoreBluetooth shortens.** `BLEPeripheral.swift:60-69,117`,
-  `BLEPeripheralDelegate.swift:49,110,144,158`. Continuations and GATTStore
-  are keyed by the uppercased config string, but callbacks use
-  `CBUUID.uuidString`. A full 128-bit SIG UUID therefore never matches, and
-  stored values split between keys. Fix: normalize via
-  `CBUUID(string:).uuidString` everywhere.
 
 ## P1: important (0.3.0)
 
@@ -189,6 +173,9 @@ later release. Delete an item in the commit that fixes it, citing its ID
   to a year also accumulate without bound.
 - [ ] **M3. Deprecated `.text(_:)`.** `MCPServer.swift:147`, `:157`. Use
   `.text(text:annotations:_meta:)`. These are the only build warnings.
+- [ ] **M4. `ble_periph_advertise` drops `services` entries that are not
+  strings.** `MCPServer.swift:339-343`. `"services": ["180D", 6159]`
+  advertises only `180D` and reports success.
 
 ### Output
 
@@ -199,7 +186,14 @@ later release. Delete an item in the commit that fixes it, citing its ID
     device name `x\nconnected=yes` forges a record.
   - Decoded multi-field values print no `value=`.
 - [ ] **O2. Text output passes device strings raw.** ESC sequences in a
-  device name reach the terminal.
+  device name reach the terminal. Error messages do the same with config
+  and argument text (`TextRenderer.swift:58`, `KVRenderer.swift:64`): a
+  config with `"properties": ["\u001b]0;x\u0007"]` sends an OSC sequence to
+  stderr through `PeripheralConfig.describe`, and so do
+  `ConfigError.invalidValue` and `periph set`'s "invalid value". The UUID
+  error quotes with `String.debugDescription`, which escapes C0 but passes C1
+  controls and bidi overrides; it should use the shared escaping function
+  once one exists.
 - [ ] **O3. Table widths use grapheme counts while `padding(toLength:)`
   counts UTF-16 units.** `OutputFormatter.swift:93-109`,
   `TextRenderer.swift:108-139,216-220`. Names with emoji are truncated, and
@@ -231,7 +225,9 @@ later release. Delete an item in the commit that fixes it, citing its ID
   instead of 20470, and the reserved values are missed.
 - [ ] **D3. `shortUUID` drops the upper bits of 32-bit UUIDs.**
   `Sources/blew/BLENames.swift:25-28`. `12342A19` is decoded as Battery
-  Level.
+  Level, and so is `12342A19-0000-1000-8000-00805F9B34FB` (`:30-35`). Fix:
+  derive it from `BLEUUID.key` (`Sources/BLEManager/BLEUUID.swift`), which
+  is 4 digits exactly for a 16-bit UUID.
 - [ ] **D4. The characteristics generator reads its YAML in the locale
   encoding.** `Scripts/generate-ble-characteristics.rb:209`, `:214`. This is
   the same bug a3d3d69 fixed in the names script; the build fails under
@@ -294,9 +290,19 @@ later release. Delete an item in the commit that fixes it, citing its ID
 - [ ] A single field containing " | " is split as several fields.
   `CommandRouter.swift:601-603`, `GATTDecoder.swift:23`.
 - [ ] `parseHex` accepts signed tokens ("+f", "-0"). `DataFormatter.swift:71`.
-- [ ] Config errors lose detail. `invalidJSON` drops the DecodingError key
-  path, `fileNotFound` hides permission errors, and the same characteristic
-  UUID in two services collides. `PeripheralConfig.swift:40-57`.
+- [ ] Config loading: `fileNotFound` hides permission errors, and
+  `Data(contentsOf:)` has no size or file-type check, so an MCP
+  `config_file` of `/dev/zero` exhausts memory and a FIFO blocks before any
+  deadline. `PeripheralConfig.swift` (`load`).
+- [ ] `periph clone` of a device with the same characteristic UUID in two
+  services (two Battery services) collides in the GATT server's tables,
+  which are keyed by UUID alone. Config files reject such duplicates.
+  `CommandRouter.swift` (`runPeriphClone`), `BLEPeripheral.swift:66-69`.
+- [ ] Peripheral configs cannot define descriptors. Decoding rejects every
+  `descriptors` entry (`PeripheralTypes.swift`, `CharacteristicDefinition`),
+  because 2901 (User Description) and 2904 (Presentation Format) need a
+  value and the format has none. Supporting them means a descriptor object
+  with a value (a string for 2901, 7 bytes for 2904) in the config.
 - [ ] RSSI 127 (unavailable) is treated as the strongest signal and passes
   `-R`. `TextRenderer.swift:327-331`, `CommandRouter.swift:196`.
 - [ ] Characteristics are matched by UUID alone, so same-UUID

@@ -14,7 +14,7 @@ final class BLEPeripheralDelegate: NSObject, @unchecked Sendable {
     // Set by BLEPeripheral when it needs to wait for the manager to power on.
     private var stateContinuation: CheckedContinuation<Void, Error>?
     private var advertisingContinuation: CheckedContinuation<Void, Error>?
-    private var pendingServiceContinuations: [String: CheckedContinuation<Void, Error>] = [:]
+    private var pendingServiceContinuations: [BLEUUID: CheckedContinuation<Void, Error>] = [:]
 
     // AsyncStream continuation for ongoing event delivery to the CLI layer.
     // Access only from `emitEvent` (which guards under lock).
@@ -44,9 +44,9 @@ final class BLEPeripheralDelegate: NSObject, @unchecked Sendable {
         lock.unlock()
     }
 
-    func setServiceContinuation(uuid: String, _ cont: CheckedContinuation<Void, Error>) {
+    func setServiceContinuation(uuid: BLEUUID, _ cont: CheckedContinuation<Void, Error>) {
         lock.lock()
-        pendingServiceContinuations[uuid.uppercased()] = cont
+        pendingServiceContinuations[uuid] = cont
         lock.unlock()
     }
 
@@ -103,11 +103,11 @@ extension BLEPeripheralDelegate: CBPeripheralManagerDelegate {
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
-        let uuid = service.uuid.uuidString
-        emitEvent(.serviceAdded(uuid: uuid, error: error?.localizedDescription))
+        let uuid = BLEUUID(service.uuid)
+        emitEvent(.serviceAdded(uuid: uuid.string, error: error?.localizedDescription))
 
         lock.lock()
-        let cont = pendingServiceContinuations.removeValue(forKey: uuid.uppercased())
+        let cont = pendingServiceContinuations.removeValue(forKey: uuid)
         lock.unlock()
 
         if let error = error {
@@ -122,9 +122,9 @@ extension BLEPeripheralDelegate: CBPeripheralManagerDelegate {
         central: CBCentral,
         didSubscribeTo characteristic: CBCharacteristic
     ) {
-        let uuid = characteristic.uuid.uuidString
+        let uuid = BLEUUID(characteristic.uuid)
         store.addSubscriber(central, for: uuid)
-        emitEvent(.subscribed(centralId: central.identifier.uuidString, characteristicUUID: uuid))
+        emitEvent(.subscribed(centralId: central.identifier.uuidString, characteristicUUID: uuid.string))
     }
 
     func peripheralManager(
@@ -132,20 +132,20 @@ extension BLEPeripheralDelegate: CBPeripheralManagerDelegate {
         central: CBCentral,
         didUnsubscribeFrom characteristic: CBCharacteristic
     ) {
-        let uuid = characteristic.uuid.uuidString
+        let uuid = BLEUUID(characteristic.uuid)
         store.removeSubscriber(central, for: uuid)
-        emitEvent(.unsubscribed(centralId: central.identifier.uuidString, characteristicUUID: uuid))
+        emitEvent(.unsubscribed(centralId: central.identifier.uuidString, characteristicUUID: uuid.string))
     }
 
     func peripheralManager(
         _ peripheral: CBPeripheralManager,
         didReceiveRead request: CBATTRequest
     ) {
-        let uuid = request.characteristic.uuid.uuidString
+        let uuid = BLEUUID(request.characteristic.uuid)
         let value = store.getValue(for: uuid) ?? Data()
         request.value = value.count > request.offset ? Data(value[request.offset...]) : Data()
         peripheral.respond(to: request, withResult: .success)
-        emitEvent(.readRequest(centralId: request.central.identifier.uuidString, characteristicUUID: uuid))
+        emitEvent(.readRequest(centralId: request.central.identifier.uuidString, characteristicUUID: uuid.string))
     }
 
     func peripheralManager(
@@ -153,12 +153,12 @@ extension BLEPeripheralDelegate: CBPeripheralManagerDelegate {
         didReceiveWrite requests: [CBATTRequest]
     ) {
         for request in requests {
-            let uuid = request.characteristic.uuid.uuidString
+            let uuid = BLEUUID(request.characteristic.uuid)
             let value = request.value ?? Data()
             store.setValue(value, for: uuid)
             emitEvent(.writeRequest(
                 centralId: request.central.identifier.uuidString,
-                characteristicUUID: uuid,
+                characteristicUUID: uuid.string,
                 value: value
             ))
         }

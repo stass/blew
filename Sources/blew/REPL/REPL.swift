@@ -129,7 +129,7 @@ final class REPL {
                     let afterSub = periphParts.count > 1 ? String(periphParts[1]) : ""
                     let tokens = afterSub.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
                     let partial = tokens.last.flatMap { $0.hasPrefix("-") ? nil : $0 } ?? ""
-                    let candidates = BLEPeripheral.shared.knownCharacteristicUUIDs()
+                    let candidates = BLEPeripheral.shared.knownCharacteristicUUIDs().map(\.string)
                     if partial.isEmpty && buffer.hasSuffix(" ") {
                         return candidates.map { "\(buffer)\($0)" }
                     }

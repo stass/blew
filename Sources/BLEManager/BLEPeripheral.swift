@@ -18,7 +18,7 @@ public final class BLEPeripheral: @unchecked Sendable {
     private var pmState: CBManagerState = .unknown
     private var _isAdvertising = false
     private var _advertisedName: String?
-    private var registeredCharacteristics: [String: CBMutableCharacteristic] = [:]
+    private var registeredCharacteristics: [BLEUUID: CBMutableCharacteristic] = [:]
     private var registeredServices: [CBMutableService] = []
 
     private init() {
@@ -53,8 +53,7 @@ public final class BLEPeripheral: @unchecked Sendable {
             guard !svcDef.characteristics.isEmpty else { continue }
 
             let mutableChars = buildMutableCharacteristics(from: svcDef.characteristics)
-            let serviceUUID = CBUUID(string: svcDef.uuid)
-            let mutableService = CBMutableService(type: serviceUUID, primary: svcDef.primary)
+            let mutableService = CBMutableService(type: svcDef.uuid.cbuuid, primary: svcDef.primary)
             mutableService.characteristics = mutableChars.map { $0.char }
 
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
@@ -66,7 +65,7 @@ public final class BLEPeripheral: @unchecked Sendable {
 
             stateLock.withLock {
                 for mc in mutableChars {
-                    registeredCharacteristics[mc.uuid.uppercased()] = mc.char
+                    registeredCharacteristics[mc.uuid] = mc.char
                 }
                 registeredServices.append(mutableService)
             }
@@ -78,14 +77,14 @@ public final class BLEPeripheral: @unchecked Sendable {
     /// CoreBluetooth only allows `CBAdvertisementDataLocalNameKey` and
     /// `CBAdvertisementDataServiceUUIDsKey` in the advertisement dictionary.
     /// Manufacturer data and other ADV fields are not supported.
-    public func startAdvertising(name: String, serviceUUIDs: [String]) async throws {
+    public func startAdvertising(name: String, serviceUUIDs: [BLEUUID]) async throws {
         try await waitForPoweredOn(timeout: 5.0)
 
         var adData: [String: Any] = [
             CBAdvertisementDataLocalNameKey: name,
         ]
         if !serviceUUIDs.isEmpty {
-            adData[CBAdvertisementDataServiceUUIDsKey] = serviceUUIDs.map { CBUUID(string: $0) }
+            adData[CBAdvertisementDataServiceUUIDsKey] = serviceUUIDs.map(\.cbuuid)
         }
 
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
@@ -113,19 +112,17 @@ public final class BLEPeripheral: @unchecked Sendable {
 
     /// Update the stored value of a characteristic. Sends a notification to all
     /// subscribed centrals if the characteristic supports notify or indicate.
-    public func updateValue(_ data: Data, forCharacteristic uuid: String) throws {
-        let key = uuid.uppercased()
-        store.setValue(data, for: key)
-
+    public func updateValue(_ data: Data, forCharacteristic uuid: BLEUUID) throws {
         stateLock.lock()
-        let char = registeredCharacteristics[key]
+        let char = registeredCharacteristics[uuid]
         stateLock.unlock()
 
         guard let mutableChar = char else {
-            throw BLEError.characteristicNotFound(uuid)
+            throw BLEError.characteristicNotFound(uuid.string)
         }
+        store.setValue(data, for: uuid)
 
-        let subscribers = store.subscriberList(for: key)
+        let subscribers = store.subscriberList(for: uuid)
         guard !subscribers.isEmpty else { return }
 
         pmQueue.async {
@@ -169,7 +166,7 @@ public final class BLEPeripheral: @unchecked Sendable {
     }
 
     /// Return all registered characteristic UUIDs (for REPL tab completion).
-    public func knownCharacteristicUUIDs() -> [String] {
+    public func knownCharacteristicUUIDs() -> [BLEUUID] {
         stateLock.lock()
         defer { stateLock.unlock() }
         return Array(registeredCharacteristics.keys)
@@ -178,7 +175,7 @@ public final class BLEPeripheral: @unchecked Sendable {
     // MARK: - Private helpers
 
     private struct MutableCharEntry {
-        let uuid: String
+        let uuid: BLEUUID
         let char: CBMutableCharacteristic
     }
 
@@ -188,18 +185,12 @@ public final class BLEPeripheral: @unchecked Sendable {
         defs.map { def in
             let props = cbProperties(from: def.properties)
             let perms = cbPermissions(from: def.properties)
-            let charUUID = CBUUID(string: def.uuid)
             let mutableChar = CBMutableCharacteristic(
-                type: charUUID,
+                type: def.uuid.cbuuid,
                 properties: props,
                 value: nil,
                 permissions: perms
             )
-            if let descUUIDs = def.descriptors {
-                mutableChar.descriptors = descUUIDs.map {
-                    CBMutableDescriptor(type: CBUUID(string: $0), value: nil)
-                }
-            }
             return MutableCharEntry(uuid: def.uuid, char: mutableChar)
         }
     }

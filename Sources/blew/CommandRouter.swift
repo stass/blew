@@ -1399,52 +1399,38 @@ extension CommandRouter {
         var result = CommandResult()
         let advOpts: Set<String> = ["-c", "--config", "-n", "--name", "-S", "--service"]
         let configPath = parseStringOption(args, short: "-c", long: "--config", optionsWithValue: advOpts)
-        var serviceUUIDs = parseAllStringOptions(args, short: "-S", long: "--service", optionsWithValue: advOpts)
+        let serviceArgs = parseAllStringOptions(args, short: "-S", long: "--service", optionsWithValue: advOpts)
         let nameArg = parseStringOption(args, short: "-n", long: "--name", optionsWithValue: advOpts)
 
+        var serviceUUIDs: [BLEUUID]
         var services: [ServiceDefinition] = []
         var advName: String
+        var initialValues: [BLEUUID: Data] = [:]
 
-        if let path = configPath {
-            let config: PeripheralConfig
-            do {
-                config = try PeripheralConfig.load(from: path)
-            } catch {
-                result.errors.append("\(error.localizedDescription)")
-                result.exitCode = BlewExitCode.invalidArguments.code
-                return result
-            }
-            services = config.services
-            advName = nameArg ?? config.name ?? "blew"
-            serviceUUIDs = serviceUUIDs.isEmpty
-                ? config.services.map { $0.uuid }
-                : serviceUUIDs
-        } else {
-            advName = nameArg ?? "blew"
-            if !serviceUUIDs.isEmpty {
+        do {
+            serviceUUIDs = try serviceArgs.map { try BLEUUID(parsing: $0) }
+            if let path = configPath {
+                let config = try PeripheralConfig.load(from: path)
+                initialValues = try config.resolvedInitialValues()
+                services = config.services
+                advName = nameArg ?? config.name ?? "blew"
+                if serviceUUIDs.isEmpty { serviceUUIDs = config.services.map { $0.uuid } }
+            } else {
+                advName = nameArg ?? "blew"
                 services = serviceUUIDs.map { uuid in
                     ServiceDefinition(uuid: uuid, primary: true, characteristics: [])
                 }
             }
+        } catch {
+            result.errors.append(error.localizedDescription)
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
         }
 
         if services.isEmpty && serviceUUIDs.isEmpty {
             result.errors.append("no services defined -- use --config <file> or -S <uuid>")
             result.exitCode = BlewExitCode.invalidArguments.code
             return result
-        }
-
-        var initialValues: [String: Data] = [:]
-        if configPath != nil {
-            let config: PeripheralConfig
-            do {
-                config = try PeripheralConfig.load(from: configPath!)
-                initialValues = try config.resolvedInitialValues()
-            } catch {
-                result.errors.append("\(error.localizedDescription)")
-                result.exitCode = BlewExitCode.invalidArguments.code
-                return result
-            }
         }
 
         let peripheral = BLEPeripheral.shared
@@ -1469,7 +1455,7 @@ extension CommandRouter {
                 result.infos.append("starting advertising as \"\(advName)\"...")
                 try await peripheral.startAdvertising(name: advName, serviceUUIDs: serviceUUIDs)
                 result.output.append(.peripheralSummary(PeriphSummaryResult(
-                    name: advName, serviceUUIDs: serviceUUIDs, services: services
+                    name: advName, serviceUUIDs: serviceUUIDs.map(\.string), services: services
                 )))
             } catch is CancellationError {
                 // handled below
@@ -1537,7 +1523,7 @@ extension CommandRouter {
 
         var clonedServices: [ServiceDefinition] = []
         var clonedName: String = "blew-clone"
-        var initialValues: [String: Data] = [:]
+        var initialValues: [BLEUUID: Data] = [:]
 
         let snapSemaphore = DispatchSemaphore(value: 0)
 
@@ -1552,8 +1538,10 @@ extension CommandRouter {
                 }
 
                 for svc in tree {
+                    let serviceUUID = try BLEUUID(parsing: svc.uuid)
                     var charDefs: [CharacteristicDefinition] = []
                     for char in svc.characteristics {
+                        let charUUID = try BLEUUID(parsing: char.uuid)
                         let props = char.properties.compactMap { CharacteristicProperty(rawValue: mapPropertyName($0)) }
 
                         var valueStr: String? = nil
@@ -1562,24 +1550,27 @@ extension CommandRouter {
                             if let data = try? await manager.readCharacteristic(char.uuid) {
                                 valueStr = data.map { String(format: "%02x", $0) }.joined()
                                 valueFmt = "hex"
-                                initialValues[char.uuid.uppercased()] = data
+                                initialValues[charUUID] = data
                             }
                         }
                         charDefs.append(CharacteristicDefinition(
-                            uuid: char.uuid,
+                            uuid: charUUID,
                             properties: props,
                             value: valueStr,
                             format: valueFmt
                         ))
                     }
                     clonedServices.append(ServiceDefinition(
-                        uuid: svc.uuid,
+                        uuid: serviceUUID,
                         primary: svc.isPrimary,
                         characteristics: charDefs
                     ))
                 }
             } catch is CancellationError {
                 // handled
+            } catch let error as BLEUUID.ParseError {
+                result.errors.append("the device reported an \(error.localizedDescription)")
+                result.exitCode = BlewExitCode.operationFailed.code
             } catch let error as BLEError {
                 result.errors.append(error.localizedDescription)
                 result.exitCode = error.exitCode
@@ -1632,7 +1623,7 @@ extension CommandRouter {
 
                 try await peripheral.startAdvertising(name: clonedName, serviceUUIDs: serviceUUIDs)
                 result.output.append(.peripheralSummary(PeriphSummaryResult(
-                    name: clonedName, serviceUUIDs: serviceUUIDs, services: clonedServices
+                    name: clonedName, serviceUUIDs: serviceUUIDs.map(\.string), services: clonedServices
                 )))
             } catch is CancellationError {
                 // handled below
@@ -1710,7 +1701,14 @@ extension CommandRouter {
         let valueStr = positional[1]
         let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: ["-f", "--format"]) ?? "hex"
 
-        let charUUID = resolvePeriphCharacteristic(charInput)
+        let charUUID: BLEUUID
+        do {
+            charUUID = try resolvePeriphCharacteristic(charInput)
+        } catch {
+            result.errors.append(error.localizedDescription)
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
+        }
 
         guard let data = DataFormatter.parse(valueStr, as: fmt) else {
             result.errors.append("invalid value '\(valueStr)' for format '\(fmt)'")
@@ -1720,7 +1718,7 @@ extension CommandRouter {
 
         do {
             try BLEPeripheral.shared.updateValue(data, forCharacteristic: charUUID)
-            result.infos.append("set \(BLENames.displayUUID(charUUID, category: .characteristic)) = \(DataFormatter.format(data, as: fmt))")
+            result.infos.append("set \(BLENames.displayUUID(charUUID.string, category: .characteristic)) = \(DataFormatter.format(data, as: fmt))")
         } catch let error as BLEError {
             result.errors.append(error.localizedDescription)
             result.exitCode = error.exitCode
@@ -1745,7 +1743,14 @@ extension CommandRouter {
         let valueStr = positional[1]
         let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: ["-f", "--format"]) ?? "hex"
 
-        let charUUID = resolvePeriphCharacteristic(charInput)
+        let charUUID: BLEUUID
+        do {
+            charUUID = try resolvePeriphCharacteristic(charInput)
+        } catch {
+            result.errors.append(error.localizedDescription)
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
+        }
 
         guard let data = DataFormatter.parse(valueStr, as: fmt) else {
             result.errors.append("invalid value '\(valueStr)' for format '\(fmt)'")
@@ -1755,7 +1760,7 @@ extension CommandRouter {
 
         do {
             try BLEPeripheral.shared.updateValue(data, forCharacteristic: charUUID)
-            result.infos.append("sent notification on \(BLENames.displayUUID(charUUID, category: .characteristic))")
+            result.infos.append("sent notification on \(BLENames.displayUUID(charUUID.string, category: .characteristic))")
         } catch let error as BLEError {
             result.errors.append(error.localizedDescription)
             result.exitCode = error.exitCode
@@ -1777,16 +1782,40 @@ extension CommandRouter {
     /// (OPOST disabled by LineNoise). \r moves to column 0, \033[K erases any partial
     /// prompt or typed input on that line, and \r\n ends with a proper newline.
 
-    private func resolvePeriphCharacteristic(_ input: String) -> String {
-        let known = BLEPeripheral.shared.knownCharacteristicUUIDs()
+    private func resolvePeriphCharacteristic(_ input: String) throws -> BLEUUID {
+        try Self.resolvePeriphCharacteristic(
+            input, known: BLEPeripheral.shared.knownCharacteristicUUIDs())
+    }
+
+    struct AmbiguousCharacteristic: Error, LocalizedError {
+        let input: String
+        let matches: [String]
+
+        var errorDescription: String? {
+            "\(input.debugDescription) matches several characteristics: "
+                + matches.joined(separator: ", ")
+        }
+    }
+
+    /// The characteristic `input` names: `input` itself when it is a
+    /// well-formed UUID (any spelling of a registered UUID finds it), else the
+    /// one registered characteristic whose spelling starts with `input`, as
+    /// REPL completion offers them. `known` is consulted only for a prefix.
+    static func resolvePeriphCharacteristic(
+        _ input: String, known: @autoclosure () -> [BLEUUID]
+    ) throws -> BLEUUID {
+        let parsed = Result { try BLEUUID(parsing: input) }
+        if case .success(let uuid) = parsed { return uuid }
         let lower = input.lowercased()
-        if let exact = known.first(where: { $0.lowercased() == lower }) {
-            return exact
+        let matches = known().filter { $0.string.lowercased().hasPrefix(lower) }
+        switch matches.count {
+        case 1:
+            return matches[0]
+        case 0:
+            return try parsed.get()
+        default:
+            throw AmbiguousCharacteristic(input: input, matches: matches.map(\.string).sorted())
         }
-        if let prefix = known.first(where: { $0.lowercased().hasPrefix(lower) }) {
-            return prefix
-        }
-        return input.uppercased()
     }
 
     private func mapPropertyName(_ prop: String) -> String {

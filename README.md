@@ -718,6 +718,14 @@ Starts advertising and runs until interrupted (Ctrl-C). Events (reads, writes, s
 `properties` may contain: `read`, `write`, `writeWithoutResponse`, `notify`, `indicate`.
 `format` accepts the same values as `--format` in `read`/`write`: `hex` (default), `utf8`, `uint8`, `uint16le`, `uint32le`, `float32le`, `base64`, `raw`.
 
+A UUID, in the config file, in `-S` and in `periph set`/`periph notify`, is 4 hex digits (`180F`), 8 hex digits (`0000180F`) or a 128-bit UUID written 8-4-4-4-12 (`6E400001-B5A3-F393-E0A9-E50E24DCCA9E`), in either case. Spellings of one UUID are interchangeable: a characteristic configured as `00002A19-0000-1000-8000-00805F9B34FB` is set with `periph set 2A19 ...`. Anything else, such as `0x180F` or `180G`, is an error naming the offending value (exit code 6):
+
+```
+Error: Invalid config: services[0].uuid: invalid UUID "180G": expected 4 or 8 hex digits, or a 128-bit UUID such as 6E400001-B5A3-F393-E0A9-E50E24DCCA9E
+```
+
+A characteristic cannot list descriptors. CoreBluetooth creates the Client Characteristic Configuration (`2902`) and Extended Properties (`2900`) descriptors itself from `properties`, and the only other descriptors it hosts, `2901` and `2904`, need values the config format does not carry. A config that lists any descriptor is rejected with exit code 6, and so is one that names a characteristic UUID twice, in any spelling, even in different services.
+
 **Examples:**
 
 ```sh
