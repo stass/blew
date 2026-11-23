@@ -56,6 +56,10 @@ public enum BLEEvent: Sendable {
         error: String?
     )
 
+    // Write-without-response flow control: the peripheral can accept another
+    // write without response (CBPeripheral.canSendWriteWithoutResponse became true)
+    case isReadyToSendWriteWithoutResponse(peripheralId: UUID)
+
     // Notification state
     case didUpdateNotificationState(
         peripheralId: UUID,

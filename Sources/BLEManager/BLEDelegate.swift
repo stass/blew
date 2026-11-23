@@ -141,6 +141,10 @@ extension BLEDelegate: CBPeripheralDelegate {
         ))
     }
 
+    func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        queue.enqueue(.isReadyToSendWriteWithoutResponse(peripheralId: peripheral.identifier))
+    }
+
     func peripheral(
         _ peripheral: CBPeripheral,
         didUpdateNotificationStateFor characteristic: CBCharacteristic,

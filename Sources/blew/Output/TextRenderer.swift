@@ -40,6 +40,14 @@ final class TextRenderer: OutputRenderer {
             renderPeriphEvent(record)
         case .subscriptionList(let uuids):
             renderSubscriptionList(uuids)
+        case .nusData(let record):
+            // A UART's bytes, unchanged: no newline, no decoding.
+            fflush(stdout)
+            FileHandle.standardOutput.write(record.data)
+        case .nusStatus(let status):
+            // stderr, so stdout carries only the device's bytes.
+            let detail = status.detail.isEmpty ? "" : ": \(status.detail)"
+            FileHandle.standardError.write(Data("nus \(status.event)\(detail)\n".utf8))
         case .message(let msg):
             Swift.print(msg)
         case .empty:

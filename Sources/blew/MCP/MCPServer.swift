@@ -111,6 +111,11 @@ final class BlewMCPServer {
             result = router.runPeriph(buildPeriphSetArgs("notify", args))
         case "ble_periph_status":
             result = router.runPeriph(["status"])
+        case "ble_nus":
+            let collector = StreamCollector()
+            var r = router.runNUS(buildNUSArgs(args), emit: { collector.collect($0) })
+            r.output = collector.items + r.output
+            result = r
         default:
             throw MCPError.methodNotFound("Unknown tool: \(params.name)")
         }
@@ -193,6 +198,12 @@ final class BlewMCPServer {
                 return .peripheralEvents(allEvents)
             case .subscriptionList(let uuids):
                 return .subscriptionList(uuids)
+            case .nusData, .nusStatus:
+                let bytes = output.reduce(into: Data()) { all, item in
+                    if case .nusData(let record) = item { all.append(record.data) }
+                }
+                return .nus(NUSTranscript(received: String(decoding: bytes, as: UTF8.self),
+                                          receivedHex: DataFormatter.format(bytes, as: "hex")))
             case .message(let msg):
                 return .message(msg)
             case .empty:
@@ -303,6 +314,19 @@ final class BlewMCPServer {
         return result
     }
 
+    func buildNUSArgs(_ args: [String: Value]) -> [String] {
+        var result = buildTargetingArgs(args)
+        if let send = args["send"]?.stringValue { result += ["--send", send] }
+        if let expect = args["expect"]?.stringValue { result += ["--expect", expect] }
+        if let dur = args["duration"]?.doubleValue ?? args["duration"]?.intValue.map(Double.init) {
+            result += ["-d", "\(dur)"]
+        }
+        if let wr = args["with_response"]?.boolValue {
+            result.append(wr ? "--with-response" : "--without-response")
+        }
+        return result
+    }
+
     func buildPeriphAdvArgs(_ args: [String: Value]) -> [String] {
         var result = ["adv"]
         if let name = args["name"]?.stringValue { result += ["-n", name] }
@@ -348,6 +372,7 @@ enum StructuredResult: Codable {
     case peripheralEvents([PeriphEventRecord])
     case subscriptionList([String])
     case message(String)
+    case nus(NUSTranscript)
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -355,7 +380,7 @@ enum StructuredResult: Codable {
         case characteristicInfo, connectionStatus, peripheralStatus
         case readValue, writeSuccess, notifications
         case peripheralSummary, peripheralEvents
-        case subscriptions, message
+        case subscriptions, message, nus
     }
 
     func encode(to encoder: Encoder) throws {
@@ -406,6 +431,9 @@ enum StructuredResult: Codable {
         case .message(let msg):
             try container.encode("message", forKey: .type)
             try container.encode(msg, forKey: .message)
+        case .nus(let transcript):
+            try container.encode("nus", forKey: .type)
+            try container.encode(transcript, forKey: .nus)
         }
     }
 
@@ -428,6 +456,7 @@ enum StructuredResult: Codable {
         case "peripheralEvents": self = .peripheralEvents(try container.decode([PeriphEventRecord].self, forKey: .peripheralEvents))
         case "subscriptionList": self = .subscriptionList(try container.decode([String].self, forKey: .subscriptions))
         case "message":          self = .message(try container.decode(String.self, forKey: .message))
+        case "nus":              self = .nus(try container.decode(NUSTranscript.self, forKey: .nus))
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container,
                 debugDescription: "Unknown StructuredResult type: \(type)")
@@ -652,6 +681,20 @@ extension BlewMCPServer {
             description: "Show the current peripheral advertising state.",
             inputSchema: .object(["type": .string("object"), "properties": .object([:])]),
             annotations: .init(readOnlyHint: true, openWorldHint: false)
+        ),
+        Tool(
+            name: "ble_nus",
+            description: "Talk to a device's Nordic UART Service (NUS). Connects (by default to the strongest device advertising NUS), subscribes to TX, writes `send` to RX in MTU-sized chunks, and collects what the device sends back until `expect` arrives or `duration` seconds pass after sending. Returns the received bytes as text and hex; with `expect`, the call fails if the text does not arrive.",
+            inputSchema: .object([
+                "type": .string("object"),
+                "properties": .object(targetingProperties.merging([
+                    "send":          .object(["type": .string("string"), "description": .string("Text to send; printf-style escapes \\n \\r \\t \\0 \\\\ \\xHH are decoded. No newline is added.")]),
+                    "expect":        .object(["type": .string("string"), "description": .string("Text to wait for (same escapes); the call succeeds once it arrives")]),
+                    "duration":      .object(["type": .string("number"), "description": .string("Seconds to listen after sending (default 1); with expect, the deadline for it (default 5)")]),
+                    "with_response": .object(["type": .string("boolean"), "description": .string("true = write with response, false = without response, omit = auto")]),
+                ]) { $1 }),
+            ]),
+            annotations: .init(readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true)
         ),
     ]
 

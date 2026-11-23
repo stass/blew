@@ -12,6 +12,7 @@ final class BLEEventProcessor: @unchecked Sendable {
     private let lock = NSLock()
 
     private var stateCallbacks: [(CBManagerState) -> Void] = []
+    private var disconnectCallbacks: [(UUID) -> Void] = []
     private var connectContinuation: CheckedContinuation<Void, Error>?
     private var disconnectContinuation: CheckedContinuation<Void, Error>?
     private var discoverServicesContinuation: CheckedContinuation<[String], Error>?
@@ -20,6 +21,7 @@ final class BLEEventProcessor: @unchecked Sendable {
     private var readContinuations: [String: CheckedContinuation<Data, Error>] = [:]
     private var writeContinuations: [String: CheckedContinuation<Void, Error>] = [:]
     private var subscribeContinuations: [String: CheckedContinuation<Void, Error>] = [:]
+    private var writeReadyContinuation: CheckedContinuation<Void, Error>?
 
     // Streams for continuous data
     private var scanContinuation: AsyncStream<DiscoveredDevice>.Continuation?
@@ -51,6 +53,14 @@ final class BLEEventProcessor: @unchecked Sendable {
     func onStateChange(_ callback: @escaping @Sendable (CBManagerState) -> Void) {
         lock.lock()
         stateCallbacks.append(callback)
+        lock.unlock()
+    }
+
+    /// Called for every disconnect, including one the device or the link
+    /// caused, so the facade can forget the connection.
+    func onDisconnect(_ callback: @escaping @Sendable (UUID) -> Void) {
+        lock.lock()
+        disconnectCallbacks.append(callback)
         lock.unlock()
     }
 
@@ -113,6 +123,19 @@ final class BLEEventProcessor: @unchecked Sendable {
         lock.unlock()
     }
 
+    func setWriteReadyContinuation(_ cont: CheckedContinuation<Void, Error>?) {
+        lock.lock()
+        writeReadyContinuation = cont
+        lock.unlock()
+    }
+
+    /// Resume a pending write-ready wait because the peripheral was found ready
+    /// when polled; a no-op when the ready event already resumed it.
+    func resumeWriteReady() {
+        lock.lock(); let c = writeReadyContinuation; writeReadyContinuation = nil; lock.unlock()
+        c?.resume()
+    }
+
     func setNotificationContinuation(forChar uuid: String, _ cont: AsyncStream<Data>.Continuation?) {
         lock.lock()
         notificationContinuations[uuid] = cont
@@ -153,6 +176,11 @@ final class BLEEventProcessor: @unchecked Sendable {
 
     func cancelWriteContinuation(forChar uuid: String) {
         lock.lock(); let c = writeContinuations.removeValue(forKey: uuid); lock.unlock()
+        c?.resume(throwing: CancellationError())
+    }
+
+    func cancelWriteReadyContinuation() {
+        lock.lock(); let c = writeReadyContinuation; writeReadyContinuation = nil; lock.unlock()
         c?.resume(throwing: CancellationError())
     }
 
@@ -202,7 +230,8 @@ final class BLEEventProcessor: @unchecked Sendable {
                 cont.resume(throwing: BLEError.connectionFailed(error ?? "unknown"))
             }
 
-        case .didDisconnect(_, let error):
+        case .didDisconnect(let peripheralId, let error):
+            for cb in disconnectCallbacks { cb(peripheralId) }
             if let cont = disconnectContinuation {
                 disconnectContinuation = nil
                 cont.resume()
@@ -243,6 +272,10 @@ final class BLEEventProcessor: @unchecked Sendable {
                 cont.resume(throwing: connError)
             }
             subscribeContinuations.removeAll()
+            if let cont = writeReadyContinuation {
+                writeReadyContinuation = nil
+                cont.resume(throwing: connError)
+            }
 
         case .didDiscoverServices(_, let uuids, let error):
             if let cont = discoverServicesContinuation {
@@ -293,6 +326,12 @@ final class BLEEventProcessor: @unchecked Sendable {
                 } else {
                     cont.resume()
                 }
+            }
+
+        case .isReadyToSendWriteWithoutResponse:
+            if let cont = writeReadyContinuation {
+                writeReadyContinuation = nil
+                cont.resume()
             }
 
         case .didUpdateNotificationState(_, let charUUID, _, let error):

@@ -32,6 +32,9 @@ public final class BLECentral: @unchecked Sendable {
             self?.cbState = state
             self?.stateLock.unlock()
         }
+        processor.onDisconnect { [weak self] id in
+            self?.forgetConnection(to: id)
+        }
         processor.start()
     }
 
@@ -185,6 +188,20 @@ public final class BLECentral: @unchecked Sendable {
         }
 
         stateLock.withLock {
+            connectedPeripheralId = nil
+            connectedPeripheralName = nil
+            discoveredServices = []
+            discoveredCharacteristics = []
+            activeSubscriptions = []
+        }
+    }
+
+    /// Clear the connection state after the peripheral `id` disconnected,
+    /// whoever caused it, so status() reports it and a later connect starts
+    /// fresh.
+    private func forgetConnection(to id: UUID) {
+        stateLock.withLock {
+            guard connectedPeripheralId == id else { return }
             connectedPeripheralId = nil
             connectedPeripheralName = nil
             discoveredServices = []
@@ -381,9 +398,36 @@ public final class BLECentral: @unchecked Sendable {
                 self.processor.cancelWriteContinuation(forChar: writeUUID)
             }
         } else {
+            // CoreBluetooth drops a write without response issued while
+            // canSendWriteWithoutResponse is false, so wait until it is ready.
+            // The check runs on cbQueue after any earlier write, and the
+            // ready event resumes the wait if the peripheral was not ready.
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                    processor.setWriteReadyContinuation(cont)
+                    cbQueue.async {
+                        if peripheral.canSendWriteWithoutResponse {
+                            self.processor.resumeWriteReady()
+                        }
+                    }
+                }
+            } onCancel: {
+                self.processor.cancelWriteReadyContinuation()
+            }
             cbQueue.async {
                 peripheral.writeValue(data, for: c, type: cbType)
             }
+        }
+    }
+
+    /// Largest value a single write of the given kind carries on the current
+    /// connection. Without response it is the negotiated ATT MTU minus 3.
+    public func maximumWriteLength(withResponse: Bool) throws -> Int {
+        guard let peripheral = try getConnectedPeripheral() else {
+            throw BLEError.notConnected
+        }
+        return cbQueue.sync {
+            peripheral.maximumWriteValueLength(for: withResponse ? .withResponse : .withoutResponse)
         }
     }
 

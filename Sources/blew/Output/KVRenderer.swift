@@ -50,6 +50,10 @@ final class KVRenderer: OutputRenderer {
             for uuid in uuids {
                 printKV([("subscription", uuid)])
             }
+        case .nusData(let record):
+            printKV([("ts", record.timestamp), ("rx", DataFormatter.format(record.data, as: "hex"))])
+        case .nusStatus(let status):
+            printKV([("nus", status.event), ("detail", status.detail)])
         case .message(let msg):
             Swift.print(msg)
         case .empty:

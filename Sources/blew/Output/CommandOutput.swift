@@ -24,6 +24,8 @@ enum CommandOutput {
     case peripheralSummary(PeriphSummaryResult)
     case peripheralEvent(PeriphEventRecord)
     case subscriptionList([String])
+    case nusData(NUSData)
+    case nusStatus(NUSStatus)
     case message(String)
     case empty
 }
@@ -104,6 +106,26 @@ struct NotificationValue: Codable {
     let char: String
     let name: String?
     let value: String
+}
+
+/// Bytes received from a device's Nordic UART Service TX characteristic.
+struct NUSData: Codable {
+    let timestamp: String
+    let data: Data
+}
+
+/// A `nus` bridge event: `bridge` (the local endpoint), `connected`,
+/// `client` (a TCP client came or went), `disconnected`, `reconnecting`.
+struct NUSStatus: Codable, Equatable {
+    let event: String
+    let detail: String
+}
+
+/// What an MCP `ble_nus` call received, all notifications joined.
+struct NUSTranscript: Codable, Equatable {
+    /// The bytes as UTF-8, invalid sequences replaced.
+    let received: String
+    let receivedHex: String
 }
 
 // MARK: - Peripheral types

@@ -67,7 +67,7 @@ final class REPL {
     private func setupCompletion() {
         let commands = [
             "scan", "connect", "disconnect", "status",
-            "gatt", "read", "write", "sub", "periph",
+            "gatt", "read", "write", "sub", "nus", "periph",
             "sleep", "help", "quit", "exit",
         ]
         let gattSubs = ["svcs", "tree", "chars", "desc", "info"]

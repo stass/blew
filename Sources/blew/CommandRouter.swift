@@ -70,6 +70,8 @@ final class CommandRouter {
             result = runSub(Array(tokens.dropFirst()), emit: { [self] item in renderer.render(item) })
         case "periph":
             result = runPeriph(Array(tokens.dropFirst()), emit: { [self] item in renderer.render(item) })
+        case "nus":
+            result = runNUS(Array(tokens.dropFirst()), emit: { [self] item in renderer.render(item) })
         case "sleep":
             result = runSleep(Array(tokens.dropFirst()))
         case "help":
@@ -111,6 +113,7 @@ final class CommandRouter {
             "  \(cmd("periph")) \(cmd("stop"))",
             "  \(cmd("periph")) \(cmd("set")) [-f <fmt>] <char> <value>",
             "  \(cmd("periph")) \(cmd("notify")) [-f <fmt>] <char> <value>",
+            "  \(cmd("nus")) \(targeting) [-s <text>] [--file <path>] [-e <text>] [-d <sec>] [--pty] [-l <port>] [--reconnect] [-r|-w]",
             "  \(cmd("sleep")) <seconds>",
             "  \(cmd("help"))",
             "  \(cmd("quit"))/\(cmd("exit"))",
@@ -1013,7 +1016,7 @@ final class CommandRouter {
 
     // MARK: - Interrupt-aware wait
 
-    private enum CommandOutcome { case completed, interrupted, timedOut }
+    enum CommandOutcome { case completed, interrupted, timedOut }
 
     /// Block the calling (main) thread until the semaphore is signalled, polling
     /// every 50 ms. If a Ctrl-C interrupt arrives, the task is cancelled and we
@@ -1021,7 +1024,7 @@ final class CommandRouter {
     /// provided and the deadline passes before the task finishes, the task is
     /// cancelled and we return `.timedOut`.
     @discardableResult
-    private func waitInterruptible(
+    func waitInterruptible(
         _ task: Task<Void, Never>,
         semaphore: DispatchSemaphore,
         timeout: TimeInterval? = nil
@@ -1916,7 +1919,7 @@ private final class ScanWatchDisplay {
     }
 }
 
-private extension ISO8601DateFormatter {
+extension ISO8601DateFormatter {
     static let shared: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]

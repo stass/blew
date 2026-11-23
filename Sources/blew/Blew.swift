@@ -27,6 +27,7 @@ struct Blew: AsyncParsableCommand {
             ReadCommand.self,
             WriteCommand.self,
             SubCommand.self,
+            NUSCommand.self,
             PeriphCommand.self,
             ExecCommand.self,
         ]
