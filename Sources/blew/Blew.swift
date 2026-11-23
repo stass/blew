@@ -39,6 +39,24 @@ struct Blew: AsyncParsableCommand {
 
     @OptionGroup var globals: GlobalOptions
 
+    /// ArgumentParser's own main reports any thrown error with exit code 1
+    /// and prints "Error: exit code N". Commands have already reported their
+    /// errors when they throw BlewExitCode, so exit with its code quietly.
+    static func main() async {
+        do {
+            var command = try parseAsRoot()
+            if var asyncCommand = command as? AsyncParsableCommand {
+                try await asyncCommand.run()
+            } else {
+                try command.run()
+            }
+        } catch let code as BlewExitCode {
+            Foundation.exit(code.code)
+        } catch {
+            exit(withError: error)
+        }
+    }
+
     mutating func validate() throws {
         GlobalOptions.current = globals
     }

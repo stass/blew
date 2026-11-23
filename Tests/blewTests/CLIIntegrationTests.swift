@@ -113,6 +113,16 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertNotEqual(result.exitCode, 0)
     }
 
+    /// The README documents the exit codes; a subcommand must exit with them,
+    /// not with ArgumentParser's generic 1.
+    func testSubcommandExitsWithDocumentedCode() throws {
+        guard blewAvailable() else { throw XCTSkip("blew binary not built") }
+        XCTAssertEqual(try runBlew(["gatt", "info", "ZZZZ"]).exitCode, BlewExitCode.notFound.code)
+        let nus = try runBlew(["nus", "--pty", "--expect", "x"])
+        XCTAssertEqual(nus.exitCode, BlewExitCode.invalidArguments.code)
+        XCTAssertFalse(nus.stderr.contains("exit code"), nus.stderr)
+    }
+
     func testGATTInfoUnknownUUIDPrintsError() throws {
         guard blewAvailable() else { throw XCTSkip("blew binary not built") }
         let result = try runBlew(["gatt", "info", "ZZZZ"])
