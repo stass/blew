@@ -8,30 +8,53 @@ final class REPL {
     private let ln: LineNoise
     private let historyPath: String
 
-    init(globals: GlobalOptions) {
+    static let defaultHistoryPath = NSHomeDirectory() + "/.config/blew/history"
+
+    /// Whether a person is typing. Otherwise standard input is a script.
+    private var isInteractive: Bool {
+        return ln.mode != .notATTY
+    }
+
+    init(globals: GlobalOptions, lineNoise: LineNoise = LineNoise(),
+         historyPath: String = REPL.defaultHistoryPath) {
         self.globals = globals
         self.router = CommandRouter(globals: globals, isInteractiveMode: true)
-        self.ln = LineNoise()
-        let configDir = NSHomeDirectory() + "/.config/blew"
-        self.historyPath = configDir + "/history"
+        self.ln = lineNoise
+        self.historyPath = historyPath
 
-        setupHistoryDirectory(configDir)
-        try? ln.loadHistory(fromFile: historyPath)
+        if isInteractive {
+            setupHistoryDirectory((historyPath as NSString).deletingLastPathComponent)
+            try? ln.loadHistory(fromFile: historyPath)
+        }
         setupCompletion()
     }
 
-    func run() {
-        print("blew — type 'help' for commands, 'quit' to exit")
+    /// Reads and runs commands until `quit`, `exit` or end of input.
+    ///
+    /// When standard input is not a terminal it is a script, run the way
+    /// `exec` runs one: one command per line, no prompt or banner, the
+    /// history file neither read nor written, and the first failing command
+    /// ends the run with its exit code.
+    /// - Throws: a failing script command's `BlewExitCode`;
+    ///   `BlewExitCode.invalidArguments` for a script line that is not valid
+    ///   UTF-8; `BlewExitCode.operationFailed` when the terminal or standard
+    ///   input cannot be read or written. Each is reported first.
+    func run() throws {
+        if isInteractive {
+            print("blew — type 'help' for commands, 'quit' to exit")
+        }
+        defer {
+            if isInteractive {
+                try? ln.saveHistory(toFile: historyPath)
+            }
+        }
 
         while true {
             do {
+                // LineNoise writes the prompt straight to the terminal, so
+                // output buffered by print() must go out first.
+                fflush(stdout)
                 let line = try ln.getLine(prompt: "blew> ")
-
-                // linenoise-swift doesn't write a newline when Enter is pressed (OPOST
-                // is disabled in raw mode, so \n ≠ \r\n). Write one now while the
-                // terminal is back in cooked mode so the cursor lands on a fresh line
-                // before any command output (or the next prompt) is printed.
-                FileHandle.standardOutput.write(Data("\n".utf8))
 
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 guard !trimmed.isEmpty else { continue }
@@ -42,19 +65,29 @@ final class REPL {
                     break
                 }
 
-                let _ = router.dispatch(trimmed)
+                let result = router.dispatch(trimmed)
+                if !isInteractive && result.exitCode != 0 {
+                    throw BlewExitCode(result.exitCode)
+                }
 
             } catch LinenoiseError.CTRL_C {
                 print("^C")
                 continue
             } catch LinenoiseError.EOF {
                 break
-            } catch {
-                break
+            } catch LinenoiseError.invalidUTF8 {
+                let message = LinenoiseError.invalidUTF8.description
+                if isInteractive {
+                    router.output.printError(message + "; skipped")
+                    continue
+                }
+                router.output.printError(message)
+                throw BlewExitCode.invalidArguments
+            } catch let error as LinenoiseError {
+                router.output.printError(error.description)
+                throw BlewExitCode.operationFailed
             }
         }
-
-        try? ln.saveHistory(toFile: historyPath)
     }
 
     private func setupHistoryDirectory(_ dir: String) {

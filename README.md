@@ -518,6 +518,12 @@ The REPL provides:
 - **Persistent history** — saved to `~/.config/blew/history` across sessions
 - **Tab completion** — commands, known UUIDs after GATT discovery, and format names
 
+When standard input is not a terminal, the REPL runs it as a script, the way `exec` runs one: one command per line, without a prompt, banner or line editing, until end of input. The first failing command ends the run with its exit code; a line that is not valid UTF-8 exits with code 6, and an unreadable standard input with code 5. A script neither reads nor writes the history file.
+
+```sh
+% printf 'gatt info 2A19\n' | blew
+```
+
 ### REPL commands
 
 | Command | Description |
@@ -666,7 +672,7 @@ The `name=` field is included when the UUID is a known Bluetooth SIG UUID. It is
 | `2` | Not found / no matching device |
 | `3` | Bluetooth unavailable or permission denied |
 | `4` | Timeout |
-| `5` | Operation failed (connect / GATT / read / write / subscribe) |
+| `5` | Operation failed (connect / GATT / read / write / subscribe, or the REPL cannot read or write its terminal or standard input) |
 | `6` | Invalid arguments |
 
 ---

@@ -470,10 +470,12 @@ The `hex` and `raw` formats both produce hex output but differ: `hex` is a compa
 
 `REPL` wraps `LineNoise` (from the `LineNoise` target) and `CommandRouter`.
 
-- History file: `~/.config/blew/history`, loaded on init, saved on clean exit
+- History file: `~/.config/blew/history`, for interactive input only: loaded on init, saved whenever `run()` returns or throws
 - Prompt: `blew> `
 - `Ctrl-C` during REPL: prints `^C` and continues (does not exit)
 - `EOF` or `quit`/`exit`: saves history and returns
+- Input that is not a terminal is a script: `LineNoise` reads it one line at a time without a prompt or editing; the REPL prints no banner, neither loads nor saves the history file, and throws the exit code of the first failing command, as `exec` does. A line that is not valid UTF-8 is an invalid argument (6) in a script and is skipped with an error at a terminal. A read or write error on the terminal or standard input exits 5.
+- `LineNoise` decodes typed UTF-8 (`UTF8Input`) and edits the line as grapheme clusters (`EditState`: a `[Character]` and an integer cursor).
 
 Tab completion is registered via `LineNoise.setCompletionCallback`. The callback receives the current buffer and returns an array of replacement strings. Coverage:
 

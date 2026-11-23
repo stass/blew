@@ -64,8 +64,8 @@ struct Blew: AsyncParsableCommand {
     mutating func run() async throws {
         installSignalHandlers()
         let repl = REPL(globals: globals)
-        repl.run()
-        cleanupBeforeExit()
+        defer { cleanupBeforeExit() }
+        try repl.run()
     }
 }
 

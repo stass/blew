@@ -67,6 +67,7 @@ let package = Package(
             name: "blewTests",
             dependencies: [
                 "blew",
+                "LineNoise",
             ] + mcpTargetDependency,
             swiftSettings: [.swiftLanguageMode(.v5)] + mcpSwiftSettings
         ),

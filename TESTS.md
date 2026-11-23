@@ -34,6 +34,12 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 
 `TokenizerTests`, `ArgParsingHelperTests` — unit tests for the internal tokenizer and option-parsing helpers in `CommandRouter`. These call `internal` methods directly.
 
+**Line editor**
+
+`LineNoiseTests` — drive the vendored line editor through pipes: raw-mode key handling (UTF-8 input assembly, invalid sequences, Ctrl-T, backspace and delete around multibyte characters), the bytes written to the terminal, and non-TTY input (one line per command, end of input, invalid UTF-8, read errors). A pseudo-terminal checks the newline written after a raw-mode line.
+
+`REPLScriptTests` — the REPL with a pipe as standard input: a script runs to end of input without touching the history, and the first failing command, an invalid UTF-8 line and an unreadable input end it with codes 6, 6 and 5.
+
 **Command routing and scripting**
 
 `CommandDispatchTests`, `ExecuteScriptTests` — exercise `CommandRouter.dispatch()` and `executeScript()` using commands that do not require a BLE connection (`help`, `gatt info`, `periph stop/status`, `sub status`, `sleep`). Error paths and exit codes are verified directly.

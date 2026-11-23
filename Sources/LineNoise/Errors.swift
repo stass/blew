@@ -34,4 +34,20 @@ public enum LinenoiseError: Error {
     case generalError(String)
     case EOF
     case CTRL_C
+    /// A line read without editing (input that is not a terminal, or a
+    /// terminal LineNoise does not support) is not valid UTF-8. The whole
+    /// line, through its newline, has been consumed.
+    case invalidUTF8
+}
+
+extension LinenoiseError: CustomStringConvertible {
+    public var description: String {
+        switch self {
+        case .notATTY: return "input is not a terminal"
+        case .generalError(let message): return message
+        case .EOF: return "end of input"
+        case .CTRL_C: return "interrupted"
+        case .invalidUTF8: return "input line is not valid UTF-8"
+        }
+    }
 }

@@ -61,17 +61,6 @@ later release. Delete an item in the commit that fixes it, citing its ID
   inner Task. `duration: "5"` (a string) passes neither `-c` nor `-d`, so the
   subscription is unbounded. Subscription setup and NUS writes also have no
   operation deadline (`CommandRouter.swift:948`).
-- [ ] **B9. LineNoise has no UTF-8 support.**
-  - `Sources/LineNoise/linenoise.swift:668` reads each byte as Latin-1, so
-    typing `é` sends `C3 83 C2 A9` to the device and saves mojibake to
-    history.
-  - `:213` writes `text.count` (graphemes) as the byte length, which
-    truncates the output and cuts escape sequences.
-  - `EditState.swift:179-180`: Ctrl-T next to a multibyte character traps
-    (index out of bounds).
-  - `EditState.swift:53-67,114`: backspace and delete leave stale indices
-    *(plausible)*.
-  - Commit a3d3d69 fixed only the names generator script.
 - [ ] **B11. `blew -t inf scan -w` crashes.** `CommandRouter.swift:164`,
   `:265`, `:349` → `BLEManager.swift:99`. Watch mode skips
   `isValidDuration`, and `UInt64(inf * 1e9)` traps.
@@ -212,10 +201,6 @@ later release. Delete an item in the commit that fixes it, citing its ID
   `CommandRouter.swift:25`.
 - [ ] **C2. `periph clone --save` reports success when the write fails.**
   `CommandRouter.swift:1606-1613` (`try?`).
-- [ ] **C3. Non-TTY input loops forever.** `linenoise.swift:499` returns `""`
-  instead of reading the line or reporting EOF. `blew </dev/null` spins,
-  printing newlines (`Sources/blew/REPL/REPL.swift:28-34`). `readCharacter`
-  returns 0 on a read error, which inserts a NUL.
 - [ ] **C4. Values starting with `-` cannot be written.**
   `CommandRouter.swift:799`, `:804`. `write -f float32le fff1 -1.5` fails,
   even after `--`.
@@ -324,10 +309,16 @@ later release. Delete an item in the commit that fixes it, citing its ID
 - [ ] `quit` and `exit` are not recognized in exec.
   `CommandRouter.swift:80-85`.
 - [ ] LineNoise key handling:
-  - A bare Esc swallows the next two keys (`linenoise.swift:526`).
+  - A bare Esc swallows the next two keys (`linenoise.swift:555`).
   - `ESC[1;5C` inserts "5C".
-  - Cursor columns count graphemes, not display width (`:220`, `:340`).
-- [ ] REPL history: `try?` load at `REPL.swift:20`; invalid UTF-8 history
+  - Cursor columns count graphemes, not display width (`:234`, `:349`).
+- [ ] LineNoise input hygiene (`linenoise.swift`):
+  - Typed or pasted C0 and C1 controls and bidi overrides are inserted and
+    echoed raw by `refreshLine` (`:340`); pasting `C2 9B` (8-bit CSI) can
+    drive the terminal. Reject them or show them as `^X`.
+  - `readUneditedLine` (`:504`) has no line length limit: `blew </dev/zero`
+    grows memory until killed.
+- [ ] REPL history: `try?` load at `REPL.swift:27`; invalid UTF-8 history
   is overwritten on save.
 - [ ] NUS TCP and pty details (`NUSPort.swift`):
   - `isLoopback` matches by name prefix (`:188`).
