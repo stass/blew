@@ -139,7 +139,11 @@ Runs a permanent `while running` loop on a dedicated `Thread` named `blew.event-
 
 `didUpdateValue` is the one event that serves two purposes: if a one-shot read continuation is registered for that UUID it is fulfilled and removed; otherwise the value is yielded to the notification stream.
 
-On `didDisconnect`, all active notification streams are finished and any pending continuations are failed. Registered disconnect callbacks run too, so `BLECentral` forgets a connection the device or the link ended, not only one it ended itself: `status()` then reports it and auto-connect starts afresh.
+The processor serves one connection at a time, its `link`: `connecting(peripheral, continuation)` from `beginConnect(to:)` until `didConnect`, then `connected(peripheral)` until `didDisconnect`. A `didFailToConnect` or a cancelled connect (`cancelConnect`) clears it. The link is the one record of which peripheral is connected: `BLECentral` reads it (`connectedPeripheralId`) and keeps no copy.
+
+Every one-shot continuation and notification stream belongs to the link. Events of any other peripheral are dropped before dispatch (`BLEEvent.connectionPeripheralId`); only the central's state and scan results belong to no peripheral. A late `didConnect`, `didDisconnect` or GATT result of a device blew stopped connecting to, or disconnected, therefore cannot complete or fail an operation on the current one. The match is by peripheral, not by attempt: a stale event of an earlier attempt to the same device reaches a new attempt to it.
+
+When the link ends (`didDisconnect` of its peripheral, or a `beginConnect` while a link is still held), all active notification streams are finished and any pending continuations are failed. Registered disconnect callbacks run too, so `BLECentral` forgets a connection the device or the link ended, not only one it ended itself; they run before a waiting `beginDisconnect(from:)` resumes, so `disconnect()` returns with the state cleared.
 
 ### 3.5 BLECentral (central facade)
 
@@ -149,13 +153,13 @@ Responsibilities:
 
 - Owns `CBCentralManager`, `BLEDelegate`, `BLEEventQueue`, `BLEEventProcessor`
 - Serializes all CoreBluetooth calls onto `blew.cb` (a dedicated serial `DispatchQueue`)
-- Maintains connection state under `NSLock`: connected peripheral ID/name, all discovered `CBService` and `CBCharacteristic` objects, active subscription UUIDs
+- Caches the connection's name, all discovered `CBService` and `CBCharacteristic` objects and active subscription UUIDs under `NSLock`. Which peripheral is connected is the processor's link; the cache is written only while that peripheral is connected (`updateConnection`) and cleared by the disconnect callback
 - Exposes an async/await API that bridges to the continuation/stream model
 
 Key behaviors:
 
 - **`scan(timeout:allowDuplicates:)`** — starts `CBCentralManager.scanForPeripherals`, returns `AsyncStream<DiscoveredDevice>`. When `timeout` is non-nil, a background `Task` stops scanning after that many seconds and finishes the stream. When `timeout` is `nil` the stream runs until the caller cancels (used by `--watch` mode). `allowDuplicates` maps directly to `CBCentralManagerScanOptionAllowDuplicatesKey`; watch mode passes `true` so RSSI updates arrive continuously.
-- **`connect(deviceId:timeout:)`** — looks up the peripheral in the delegate's cache or via `retrievePeripherals(withIdentifiers:)`, connects, then immediately runs full GATT discovery (all services, all characteristics for each service) so subsequent read/write/subscribe calls can proceed without additional discovery round-trips.
+- **`connect(deviceId:timeout:)`** — looks up the peripheral in the delegate's cache or via `retrievePeripherals(withIdentifiers:)`, connects, then immediately runs full GATT discovery (all services, all characteristics for each service) so subsequent read/write/subscribe calls can proceed without additional discovery round-trips. blew holds one connection: the connected device is disconnected first, also when it is the one asked for, so every connect runs connect and discovery afresh. A connect that ends without a connection (cancelled by an interrupt or the caller's timeout, or failed) also calls `cancelPeripheralConnection`, because CoreBluetooth otherwise keeps the connect pending and connects the device later. Ordering on `blew.cb` makes this hold for every interleaving: the queued `connect` runs only while the processor still waits for that peripheral, and the cancel is queued after the wait ended. A cancel that lands just after `didConnect` disconnects the device instead.
 - **`writeCharacteristic(_:data:type:)`** — a write with response waits for `didWriteValue`. A write without response first waits until `canSendWriteWithoutResponse` is true (polled on `blew.cb` after any earlier write, or signalled by `peripheralIsReady(toSendWriteWithoutResponse:)`), because CoreBluetooth silently drops one issued while it is false.
 - **`maximumWriteLength(withResponse:)`** — `maximumWriteValueLength(for:)` of the connection; without response it is the ATT MTU minus 3.
 - **`subscribe(characteristicUUID:)`** — enables notifications via `setNotifyValue(true)`, waits for the state-change callback to confirm, then returns `AsyncStream<Data>`. On stream termination, disables notifications and removes the subscription.

@@ -2,7 +2,8 @@ import Foundation
 import CoreBluetooth
 
 /// Drains the BLEEventQueue on a dedicated thread and dispatches events
-/// to registered continuations and async streams.
+/// to registered continuations and async streams. It serves one connection
+/// at a time (`link`), and owns the fact of which peripheral is connected.
 final class BLEEventProcessor: @unchecked Sendable {
     private let eventQueue: BLEEventQueue
     private var thread: Thread?
@@ -11,9 +12,28 @@ final class BLEEventProcessor: @unchecked Sendable {
     // Continuations for one-shot operations
     private let lock = NSLock()
 
+    /// The connection the processor serves. Every one-shot wait and
+    /// notification stream belongs to it, and events of any other peripheral
+    /// are dropped.
+    private enum Link {
+        /// A connect was started and waits for the peripheral.
+        case connecting(UUID, CheckedContinuation<Void, Error>)
+        /// The peripheral connected; it is served until it disconnects.
+        case connected(UUID)
+
+        var peripheralId: UUID {
+            switch self {
+            case .connecting(let id, _), .connected(let id): return id
+            }
+        }
+    }
+
+    /// Set by beginConnect; cleared when that connect fails or is cancelled
+    /// and when the peripheral disconnects.
+    private var link: Link?
+
     private var stateCallbacks: [(CBManagerState) -> Void] = []
     private var disconnectCallbacks: [(UUID) -> Void] = []
-    private var connectContinuation: CheckedContinuation<Void, Error>?
     private var disconnectContinuation: CheckedContinuation<Void, Error>?
     private var discoverServicesContinuation: CheckedContinuation<[String], Error>?
     private var discoverCharsContinuations: [String: CheckedContinuation<[BLEEvent.DiscoveredCharacteristic], Error>] = [:]
@@ -56,8 +76,8 @@ final class BLEEventProcessor: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// Called for every disconnect, including one the device or the link
-    /// caused, so the facade can forget the connection.
+    /// Called when the served connection ends (a disconnect, including one
+    /// the device or the link caused), so the facade can forget it.
     func onDisconnect(_ callback: @escaping @Sendable (UUID) -> Void) {
         lock.lock()
         disconnectCallbacks.append(callback)
@@ -75,16 +95,49 @@ final class BLEEventProcessor: @unchecked Sendable {
         }
     }
 
-    func setConnectContinuation(_ cont: CheckedContinuation<Void, Error>?) {
-        lock.lock()
-        connectContinuation = cont
-        lock.unlock()
+    /// The peripheral that is connected, nil while none is (also while a
+    /// connect is still waiting).
+    var connectedPeripheralId: UUID? {
+        lock.withLock {
+            if case .connected(let id) = link { return id }
+            return nil
+        }
     }
 
-    func setDisconnectContinuation(_ cont: CheckedContinuation<Void, Error>?) {
+    /// Whether a connect to `peripheral` is waiting for it.
+    func isConnecting(to peripheral: UUID) -> Bool {
+        lock.withLock {
+            if case .connecting(let id, _) = link { return id == peripheral }
+            return false
+        }
+    }
+
+    /// Start serving `peripheral` and wait for it to connect: `cont` resumes
+    /// on its didConnect, or fails on its didFailToConnect or didDisconnect.
+    /// Events of every other peripheral are dropped from here on. The caller
+    /// disconnects the current device first; a link still held is ended in
+    /// blew's state only, so its device would stay connected.
+    func beginConnect(to peripheral: UUID, _ cont: CheckedContinuation<Void, Error>) {
         lock.lock()
+        let ended = endLink(BLEError.connectionFailed("replaced by a connect to \(peripheral.uuidString)"))
+        link = .connecting(peripheral, cont)
+        lock.unlock()
+        for effect in ended { effect() }
+    }
+
+    /// Wait for the connected `peripheral` to disconnect. Returns true when
+    /// the caller must now cancel the connection; when `peripheral` is not
+    /// connected, `cont` resumes at once and this returns false.
+    func beginDisconnect(from peripheral: UUID, _ cont: CheckedContinuation<Void, Error>) -> Bool {
+        lock.lock()
+        guard case .connected(peripheral) = link else {
+            lock.unlock()
+            cont.resume()
+            return false
+        }
         disconnectContinuation = cont
         lock.unlock()
+        return true
     }
 
     func setDiscoverServicesContinuation(_ cont: CheckedContinuation<[String], Error>?) {
@@ -144,9 +197,15 @@ final class BLEEventProcessor: @unchecked Sendable {
 
     // MARK: - Cancellation
 
-    func cancelConnectContinuation() {
-        lock.lock(); let c = connectContinuation; connectContinuation = nil; lock.unlock()
-        c?.resume(throwing: CancellationError())
+    /// End a waiting connect with CancellationError and stop serving its
+    /// peripheral. A connect that already completed is left alone: its
+    /// peripheral is served until it disconnects.
+    func cancelConnect() {
+        lock.lock()
+        guard case .connecting(_, let cont) = link else { lock.unlock(); return }
+        link = nil
+        lock.unlock()
+        cont.resume(throwing: CancellationError())
     }
 
     func cancelDisconnectContinuation() {
@@ -209,10 +268,13 @@ final class BLEEventProcessor: @unchecked Sendable {
     /// effects (yielding to or finishing streams, resuming waits, calling
     /// callbacks) for the caller to run after unlocking. Effects must not run
     /// under the lock: a stream's termination handler and a callback may call
-    /// back into the processor, and NSLock is not recursive.
+    /// back into the processor, and NSLock is not recursive. An event of a
+    /// peripheral other than the one served has no effects.
     func handleEvent(_ event: BLEEvent) -> [() -> Void] {
         lock.lock()
         defer { lock.unlock() }
+
+        if let target = event.connectionPeripheralId, target != link?.peripheralId { return [] }
 
         switch event {
         case .centralStateChanged(let state):
@@ -229,42 +291,18 @@ final class BLEEventProcessor: @unchecked Sendable {
             guard let stream = scanContinuation else { return [] }
             return [{ stream.yield(device) }]
 
-        case .didConnect:
-            guard let cont = Self.take(&connectContinuation) else { return [] }
+        case .didConnect(let id):
+            guard case .connecting(_, let cont) = link else { return [] }
+            link = .connected(id)
             return [{ cont.resume() }]
 
         case .didFailToConnect(_, let error):
-            guard let cont = Self.take(&connectContinuation) else { return [] }
+            guard case .connecting(_, let cont) = link else { return [] }
+            link = nil
             return [{ cont.resume(throwing: BLEError.connectionFailed(error ?? "unknown")) }]
 
-        case .didDisconnect(let peripheralId, let error):
-            var effects: [() -> Void] = disconnectCallbacks.map { cb in { cb(peripheralId) } }
-            if let cont = Self.take(&disconnectContinuation) {
-                effects.append { cont.resume() }
-            }
-            // End the notification streams, so `for await` loops finish.
-            effects += notificationContinuations.values.map { stream in { stream.finish() } }
-            notificationContinuations.removeAll()
-
-            // Fail every pending one-shot wait.
-            let connError = BLEError.connectionFailed(error ?? "disconnected")
-            func fail<T>(_ cont: CheckedContinuation<T, Error>?) {
-                if let cont { effects.append { cont.resume(throwing: connError) } }
-            }
-            fail(Self.take(&connectContinuation))
-            fail(Self.take(&discoverServicesContinuation))
-            fail(Self.take(&writeReadyContinuation))
-            for cont in discoverCharsContinuations.values { fail(cont) }
-            for cont in discoverDescContinuations.values { fail(cont) }
-            for cont in readContinuations.values { fail(cont) }
-            for cont in writeContinuations.values { fail(cont) }
-            for cont in subscribeContinuations.values { fail(cont) }
-            discoverCharsContinuations.removeAll()
-            discoverDescContinuations.removeAll()
-            readContinuations.removeAll()
-            writeContinuations.removeAll()
-            subscribeContinuations.removeAll()
-            return effects
+        case .didDisconnect(_, let error):
+            return endLink(BLEError.connectionFailed(error ?? "disconnected"))
 
         case .didDiscoverServices(_, let uuids, let error):
             guard let cont = Self.take(&discoverServicesContinuation) else { return [] }
@@ -298,6 +336,44 @@ final class BLEEventProcessor: @unchecked Sendable {
             guard let cont = subscribeContinuations.removeValue(forKey: charUUID) else { return [] }
             return [{ Self.settle(cont, error.map(BLEError.subscribeFailed), ()) }]
         }
+    }
+
+    /// End the served connection, if any, with `error`: stop serving it, fail
+    /// a waiting connect and every pending one-shot wait, finish the
+    /// notification streams, run the disconnect callbacks and resume a
+    /// waiting disconnect. The lock must be held; the returned effects run
+    /// after it is released.
+    private func endLink(_ error: BLEError) -> [() -> Void] {
+        guard let ended = link else { return [] }
+        link = nil
+        let id = ended.peripheralId
+        var effects: [() -> Void] = disconnectCallbacks.map { cb in { cb(id) } }
+        // End the notification streams, so `for await` loops finish.
+        effects += notificationContinuations.values.map { stream in { stream.finish() } }
+        notificationContinuations.removeAll()
+
+        func fail<T>(_ cont: CheckedContinuation<T, Error>?) {
+            if let cont { effects.append { cont.resume(throwing: error) } }
+        }
+        if case .connecting(_, let cont) = ended { fail(cont) }
+        fail(Self.take(&discoverServicesContinuation))
+        fail(Self.take(&writeReadyContinuation))
+        for cont in discoverCharsContinuations.values { fail(cont) }
+        for cont in discoverDescContinuations.values { fail(cont) }
+        for cont in readContinuations.values { fail(cont) }
+        for cont in writeContinuations.values { fail(cont) }
+        for cont in subscribeContinuations.values { fail(cont) }
+        discoverCharsContinuations.removeAll()
+        discoverDescContinuations.removeAll()
+        readContinuations.removeAll()
+        writeContinuations.removeAll()
+        subscribeContinuations.removeAll()
+        // Last, so disconnect returns with the connection forgotten and its
+        // streams and waits ended.
+        if let cont = Self.take(&disconnectContinuation) {
+            effects.append { cont.resume() }
+        }
+        return effects
     }
 
     /// Clear a one-shot slot and return what it held.

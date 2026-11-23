@@ -14,15 +14,6 @@ later release. Delete an item in the commit that fixes it, citing its ID
 
 ## P0: release blockers (0.3.0)
 
-- [ ] **B1. A connect that times out keeps connecting, and events are not
-  matched to their peripheral.** `Sources/BLEManager/BLEManager.swift:150`,
-  `Sources/BLEManager/BLEEventProcessor.swift:232-266`. Cancelling `connect`
-  never calls `cancelPeripheralConnection`. `didConnect`, `didFailToConnect`
-  and `didDisconnect` ignore `peripheralId`. Scenario: `connect A` times out,
-  `connect B` starts, A comes into range and its `didConnect` completes B's
-  connect. A stays connected at the OS level without blew knowing. Fix: filter
-  events by peripheral; cancel the pending connection on timeout or cancel;
-  disconnect the current device before connecting another.
 - [ ] **B2. A failed service discovery leaves the state "connected".**
   `BLEManager.swift:154-160`, `:499-541`. `connectedPeripheralId` is set
   before `discoverAllServices`, and nothing rolls it back if discovery throws
@@ -115,12 +106,28 @@ later release. Delete an item in the commit that fixes it, citing its ID
   `setNotifyValue` is acknowledged.** `BLEManager.swift:466`. An immediate
   notification is dropped. A disconnect in that window installs a stream that
   never finishes.
-- [ ] **S7. A disconnect of any peripheral fails all pending operations.**
-  `BLEEventProcessor.swift:240-266` (see B1).
 - [ ] **S8. When the event queue is full, the newest event is dropped
   silently** *(plausible)*. `Sources/BLEManager/BLEEventQueue.swift:42-45`.
   A dropped `didConnect` or `didWriteValue` under an `allowDuplicates` scan
   flood hangs its wait. `droppedCount` is never reported.
+- [ ] **S9. `BLECentral.connect` ignores its `timeout` parameter.**
+  `Sources/BLEManager/BLEManager.swift:118`. The deadline is enforced only by
+  the caller cancelling the task (`CommandRouter.runConnect`,
+  `waitInterruptible`), so a caller that relies on the parameter waits
+  forever for a device that never appears. Enforce it in `connect` (throwing
+  `BLEError.timeout`) or remove the parameter.
+- [ ] **S10. Connect attempts are matched by peripheral, not by attempt, and
+  `BLECentral` assumes one caller at a time.** `BLEEventProcessor.swift:119`
+  (`beginConnect`, `cancelConnect`, `isConnecting`), `BLEManager.swift:149-180`
+  and `updateConnection`. Nothing enforces one caller; `waitInterruptible`
+  returns after 2 s while the old task may still run. Scenarios: a second
+  `connect` reaches `beginConnect` between another's `closeConnection` and
+  `beginConnect`, and the replaced device stays connected at the OS level;
+  one task's cancel ends another task's connect; a stale `didConnect` of a
+  cancelled attempt completes a quick retry to the same device, whose catch
+  then disconnects it and its own `didConnect` is dropped. Fix: serialise
+  connect and disconnect in `BLECentral`, or give each attempt a token that
+  `cancelConnect`, `isConnecting` and `updateConnection` require.
 
 ### Exit codes and README contract
 

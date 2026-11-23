@@ -214,6 +214,8 @@ Explicitly connects to a BLE device and exits. Useful for testing connectivity o
 
 For `gatt`, `read`, `write`, and `sub` you do not need to run `connect` first — those commands connect automatically using the same device-targeting options.
 
+blew holds one connection at a time: `connect` disconnects the current device first, also when it is the same one, and then connects and discovers its services afresh. A connect that times out or is interrupted stops connecting, so the device does not connect later.
+
 The connection is automatically closed on exit.
 
 **Examples:**

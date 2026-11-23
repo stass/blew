@@ -66,7 +66,8 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 
 **Event processor**
 
-`BLEEventProcessorTests` — hands `BLEEventProcessor` events directly, without CoreBluetooth: a disconnect ends notification streams and runs disconnect callbacks that re-enter the processor without deadlock, and `handleEvent` returns its effects for the caller to run after unlocking.
+`BLEEventProcessorTests` — hands `BLEEventProcessor` events directly, without CoreBluetooth: a disconnect ends notification streams and runs disconnect callbacks that re-enter the processor without deadlock, and `handleEvent` returns its effects for the caller to run after unlocking. Events are matched to their peripheral: another peripheral's connect, connect failure, disconnect or GATT result does not complete or fail the current connect or its operations, and a cancelled connect's late events do not reach the next one. The connected peripheral follows the link (a cancel after the connect completed leaves it connected), a disconnect wait resumes at once for a peripheral that is not connected, and starting a connect ends a connection still held.
+
 
 **CLI argument parsing**
 
@@ -91,3 +92,10 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 `MCPToolDefinitionTests` — verifies the static `toolDefinitions` array: correct count (19 tools), all expected tool names present, `readOnlyHint` and `idempotentHint` annotations, and required-field schemas for `ble_gatt_info`, `ble_write`, and `ble_gatt_chars`.
 
 `MCPIntegrationTests` — launches `blew mcp` as a subprocess and communicates via JSON-RPC over stdio. Tests the full MCP protocol handshake (`initialize`), tool listing (`tools/list`, 19 tools), and a `tools/call` for `ble_gatt_info` verifying structured content and text output. Tests are skipped if the binary is not built.
+
+## Manual checks (radio)
+
+Behaviour that needs a real device, exercised before a release:
+
+- **Connect timeout stops connecting.** With device A out of range, `blew -t 3 connect <A>` times out (exit 4). Bring A into range: it does not connect (it stays advertising, and `system_profiler SPBluetoothDataType` does not list it as connected).
+- **Connecting to another device.** In the REPL, `connect <A>`, then `connect <B>`: A is disconnected first and `status` shows B. `connect <B>` again disconnects and reconnects B.

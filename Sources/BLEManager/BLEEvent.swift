@@ -68,6 +68,22 @@ public enum BLEEvent: Sendable {
         error: String?
     )
 
+    /// The peripheral whose connection the event belongs to; nil for the
+    /// events that belong to no connection: the central's state and scan
+    /// results.
+    var connectionPeripheralId: UUID? {
+        switch self {
+        case .centralStateChanged, .didDiscover:
+            return nil
+        case .didConnect(let id), .didFailToConnect(let id, _), .didDisconnect(let id, _),
+             .didDiscoverServices(let id, _, _), .didDiscoverCharacteristics(let id, _, _, _),
+             .didDiscoverDescriptors(let id, _, _, _), .didUpdateValue(let id, _, _, _),
+             .didWriteValue(let id, _, _), .isReadyToSendWriteWithoutResponse(let id),
+             .didUpdateNotificationState(let id, _, _, _):
+            return id
+        }
+    }
+
     public struct DiscoveredCharacteristic: Sendable {
         public let uuid: String
         public let properties: CBCharacteristicProperties
