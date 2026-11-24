@@ -302,18 +302,6 @@ final class PeripheralConfigTests: XCTestCase {
         XCTAssertEqual(config.name, "FileTest")
     }
 
-    // MARK: - Example config files
-
-    func testLoadHealthThermometerExample() throws {
-        let examplesDir = findExamplesDir()
-        guard let path = examplesDir?.appendingPathComponent("health-thermometer.json").path,
-              FileManager.default.fileExists(atPath: path) else {
-            throw XCTSkip("Examples directory not found")
-        }
-        let config = try PeripheralConfig.load(from: path)
-        XCTAssertFalse(config.services.isEmpty)
-    }
-
     /// An unknown `format` is an error, with or without a `value`, never hex.
     func testUnknownFormatIsRejected() throws {
         for value in [#""value": "00", "#, ""] {
@@ -346,19 +334,6 @@ private func writeTempFile(contents: String) throws -> URL {
         .appendingPathComponent("blew-test-\(UUID().uuidString).json")
     try contents.write(to: url, atomically: true, encoding: .utf8)
     return url
-}
-
-private func findExamplesDir() -> URL? {
-    // Walk up from the test bundle to find the workspace root
-    var url = URL(fileURLWithPath: #file)
-    for _ in 0..<5 {
-        url = url.deletingLastPathComponent()
-        let candidate = url.appendingPathComponent("Examples")
-        if FileManager.default.fileExists(atPath: candidate.path) {
-            return candidate
-        }
-    }
-    return nil
 }
 
 private func uuid(_ text: String) -> BLEUUID {

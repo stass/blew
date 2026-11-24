@@ -204,23 +204,19 @@ None open.
 - [ ] **R1. The version string is out of date.** `Sources/blew/Blew.swift:16`
   says `0.2.0`; the latest tag is `v0.2.2`. Set it to `0.3.0` for the
   release.
-- [ ] **R4. Bluetooth usage description** *(plausible)*. `Package.swift:42`
-  excludes `Info.plist`, and nothing embeds `NSBluetoothAlwaysUsageDescription`.
-  Verify how release binaries get it (e.g. `-sectcreate __TEXT __info_plist`).
-- [ ] **R5. README examples use options that don't exist.**
-  - `scan … -t 10` (line 921): scan has no `-t`.
-  - Global `-n` (lines 117, 654).
-  - `-x` (line 117).
-  - `-b` in the CLI `sub` synopsis (line 418).
-- [ ] **R6. Example configs contain wrong values.**
-  `Examples/health-thermometer.json:11` decodes to 10360.38 °C.
-  `Examples/blood-pressure.json:11` sets flags 0x16 but is only 5 bytes long.
 
 ## P3: later (after 0.3.0)
 
 - [ ] Codegen backslash escaping is a no-op (`gsub("\\", "\\\\")`).
   `generate-ble-characteristics.rb:164`, `generate-ble-names.rb:31`. "CO2
   Concentration" renders a TAB.
+- [ ] `GATTDecoder` ignores the GSS scale of a value (M, d, b in the
+  characteristic's "Represented values"): 2A6E prints `2340` for 23.40 degrees
+  C, 2A6F `5812` for 58.12 %, 2A6D `1013250` for 101325.0 Pa
+  (`temperature.yaml:46`, `humidity.yaml:46`, `pressure.yaml:46`). Pinned raw
+  in `ExampleConfigTests`.
+- [ ] A value longer than its structure is decoded without a word about the
+  extra bytes (`GATTDecoder.swift:145-175`).
 - [ ] Truncated GATT fields are skipped silently. `GATTDecoder.swift:85-98`.
 - [ ] An E2E-CRC after a variable-length field is never decoded.
   `GATTDecoder.swift:87-95`. In 2AAC CGM Specific Ops Control Point

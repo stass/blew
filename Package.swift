@@ -41,6 +41,19 @@ let package = Package(
             ] + mcpTargetDependency,
             exclude: ["Info.plist"],
             swiftSettings: [.swiftLanguageMode(.v5)] + mcpSwiftSettings,
+            linkerSettings: [
+                // Embeds Info.plist in the executable's __TEXT,__info_plist
+                // section. macOS reads NSBluetoothAlwaysUsageDescription from
+                // it when it asks for Bluetooth permission; a command-line
+                // tool has no bundle to carry the plist. unsafeFlags is
+                // allowed because blew is a root package.
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "\(Context.packageDirectory)/Sources/blew/Info.plist",
+                ]),
+            ],
             plugins: [
                 .plugin(name: "GenerateBLENames"),
             ]

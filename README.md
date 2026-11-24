@@ -41,7 +41,7 @@ Stop fumbling with GUI apps to debug Bluetooth Low Energy devices. `blew` gives 
 **X-ray a device in one shot.** Connect, discover all services, read every readable characteristic, and print the whole thing as a tree, including names, properties, descriptors and live values:
 
 ```sh
-% blew -n "Thingy" gatt tree -dr
+% blew gatt tree -n "Thingy" -dr
 ```
 
 **Look up any Bluetooth SIG characteristic without a device.** Instantly see the field-level structure of any standard characteristic, like byte layout, types, conditional fields:
@@ -67,7 +67,7 @@ Stop fumbling with GUI apps to debug Bluetooth Low Energy devices. `blew` gives 
 **Spin up a virtual BLE device from a JSON file.**  Define services, characteristics, properties, and initial values in a config file and start advertising in one command:
 
 ```sh
-% blew periph adv --config health-thermometer.json
+% blew periph adv --config Examples/health-thermometer.json
 ```
 
 **Run a multi-step test sequence as a one-liner.** Connect, inspect, read, write, wait, read again or subscribe to notifications as a single command:
@@ -88,7 +88,7 @@ brew install stass/tap/blew
 
 ### Requirements
 
-- macOS 14 (Sonoma) or later
+- macOS 13 (Ventura) or later
 - Xcode 16 or later (Swift 6.0+ toolchain)
 
 The MCP server (the `blew mcp` subcommand) depends on the MCP swift-sdk, which requires the Swift 6.1 toolchain (Xcode 16.3+). To keep blew building on older toolchains, MCP support is compiled in conditionally: when built with Swift 6.1 or newer the `mcp` subcommand is available; when built with Swift 6.0.x (Xcode 16.0–16.2) the MCP server is omitted and every other command works unchanged. No flags are needed — the detection happens automatically in `Package.swift`.
@@ -97,6 +97,7 @@ The MCP server (the `blew mcp` subcommand) depends on the MCP swift-sdk, which r
 
 ```bash
 git clone --recurse-submodules https://github.com/stass/blew.git
+cd blew
 swift build -c release
 cp .build/release/blew /usr/local/bin/blew
 ```
@@ -105,6 +106,12 @@ cp .build/release/blew /usr/local/bin/blew
 
 ```bash
 git submodule update --init
+```
+
+The build embeds `Sources/blew/Info.plist` in the executable, in its `__TEXT,__info_plist` section, so the copied binary carries it. The plist holds `NSBluetoothAlwaysUsageDescription`, the purpose string macOS's Bluetooth privacy check reads from the executable; a command-line tool has no app bundle to carry it. Check that the binary has it with:
+
+```bash
+otool -P .build/release/blew
 ```
 
 On first run, macOS will prompt for Bluetooth permission. Grant it in **System Settings → Privacy & Security → Bluetooth**.
@@ -118,16 +125,16 @@ On first run, macOS will prompt for Bluetooth permission. Grant it in **System S
 % blew scan
 
 # Print the GATT tree of a device (connects automatically)
-% blew -n "Thingy" gatt tree
+% blew gatt tree -n "Thingy"
 
 # Read a characteristic (battery level)
-% blew -n "Thingy" read -f uint8 2A19
+% blew read -n "Thingy" -f uint8 2A19
 
 # Subscribe to notifications for 10 seconds
-% blew -n "Thingy" sub -d 10 fff1
+% blew sub -n "Thingy" -d 10 fff1
 
 # Run a multi-step procedure in one invocation
-% blew -n "Thingy" -x "gatt tree; read -f uint8 2A19"
+% blew exec "connect -n Thingy; gatt tree; read -f uint8 2A19"
 
 # Start the interactive REPL
 % blew
@@ -153,7 +160,7 @@ These options apply to all commands and must be placed **before** the subcommand
 
 ## Device targeting options
 
-Commands that connect to a device (`scan`, `connect`, `gatt`, `read`, `write`, `sub`, `periph clone`) accept these options to identify the target. Pass them after the subcommand name.
+Commands that connect to a device (`scan`, `connect`, `gatt`, `read`, `write`, `sub`, `nus`, `periph clone`) accept these options to identify the target. Pass them after the subcommand name.
 
 Use `--id` to target an explicit device, or combine selectors to let blew find a match automatically. A device must pass every selector given.
 
@@ -180,7 +187,7 @@ When a device is already connected (in `exec`, the REPL or the MCP server), a co
 blew scan [-n <name>] [-S <uuid>] [-R <dBm>] [-i <id>] [-m <id>] [-p <strategy>] [-w]
 ```
 
-Scans for advertising BLE peripherals and prints a table of discovered devices. Timeout defaults to 5 seconds.
+Scans for advertising BLE peripherals and prints a table of discovered devices. Timeout defaults to 5 seconds. In the REPL and `exec`, `scan` also takes `-t <sec>` for the timeout of that scan (`scan -t 3`); on the command line it is the global `-t`.
 
 **Flags:**
 
@@ -464,7 +471,7 @@ Writes data to a characteristic. Connects automatically if no connection is acti
 ### `sub` — Subscribe to notifications or indications
 
 ```
-blew sub [-n <name>] [-i <id>] [-f <format>] [-d <sec>] [-c <count>] [-b] <char-uuid>
+blew sub [-n <name>] [-i <id>] [-f <format>] [-d <sec>] [-c <count>] <char-uuid>
 ```
 
 Subscribes to a characteristic and streams received values to stdout, one event per line. Connects automatically if no connection is active. Stops on `Ctrl-C`, or when a duration/count limit is reached. If the connection ends first, `sub` fails: exit code 5 when the device disconnects, 3 when Bluetooth is turned off or blew loses Bluetooth permission. If the device does not confirm that notifications are on within the operation timeout (`-t`, default 5 seconds), `sub` fails with exit code 4. A background subscription reports the same as a `sub error` line.
@@ -474,7 +481,7 @@ Subscribes to a characteristic and streams received values to stdout, one event 
 | `-f, --format <fmt>` | Value format (same values as `read`). Default: `hex`. |
 | `-d, --duration <sec>` | Stop after this many seconds, whether or not notifications arrive (at most a year). |
 | `-c, --count <n>` | Stop after receiving this many notifications (a whole number, at least 1). |
-| `-b, --bg` | Run in background (REPL and `exec` mode only). Returns the prompt immediately; notifications are printed as they arrive. Use `sub stop` to cancel. |
+| `-b, --bg` | Run in background (REPL and `exec` mode only; the `blew sub` command line does not take it). Returns the prompt immediately; notifications are printed as they arrive. Use `sub stop` to cancel. |
 
 With `--out kv`, each line includes `ts=`, `char=`, and `value=` fields.
 
@@ -727,7 +734,7 @@ This is a subset of Go's string-literal syntax: `strconv.Unquote` in Go reads a 
 A characteristic whose decoded value has several fields (`gatt tree -r`, `gatt chars -r`) has one `value=` holding the fields as `<label>: <value>` joined by ` | `, the same fields text output prints one per line.
 
 ```sh
-% blew -n "Thingy" -o kv sub -d 60 fff1 | awk -F'value=' '{print $2}'
+% blew -o kv sub -n "Thingy" -d 60 fff1 | awk -F'value=' '{print $2}'
 ```
 
 ---
@@ -1023,7 +1030,7 @@ A `ble_read` call returns:
 
 ### Find a device in a crowded environment
 ```sh
-% blew scan -n "Sensor" -S 180F -R -65 -t 10
+% blew -t 10 scan -n "Sensor" -S 180F -R -65
 ```
 
 ### Capture sensor data to a file

@@ -8,13 +8,13 @@
         {
           "uuid": "2A35",
           "properties": ["indicate"],
-          "value": "1670005000",
+          "value": "04780050005D004800",
           "format": "hex"
         },
         {
           "uuid": "2A49",
           "properties": ["read"],
-          "value": "03",
+          "value": "0300",
           "format": "hex"
         }
       ]
