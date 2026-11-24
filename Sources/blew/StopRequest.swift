@@ -4,14 +4,20 @@ import Foundation
 /// from a signal: the MCP client cancelled the tool call, or the call ran
 /// out of its time budget. `CommandRouter.waitInterruptible` treats it like
 /// a SIGINT for the command it is attached to (see
-/// `CommandRouter.run(stoppingOn:_:)`). Any thread may set it; the first
-/// reason set is kept.
+/// `CommandRouter.run(stoppingOn:_:)`). Any thread may set it, more than
+/// once; the reason of highest precedence is kept.
 final class StopRequest: @unchecked Sendable {
-    enum Reason: Equatable {
-        /// The client cancelled the call (`notifications/cancelled`).
-        case cancelled
+    /// Ordered by precedence, lowest first.
+    enum Reason: Int, Comparable {
         /// The call ran past its time budget.
         case budgetExhausted
+        /// The client cancelled the call (`notifications/cancelled`). It
+        /// replaces an exhausted budget: the client no longer wants the
+        /// result, so the call ends cancelled and the server sends no
+        /// response to it.
+        case cancelled
+
+        static func < (a: Reason, b: Reason) -> Bool { a.rawValue < b.rawValue }
     }
 
     private let lock = NSLock()
@@ -19,7 +25,7 @@ final class StopRequest: @unchecked Sendable {
 
     func stop(_ reason: Reason) {
         lock.withLock {
-            if stoppedFor == nil { stoppedFor = reason }
+            stoppedFor = max(stoppedFor ?? reason, reason)
         }
     }
 

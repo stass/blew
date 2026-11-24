@@ -58,6 +58,30 @@ final class BLEEventProcessorTests: XCTestCase {
         return effects.isEmpty
     }
 
+    /// Turning notifications off is acknowledged with isNotifying false.
+    /// That acknowledgement, of a subscribe that was given up, settles no
+    /// subscribe: one waiting for its own confirmation keeps waiting.
+    func testNotificationsOffAcknowledgementDoesNotSettleASubscribe() {
+        let processor = connected(to: deviceB)
+        let registered = DispatchSemaphore(value: 0)
+        let settled = DispatchSemaphore(value: 0)
+        Task {
+            try? await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                processor.setSubscribeContinuation(forChar: "TX", cont)
+                registered.signal()
+            }
+            settled.signal()
+        }
+        XCTAssertEqual(registered.wait(timeout: .now() + 2), .success)
+        let off = BLEEvent.didUpdateNotificationState(peripheralId: deviceB, characteristicUUID: "TX",
+                                                      isNotifying: false, error: nil)
+        XCTAssertTrue(ignores(processor, off), "notifications turning off settled a subscribe")
+        let on = BLEEvent.didUpdateNotificationState(peripheralId: deviceB, characteristicUUID: "TX",
+                                                     isNotifying: true, error: nil)
+        XCTAssertFalse(ignores(processor, on), "the confirmation did not settle the subscribe")
+        XCTAssertEqual(settled.wait(timeout: .now() + 2), .success)
+    }
+
     /// A notification stream registered the way BLEManager.subscribe does:
     /// its termination handler deregisters it, which takes the processor's
     /// lock. `finished` is signalled once the stream has ended.

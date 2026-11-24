@@ -64,6 +64,46 @@ final class SignalIntegrationTests: XCTestCase {
         XCTAssertTrue(repl.terminalIsCooked(), "blew left the terminal in raw mode")
     }
 
+    /// Leaving raw mode for a command does not wait for its output to drain
+    /// while holding the terminal lock, so a SIGTERM after a command whose
+    /// output nobody reads still exits.
+    func testSIGTERMExitsAfterACommandWhoseOutputNobodyReads() throws {
+        // Under the thread sanitizer its `_exit` interceptor flushes stdout,
+        // waiting for the lock the writer stalled on the terminal holds;
+        // `ProcessSignals.exitProcess` itself skips that flush.
+        if dlsym(UnsafeMutableRawPointer(bitPattern: -2), "__tsan_init") != nil {
+            throw XCTSkip("the thread sanitizer's _exit flushes stdout")
+        }
+        let repl = try TerminalBlew()
+        XCTAssertTrue(repl.waitForOutput(containing: "blew> "), "no prompt: \(repl.output)")
+        _ = repl.send("help\r")
+        usleep(500_000)
+        repl.process.terminate()
+        let status = try repl.waitForExit(seconds: 5)
+        XCTAssertEqual(status.reason, .exit, "blew died of the signal instead of exiting")
+        XCTAssertEqual(status.code, 143)
+        XCTAssertTrue(repl.terminalIsCooked(), "blew left the terminal in raw mode")
+    }
+
+    /// Giving the terminal back on SIGTERM does not wait for output to
+    /// drain: blew exits even when the terminal's reader has stopped reading.
+    func testSIGTERMExitsWhenTheTerminalReaderStopsReading() throws {
+        let repl = try TerminalBlew()
+        XCTAssertTrue(repl.waitForOutput(containing: "blew> "), "no prompt: \(repl.output)")
+        // Each key typed redraws the whole line, so typing without reading
+        // the output fills the terminal's output queue.
+        let typing = Date().addingTimeInterval(1)
+        while Date() < typing {
+            _ = repl.send(String(repeating: "a", count: 64))
+            usleep(10_000)
+        }
+        repl.process.terminate()
+        let status = try repl.waitForExit(seconds: 5)
+        XCTAssertEqual(status.reason, .exit, "blew died of the signal instead of exiting")
+        XCTAssertEqual(status.code, 143)
+        XCTAssertTrue(repl.terminalIsCooked(), "blew left the terminal in raw mode")
+    }
+
     func testSIGINTDuringREPLCommandReturnsToPrompt() throws {
         let repl = try TerminalBlew()
         XCTAssertTrue(repl.waitForOutput(containing: "blew> "), "no prompt: \(repl.output)")
@@ -230,8 +270,8 @@ private final class TerminalBlew {
         return settings.c_lflag & cooked == cooked
     }
 
-    func waitForExit() throws -> ExitStatus {
+    func waitForExit(seconds: TimeInterval = 10) throws -> ExitStatus {
         defer { drain() }
-        return try blewExit(process)
+        return try blewExit(process, seconds: seconds)
     }
 }

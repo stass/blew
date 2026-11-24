@@ -172,9 +172,14 @@ final class BLEEventProcessor: @unchecked Sendable {
         lock.unlock()
     }
 
-    func setSubscribeContinuation(forChar uuid: String, _ cont: CheckedContinuation<Void, Error>?) {
+    /// Register a subscribe wait and run `request` (which queues turning
+    /// notifications on) under the same lock, so a cancellation that finds
+    /// the wait finds its request already queued.
+    func setSubscribeContinuation(forChar uuid: String, _ cont: CheckedContinuation<Void, Error>?,
+                                  request: () -> Void = {}) {
         lock.lock()
         subscribeContinuations[uuid] = cont
+        request()
         lock.unlock()
     }
 
@@ -258,8 +263,15 @@ final class BLEEventProcessor: @unchecked Sendable {
         c?.resume(throwing: CancellationError())
     }
 
-    func cancelSubscribeContinuation(forChar uuid: String) {
-        lock.lock(); let c = subscribeContinuations.removeValue(forKey: uuid); lock.unlock()
+    /// Give up a subscribe wait: resume it with `CancellationError` and,
+    /// when one was pending, run `undo` under the lock. `undo` (which queues
+    /// turning notifications off) is then ordered after the `request` that
+    /// `setSubscribeContinuation` ran for the same wait.
+    func cancelSubscribeContinuation(forChar uuid: String, undo: () -> Void = {}) {
+        lock.lock()
+        let c = subscribeContinuations.removeValue(forKey: uuid)
+        if c != nil { undo() }
+        lock.unlock()
         c?.resume(throwing: CancellationError())
     }
 
@@ -359,8 +371,12 @@ final class BLEEventProcessor: @unchecked Sendable {
             guard let cont = Self.take(&writeReadyContinuation) else { return [] }
             return [{ cont.resume() }]
 
-        case .didUpdateNotificationState(_, let charUUID, _, let error):
-            guard let cont = subscribeContinuations.removeValue(forKey: charUUID) else { return [] }
+        case .didUpdateNotificationState(_, let charUUID, let isNotifying, let error):
+            // A subscribe waits for notifications to turn on, or for an
+            // error. Notifications turning off acknowledge a subscribe that
+            // was given up, not the one now waiting.
+            guard isNotifying || error != nil,
+                  let cont = subscribeContinuations.removeValue(forKey: charUUID) else { return [] }
             return [{ Self.settle(cont, error.map(BLEError.subscribeFailed), ()) }]
         }
     }

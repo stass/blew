@@ -290,12 +290,10 @@ extension CommandRouter {
 
     /// Run one session on the current connection. Nil when interrupted.
     private func runNUSSession(options: NUSOptions, port: NUSPort) -> NUSOutcome? {
-        let semaphore = DispatchSemaphore(value: 0)
         let outcome = Locked<NUSOutcome>(.linkLost("session did not start"))
         let manager = self.manager
         let setupTimeout = globals.timeout ?? 5.0
-        let task = Task {
-            defer { semaphore.signal() }
+        let operation: () async -> Void = {
             do {
                 let received = try await Self.withDeadline(setupTimeout) {
                     try await manager.subscribe(characteristicUUID: NUS.tx)
@@ -319,17 +317,14 @@ extension CommandRouter {
                 outcome.set(.linkLost(nil, error))
             }
         }
-        if case .interrupted = waitInterruptible(task, semaphore: semaphore) { return nil }
+        if case .interrupted = waitInterruptible(operation) { return nil }
         return outcome.value
     }
 
     private func pauseInterruptibly(seconds: TimeInterval) -> CommandOutcome {
-        let semaphore = DispatchSemaphore(value: 0)
-        let task = Task {
+        waitInterruptible {
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            semaphore.signal()
         }
-        return waitInterruptible(task, semaphore: semaphore)
     }
 
     /// The connected device's label for status lines and its identifier;

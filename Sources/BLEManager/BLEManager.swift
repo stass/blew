@@ -479,17 +479,34 @@ public final class BLECentral: @unchecked Sendable {
             throw BLEError.characteristicNotFound(charUUID)
         }
 
-        // Enable notifications
+        // Enable notifications and wait for the device to confirm. A wait
+        // that is given up (cancelled, or stopped by a caller's deadline)
+        // queues turning notifications off. The processor queues it after
+        // the request to turn them on, and from the cancelling thread, so
+        // before any subscribe started after the cancellation. A device
+        // that confirms late is then not left notifying a connection that
+        // no stream reads, and the acknowledgement of turning them off
+        // settles no later subscribe.
         let subscribeUUID = c.uuid.uuidString
+        let cbQueue = self.cbQueue
+        let turnOff = {
+            cbQueue.async {
+                if peripheral.state == .connected { peripheral.setNotifyValue(false, for: c) }
+            }
+        }
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                processor.setSubscribeContinuation(forChar: subscribeUUID, cont)
-                cbQueue.async {
-                    peripheral.setNotifyValue(true, for: c)
+                processor.setSubscribeContinuation(forChar: subscribeUUID, cont) {
+                    cbQueue.async { peripheral.setNotifyValue(true, for: c) }
+                }
+                // Cancelled before the wait was registered: the
+                // cancellation handler found nothing to cancel.
+                if Task.isCancelled {
+                    processor.cancelSubscribeContinuation(forChar: subscribeUUID, undo: turnOff)
                 }
             }
         } onCancel: {
-            self.processor.cancelSubscribeContinuation(forChar: subscribeUUID)
+            self.processor.cancelSubscribeContinuation(forChar: subscribeUUID, undo: turnOff)
         }
 
         stateLock.withLock { _ = activeSubscriptions.insert(charUUID.uppercased()) }

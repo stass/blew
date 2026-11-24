@@ -26,12 +26,27 @@ None open.
   task's `backgroundSubTasks` entry, off the main thread. Its
   `onTermination` can nil the new stream and send `setNotifyValue(false)`.
   Afterwards `sub stop` cannot find the subscription, or notifications go
-  quiet. A foreground `sub X` during `sub -b X` collides the same way.
+  quiet. A foreground `sub X` during `sub -b X` collides the same way, and
+  so does a foreground `sub X` that times out during `sub -b X`: the given-up
+  subscribe turns notifications off (`BLEManager.swift`, `subscribe`) under
+  the background stream, which stays listed but goes silent. An error on
+  the acknowledgement of turning them off fails the next subscribe waiting
+  on the same characteristic (`BLEEventProcessor.swift`, the
+  `didUpdateNotificationState` case), whose own request then enables
+  notifications with no stream. Fix: one owner per characteristic that
+  refuses a second subscribe while one is pending or active, and matches
+  acknowledgements to requests.
 - [ ] **S2. Continuation slots are overwritten without resuming the old
   waiter.** `BLEEventProcessor.swift:78-130`. A cancel handler then cancels
   the wrong request. Cancel and register are not atomic
-  (`BLEManager.swift:349` and the similar connect, discover, write and
-  subscribe paths), so a waiter can be installed after its cancel ran.
+  (`BLEManager.swift:349` and the similar discover, read, write and
+  write-ready paths; connect and subscribe check `Task.isCancelled` after
+  registering), so a waiter can be installed after its cancel ran and its
+  CoreBluetooth call issued anyway. In `periph clone` the snapshot loop
+  (`CommandRouter.swift`, `runCloneSnapshot`) swallows the cancellation with
+  `try?` and keeps reading after Ctrl-C or the deadline, while the main
+  thread, which gave up after 2 s, reads the same variables. Fix: one helper
+  that registers, checks cancellation and only then issues the call.
 - [ ] **S3. A read can return a notification.**
   `BLEEventProcessor.swift:281-287`. Any `didUpdateValue` resolves a pending
   read first.
@@ -45,7 +60,10 @@ None open.
 - [ ] **S6. The notification stream is registered only after
   `setNotifyValue` is acknowledged.** `BLEManager.swift:466`. An immediate
   notification is dropped. A disconnect in that window installs a stream that
-  never finishes.
+  never finishes. When the confirmation resumes the wait just before
+  `CommandRouter.withDeadline` gives up, the returned stream is discarded but
+  stays registered, so notifications stay on and buffer without bound until
+  the disconnect.
 - [ ] **S8. When the event queue is full, the newest event is dropped
   silently** *(plausible)*. `Sources/BLEManager/BLEEventQueue.swift:42-45`.
   A dropped `didConnect` or `didWriteValue` under an `allowDuplicates` scan

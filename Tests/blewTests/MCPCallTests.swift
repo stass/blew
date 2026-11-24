@@ -186,6 +186,23 @@ final class ToolCallQueueTests: XCTestCase {
         guard case .cancelled = outcome else { return XCTFail("\(outcome)") }
     }
 
+    /// A client cancellation that arrives after the budget ran out, while
+    /// the work is still stopping, cancels the call: the server answers a
+    /// cancelled request with nothing.
+    func testCancellationAfterTheBudgetRanOutCancelsTheCall() async {
+        let queue = ToolCallQueue()
+        let call = Task {
+            await queue.run(budget: 0.1) { stop -> String in
+                _ = self.untilStopped(stop)
+                Thread.sleep(forTimeInterval: 0.5)
+                return "stopped late"
+            }
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        call.cancel()
+        guard case .cancelled = await call.value else { return XCTFail("the cancelled call was not cancelled") }
+    }
+
     func testCallPastItsBudgetIsStopped() async {
         let queue = ToolCallQueue()
         let start = Date()
@@ -199,13 +216,8 @@ final class ToolCallQueueTests: XCTestCase {
     /// A command that waits on the router until something stops it.
     private func waitingCommand() -> ToolCommand {
         ToolCommand(duration: 0) { router in
-            let semaphore = DispatchSemaphore(value: 0)
-            let task = Task {
-                try? await Task.sleep(nanoseconds: 30_000_000_000)
-                semaphore.signal()
-            }
             var result = CommandResult()
-            if case .interrupted = router.waitInterruptible(task, semaphore: semaphore) {
+            if case .interrupted = router.waitInterruptible({ try? await Task.sleep(nanoseconds: 30_000_000_000) }) {
                 result.exitCode = BlewExitCode.interrupted.code
             }
             return result
@@ -250,16 +262,34 @@ final class ToolCallQueueTests: XCTestCase {
     func testStopRequestEndsTheRoutersWait() throws {
         let router = CommandRouter(globals: try GlobalOptions.parse([]))
         let stop = StopRequest()
-        let semaphore = DispatchSemaphore(value: 0)
-        let task = Task {
-            try? await Task.sleep(nanoseconds: 30_000_000_000)
-            semaphore.signal()
-        }
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { stop.stop(.cancelled) }
         let start = Date()
-        let outcome = router.run(stoppingOn: stop) { router.waitInterruptible(task, semaphore: semaphore) }
+        let outcome = router.run(stoppingOn: stop) {
+            router.waitInterruptible { try? await Task.sleep(nanoseconds: 30_000_000_000) }
+        }
         XCTAssertEqual(outcome, .interrupted)
         XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+    }
+
+    /// A stop requested before an operation starts keeps it from starting,
+    /// and the wait reports interrupted.
+    func testStopRequestedBeforeAnOperationKeepsItFromStarting() throws {
+        let router = CommandRouter(globals: try GlobalOptions.parse([]))
+        let stop = StopRequest()
+        stop.stop(.cancelled)
+        let ran = DispatchSemaphore(value: 0)
+        let outcome = router.run(stoppingOn: stop) { router.waitInterruptible { ran.signal() } }
+        XCTAssertEqual(outcome, .interrupted)
+        XCTAssertEqual(ran.wait(timeout: .now() + 0.2), .timedOut, "an operation started after the stop")
+    }
+
+    /// A stop that arrives while an operation runs is a stop, even when the
+    /// operation then finishes before the wait first looks at the request.
+    func testStopRequestedDuringAQuickOperationIsAStop() throws {
+        let router = CommandRouter(globals: try GlobalOptions.parse([]))
+        let stop = StopRequest()
+        let outcome = router.run(stoppingOn: stop) { router.waitInterruptible { stop.stop(.cancelled) } }
+        XCTAssertEqual(outcome, .interrupted)
     }
 
     /// Subscription setup waits for the device to confirm through

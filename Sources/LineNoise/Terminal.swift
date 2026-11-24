@@ -42,7 +42,9 @@ internal struct Terminal {
     /// The terminal settings raw mode replaced, while raw mode is on. Every
     /// change of terminal mode happens under `lock`, so a restore from
     /// another thread (`restoreForExit`) cannot interleave with entering or
-    /// leaving raw mode.
+    /// leaving raw mode. Nothing done under the lock waits on the terminal
+    /// (see `apply`), so `restoreForExit` never waits behind output that
+    /// nobody reads.
     private final class RawModeState: @unchecked Sendable {
         let lock = NSLock()
         var saved: (fileHandle: Int32, settings: termios)?
@@ -87,9 +89,9 @@ internal struct Terminal {
         // VMIN = 16
         raw.c_cc.16 = 1
 
-        if tcsetattr(fileHandle, Int32(TCSAFLUSH), &raw) < 0 {
+        if !apply(raw, to: fileHandle) {
             // A failed tcsetattr may have applied part of the change.
-            _ = tcsetattr(fileHandle, TCSAFLUSH, &originalTermios)
+            _ = apply(originalTermios, to: fileHandle)
             throw LinenoiseError.generalError("Could not set raw mode")
         }
         rawMode.saved = (fileHandle, originalTermios)
@@ -103,9 +105,22 @@ internal struct Terminal {
 
     /// Put back the settings raw mode replaced. The caller holds `lock`.
     private static func restoreSaved() {
-        guard var saved = rawMode.saved else { return }
+        guard let saved = rawMode.saved else { return }
         rawMode.saved = nil
-        _ = tcsetattr(saved.fileHandle, TCSAFLUSH, &saved.settings)
+        _ = apply(saved.settings, to: saved.fileHandle)
+    }
+
+    /// Switch the terminal to `settings` without waiting on it: discard
+    /// unread input (keys typed for the mode being left, which must not
+    /// reach the next reader, such as the shell after blew exits), then
+    /// apply the settings at once. `TCSAFLUSH` would do both, but first
+    /// waits for queued output to drain, which never ends when the
+    /// terminal's reader has stopped reading. Output already queued was
+    /// processed when it was written, so the new settings do not change it.
+    private static func apply(_ settings: termios, to fileHandle: Int32) -> Bool {
+        var settings = settings
+        _ = tcflush(fileHandle, TCIFLUSH)
+        return tcsetattr(fileHandle, TCSANOW, &settings) == 0
     }
 
     /// Restore the terminal for a process that is about to exit, from any

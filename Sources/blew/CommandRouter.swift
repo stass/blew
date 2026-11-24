@@ -238,12 +238,10 @@ final class CommandRouter {
         }
         spinner?.start()
 
-        let semaphore = DispatchSemaphore(value: 0)
         var results = ScanResults()
         var result = CommandResult()
 
-        let task = Task {
-            defer { semaphore.signal() }
+        let operation: () async -> Void = { [self] in
             do {
                 let stream = try await manager.scan(timeout: timeout)
                 for await device in stream {
@@ -258,7 +256,7 @@ final class CommandRouter {
             }
         }
 
-        let outcome = waitInterruptible(task, semaphore: semaphore)
+        let outcome = waitInterruptible(operation)
         spinner?.stop()
 
         if case .interrupted = outcome { result.exitCode = BlewExitCode.interrupted.code; return ([], result) }
@@ -304,12 +302,10 @@ final class CommandRouter {
         let display = ScanWatchDisplay(formatter: output)
         display.start()
 
-        let semaphore = DispatchSemaphore(value: 0)
         var scanError: Int32 = 0
         var results = ScanResults()
 
-        let task = Task {
-            defer { semaphore.signal() }
+        let operation: () async -> Void = { [self] in
             do {
                 let stream = try await manager.scan(timeout: timeout, allowDuplicates: true)
                 for await device in stream {
@@ -324,7 +320,7 @@ final class CommandRouter {
             }
         }
 
-        let outcome = waitInterruptible(task, semaphore: semaphore)
+        let outcome = waitInterruptible(operation)
         display.stop()
 
         var result = CommandResult()
@@ -351,12 +347,10 @@ final class CommandRouter {
     }
 
     private func runScanWatchKV(filter: DeviceFilter, timeout: TimeInterval?) -> CommandResult {
-        let semaphore = DispatchSemaphore(value: 0)
         var scanError: Int32 = 0
         var results = ScanResults()
 
-        let task = Task {
-            defer { semaphore.signal() }
+        let operation: () async -> Void = { [self] in
             do {
                 let stream = try await manager.scan(timeout: timeout, allowDuplicates: true)
                 for await device in stream {
@@ -373,7 +367,7 @@ final class CommandRouter {
         }
 
         var result = CommandResult()
-        let outcome = waitInterruptible(task, semaphore: semaphore)
+        let outcome = waitInterruptible(operation)
         lastScanResults = results.matching(filter)
         if case .interrupted = outcome {
             result.exitCode = BlewExitCode.interrupted.code
@@ -405,10 +399,7 @@ final class CommandRouter {
         let label = record?.name.map { "\($0) (\(targetId))" } ?? targetId
         result.infos.append("connecting to \(label)...")
 
-        let semaphore = DispatchSemaphore(value: 0)
-
-        let task = Task {
-            defer { semaphore.signal() }
+        let operation: () async -> Void = { [self] in
             do {
                 try await manager.connect(deviceId: targetId, timeout: connectTimeout)
                 result.infos.append("connected to \(targetId)")
@@ -423,7 +414,7 @@ final class CommandRouter {
             }
         }
 
-        switch waitInterruptible(task, semaphore: semaphore, timeout: connectTimeout) {
+        switch waitInterruptible(operation, timeout: connectTimeout) {
         case .completed: if result.exitCode == 0 { connectedAdvertisement = record }
         case .interrupted: result.exitCode = BlewExitCode.interrupted.code
         case .timedOut:
@@ -446,10 +437,8 @@ final class CommandRouter {
 
     func runDisconnect(_ args: [String]) -> CommandResult {
         var result = CommandResult()
-        let semaphore = DispatchSemaphore(value: 0)
 
-        let task = Task {
-            defer { semaphore.signal() }
+        let operation: () async -> Void = { [self] in
             do {
                 try await manager.disconnect()
                 result.infos.append("disconnected")
@@ -464,7 +453,7 @@ final class CommandRouter {
             }
         }
 
-        switch waitInterruptible(task, semaphore: semaphore, timeout: globals.timeout ?? 5.0) {
+        switch waitInterruptible(operation, timeout: globals.timeout ?? 5.0) {
         case .completed: break
         case .interrupted: result.exitCode = BlewExitCode.interrupted.code
         case .timedOut:
@@ -476,15 +465,15 @@ final class CommandRouter {
 
     func runStatus(_ args: [String]) -> CommandResult {
         var result = CommandResult()
-        let semaphore = DispatchSemaphore(value: 0)
 
-        let task = Task {
-            defer { semaphore.signal() }
+        let operation: () async -> Void = { [self] in
             let status = await manager.status()
             result.output.append(.connectionStatus(status))
         }
 
-        waitInterruptible(task, semaphore: semaphore)
+        if case .interrupted = waitInterruptible(operation) {
+            result.exitCode = BlewExitCode.interrupted.code
+        }
         return result
     }
 
@@ -501,10 +490,7 @@ final class CommandRouter {
             return result
         }
 
-        let semaphore = DispatchSemaphore(value: 0)
-
-        let task = Task {
-            defer { semaphore.signal() }
+        let operation: () async -> Void = {
             do {
                 if seconds == 0 {
                     while true {
@@ -516,7 +502,7 @@ final class CommandRouter {
             } catch {}
         }
 
-        if case .interrupted = waitInterruptible(task, semaphore: semaphore) {
+        if case .interrupted = waitInterruptible(operation) {
             result.exitCode = BlewExitCode.interrupted.code
         }
         return result
@@ -558,10 +544,8 @@ final class CommandRouter {
         guard connectResult.exitCode == 0 else { return connectResult }
 
         var result = CommandResult()
-        let semaphore = DispatchSemaphore(value: 0)
 
-        let task = Task {
-            defer { semaphore.signal() }
+        let operation: () async -> Void = { [self] in
             do {
                 switch sub {
                 case "svcs":
@@ -705,7 +689,7 @@ final class CommandRouter {
             }
         }
 
-        switch waitInterruptible(task, semaphore: semaphore, timeout: globals.timeout ?? 10.0) {
+        switch waitInterruptible(operation, timeout: globals.timeout ?? 10.0) {
         case .completed: break
         case .interrupted: result.exitCode = BlewExitCode.interrupted.code
         case .timedOut:
@@ -751,10 +735,7 @@ final class CommandRouter {
         }
         let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: readOpts) ?? "hex"
 
-        let semaphore = DispatchSemaphore(value: 0)
-
-        let task = Task {
-            defer { semaphore.signal() }
+        let operation: () async -> Void = { [self] in
             do {
                 let data = try await manager.readCharacteristic(charUUID)
                 let formatted = DataFormatter.format(data, as: fmt)
@@ -771,7 +752,7 @@ final class CommandRouter {
             }
         }
 
-        switch waitInterruptible(task, semaphore: semaphore, timeout: globals.timeout ?? 5.0) {
+        switch waitInterruptible(operation, timeout: globals.timeout ?? 5.0) {
         case .completed: break
         case .interrupted: result.exitCode = BlewExitCode.interrupted.code
         case .timedOut:
@@ -820,10 +801,7 @@ final class CommandRouter {
             writeType = .auto
         }
 
-        let semaphore = DispatchSemaphore(value: 0)
-
-        let task = Task {
-            defer { semaphore.signal() }
+        let operation: () async -> Void = { [self] in
             do {
                 try await manager.writeCharacteristic(charUUID, data: data, type: writeType)
                 result.infos.append("written to \(BLENames.displayUUID(charUUID, category: .characteristic))")
@@ -839,7 +817,7 @@ final class CommandRouter {
             }
         }
 
-        switch waitInterruptible(task, semaphore: semaphore, timeout: globals.timeout ?? 5.0) {
+        switch waitInterruptible(operation, timeout: globals.timeout ?? 5.0) {
         case .completed: break
         case .interrupted: result.exitCode = BlewExitCode.interrupted.code
         case .timedOut:
@@ -929,10 +907,8 @@ final class CommandRouter {
         }
 
         // Foreground subscription: streaming command, emits each notification to caller
-        let semaphore = DispatchSemaphore(value: 0)
 
-        let task = Task {
-            defer { semaphore.signal() }
+        let operation: () async -> Void = {
             do {
                 let stream = try await Self.withDeadline(setupTimeout) {
                     try await manager.subscribe(characteristicUUID: charUUID)
@@ -954,7 +930,7 @@ final class CommandRouter {
             }
         }
 
-        if case .interrupted = waitInterruptible(task, semaphore: semaphore) {
+        if case .interrupted = waitInterruptible(operation) {
             result.exitCode = BlewExitCode.interrupted.code
         }
         return result
@@ -1068,35 +1044,44 @@ final class CommandRouter {
 
     enum CommandOutcome { case completed, interrupted, timedOut }
 
-    /// Block the calling thread until the semaphore is signalled, polling
-    /// every 50 ms. If a Ctrl-C interrupt arrives, or the attached
-    /// `StopRequest` is set, the task is cancelled and we wait for it to
-    /// finish before returning `.interrupted`. If a timeout is
-    /// provided and the deadline passes before the task finishes, the task is
-    /// cancelled and we return `.timedOut`.
-    @discardableResult
+    /// Run `operation` in a Task and block the calling thread until it
+    /// finishes, polling every 50 ms. A stop (a Ctrl-C interrupt, or the
+    /// attached `StopRequest` set) gives `.interrupted`:
+    ///   - requested before `waitInterruptible` is called, the operation
+    ///     never starts;
+    ///   - requested while it runs, the task is cancelled and waited for;
+    ///   - requested before the wait saw the operation finish, it still
+    ///     counts, so a command never reports success after a stop.
+    /// If a timeout is provided and the deadline passes before the
+    /// operation finishes, the task is cancelled and we return `.timedOut`.
     func waitInterruptible(
-        _ task: Task<Void, Never>,
-        semaphore: DispatchSemaphore,
+        _ operation: @escaping () async -> Void,
         timeout: TimeInterval? = nil
     ) -> CommandOutcome {
         let deadline = timeout.map { Date().addingTimeInterval($0) }
         let signals = ProcessSignals.shared
         signals.commandStarted()
         defer { signals.commandFinished() }
-        while semaphore.wait(timeout: .now() + 0.05) == .timedOut {
-            if signals.interruptRequested || stopRequest?.reason != nil {
+        let stopRequested = { signals.interruptRequested || self.stopRequest?.reason != nil }
+        if stopRequested() { return .interrupted }
+        let finished = DispatchSemaphore(value: 0)
+        let task = Task {
+            defer { finished.signal() }
+            await operation()
+        }
+        while finished.wait(timeout: .now() + 0.05) == .timedOut {
+            if stopRequested() {
                 task.cancel()
-                _ = semaphore.wait(timeout: .now() + 2.0)
+                _ = finished.wait(timeout: .now() + 2.0)
                 return .interrupted
             }
             if let dl = deadline, Date() > dl {
                 task.cancel()
-                _ = semaphore.wait(timeout: .now() + 2.0)
+                _ = finished.wait(timeout: .now() + 2.0)
                 return .timedOut
             }
         }
-        return .completed
+        return stopRequested() ? .interrupted : .completed
     }
 
     // MARK: - Auto-connect
@@ -1465,10 +1450,7 @@ extension CommandRouter {
         backgroundPeriphTask?.cancel()
         backgroundPeriphTask = nil
 
-        let startSemaphore = DispatchSemaphore(value: 0)
-
-        let startTask = Task {
-            defer { startSemaphore.signal() }
+        let startOperation: () async -> Void = {
             do {
                 let servicesWithChars = services.filter { !$0.characteristics.isEmpty }
                 if !servicesWithChars.isEmpty {
@@ -1496,7 +1478,7 @@ extension CommandRouter {
             }
         }
 
-        switch waitInterruptible(startTask, semaphore: startSemaphore, timeout: globals.timeout ?? 15.0) {
+        switch waitInterruptible(startOperation, timeout: globals.timeout ?? 15.0) {
         case .interrupted:
             peripheral.stopAdvertising()
             result.exitCode = BlewExitCode.interrupted.code
@@ -1528,10 +1510,7 @@ extension CommandRouter {
         var clonedName: String = "blew-clone"
         var initialValues: [BLEUUID: Data] = [:]
 
-        let snapSemaphore = DispatchSemaphore(value: 0)
-
-        let snapTask = Task {
-            defer { snapSemaphore.signal() }
+        let snapOperation: () async -> Void = { [self] in
             do {
                 let tree = try await manager.discoverTree(includeDescriptors: false)
 
@@ -1583,7 +1562,7 @@ extension CommandRouter {
             }
         }
 
-        switch waitInterruptible(snapTask, semaphore: snapSemaphore, timeout: globals.timeout ?? 15.0) {
+        switch waitInterruptible(snapOperation, timeout: globals.timeout ?? 15.0) {
         case .completed: break
         case .interrupted: result.exitCode = BlewExitCode.interrupted.code; return result
         case .timedOut:
@@ -1612,10 +1591,7 @@ extension CommandRouter {
         backgroundPeriphTask?.cancel()
         backgroundPeriphTask = nil
 
-        let startSemaphore = DispatchSemaphore(value: 0)
-
-        let startTask = Task {
-            defer { startSemaphore.signal() }
+        let startOperation: () async -> Void = {
             do {
                 result.infos.append("configuring \(clonedServices.count) cloned service(s)...")
                 try await peripheral.configure(services: clonedServices)
@@ -1639,7 +1615,7 @@ extension CommandRouter {
             }
         }
 
-        switch waitInterruptible(startTask, semaphore: startSemaphore, timeout: globals.timeout ?? 15.0) {
+        switch waitInterruptible(startOperation, timeout: globals.timeout ?? 15.0) {
         case .interrupted:
             peripheral.stopAdvertising()
             result.exitCode = BlewExitCode.interrupted.code
@@ -1681,12 +1657,11 @@ extension CommandRouter {
 
         renderer.renderResult(startup)
         var result = CommandResult()
-        let semaphore = DispatchSemaphore(value: 0)
         // Bluetooth leaving poweredOn ends advertising, and with it the
-        // command. Read only after the task signalled `semaphore`.
+        // command. Read only after waitInterruptible returned .completed,
+        // which means the operation has finished.
         var bluetoothLost: BLEError?
-        let eventTask = Task {
-            defer { semaphore.signal() }
+        let eventOperation: () async -> Void = {
             let eventStream = peripheral.events()
             // Bluetooth may have left poweredOn (and come back) before the
             // stream existed; in a one-shot command nothing else stops
@@ -1708,7 +1683,7 @@ extension CommandRouter {
                 if Task.isCancelled { break }
             }
         }
-        switch waitInterruptible(eventTask, semaphore: semaphore) {
+        switch waitInterruptible(eventOperation) {
         case .interrupted:
             peripheral.stopAdvertising()
             result.output.append(.message("Stopped advertising."))

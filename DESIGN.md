@@ -162,7 +162,7 @@ Key behaviors:
 - **`connect(deviceId:timeout:)`** — looks up the peripheral in the delegate's cache or via `retrievePeripherals(withIdentifiers:)`, connects, then immediately runs full GATT discovery (all services, all characteristics for each service) so subsequent read/write/subscribe calls can proceed without additional discovery round-trips. blew holds one connection: the connected device is disconnected first, also when it is the one asked for, so every connect runs connect and discovery afresh. A connect that ends without a connection (cancelled by an interrupt or the caller's timeout, or failed) also calls `cancelPeripheralConnection`, because CoreBluetooth otherwise keeps the connect pending and connects the device later. Ordering on `blew.cb` makes this hold for every interleaving: the queued `connect` runs only while the processor still waits for that peripheral, and the cancel is queued after the wait ended. A connect that reached the device but whose service discovery then failed or was cancelled (including a cancel just after `didConnect`) is not kept either: `endConnection(to:)` ends the link at once, so the state is "not connected" and auto-connect does not reuse a connection with an empty GATT cache, and `cancelPeripheralConnection` disconnects the device.
 - **`writeCharacteristic(_:data:type:)`** — a write with response waits for `didWriteValue`. A write without response first waits until `canSendWriteWithoutResponse` is true (polled on `blew.cb` after any earlier write, or signalled by `peripheralIsReady(toSendWriteWithoutResponse:)`), because CoreBluetooth silently drops one issued while it is false.
 - **`maximumWriteLength(withResponse:)`** — `maximumWriteValueLength(for:)` of the connection; without response it is the ATT MTU minus 3.
-- **`subscribe(characteristicUUID:)`** — enables notifications via `setNotifyValue(true)`, waits for the state-change callback to confirm, then returns `AsyncThrowingStream<Data, Error>`. The stream throws the error that ended the connection (`connectionFailed` on a disconnect, `bluetoothUnavailable` when Bluetooth goes away), so `sub` and `nus` exit with that error's code. On stream termination, disables notifications and removes the subscription.
+- **`subscribe(characteristicUUID:)`** — enables notifications via `setNotifyValue(true)`, waits for the state-change callback to confirm, then returns `AsyncThrowingStream<Data, Error>`. The stream throws the error that ended the connection (`connectionFailed` on a disconnect, `bluetoothUnavailable` when Bluetooth goes away), so `sub` and `nus` exit with that error's code. On stream termination, disables notifications and removes the subscription. A confirmation wait that is cancelled (the caller's deadline, a stop) queues `setNotifyValue(false)`; the processor queues the request to enable and the one to disable under its lock, so the disable follows the enable and precedes any subscribe started after the cancellation, and a device that confirms late is not left notifying an untracked subscription. The processor settles a subscribe wait only on a state change to notifying or an error, so the acknowledgement of the disable settles no later subscribe.
 
 ### 3.6 BLEPeripheral subsystem
 
@@ -405,12 +405,9 @@ The central command dispatcher. It is the shared implementation used by all thre
 
 **`run*()` methods** — each is a synchronous function that returns a `CommandResult` containing structured output. The method:
 1. Parses its args from the token array via private helpers: `parseStringOption`, `parseIntOption`, `parseDoubleOption`, `parseAllStringOptions`
-2. Creates a `DispatchSemaphore`
-3. Launches a `Task` calling the appropriate `BLECentral.shared` async method
-4. Appends structured `CommandOutput` items to the result (instead of printing directly)
-5. Signals the semaphore on completion (success or error)
-6. Waits on the semaphore
-7. Returns the `CommandResult`
+2. Builds an async operation closure calling the appropriate `BLECentral.shared` async method, which appends structured `CommandOutput` items to the result (instead of printing directly)
+3. Hands the operation to `waitInterruptible`, which starts it in a `Task` and blocks on a `DispatchSemaphore` until it finishes, is stopped or times out. A stop already requested when `waitInterruptible` is called keeps the operation from starting, and a stop requested before the wait saw the operation finish still gives `.interrupted`, so no operation starts once a stop has been seen and no command reports success after one.
+4. Returns the `CommandResult`
 
 Commands fall into two categories:
 - **Non-streaming commands** (scan, connect, disconnect, status, read, write, gatt *, periph set/notify/status/stop): produce all output before returning. Their `CommandResult` contains the full structured output.
@@ -671,7 +668,7 @@ The router is built from the global options the process was started with (`Globa
 1. *Validate.* `ToolArguments.validate` checks the arguments against the tool's `inputSchema`, the one description of what each tool accepts: every argument is a declared property of the declared JSON type, inside its `enum`, `minimum` and `maximum` (array items against `items`), and every `required` property is present. A mismatch is an error result with exit code 6; no argument is ignored or coerced. The argument builders run after validation, so they read only values of the declared types.
 2. *Build.* `makeCommand` turns the arguments into a `ToolCommand`: the router work, and the duration the call itself asks for (the `ble_scan` `timeout`, the `ble_subscribe` or `ble_nus` `duration`, zero otherwise). `ble_subscribe` always passes `-d`: the call's `duration`, or `defaultSubscribeDuration` (10 s); `count` is optional and ends it earlier. It calls `runSub(foregroundOnly: true)`, so no argument text (a `name` of `-b`) can start a background subscription that outlives the call and mutates router state off the queue. Errors in the `ble_nus` options are argument errors too and return before the call is queued. The schemas cap these durations at `maxCallDuration` (300 s).
 3. *Queue.* `ToolCallQueue.run` executes the work on its own serial `DispatchQueue` (`blew.mcp.calls`), so calls never overlap: each starts after the one before it returned. Requests a client pipelines without waiting for replies reach the queue in either order, because the swift-sdk's per-request Tasks race until they enqueue; the server's instructions tell clients to send a dependent call after the reply. The swift-sdk handles each request in its own Task; without the queue, concurrent calls would share the single-slot operation waits of `BLEEventProcessor`, the router's state (`lastScanResults`, `backgroundSubTasks`) and the connection, and one call's auto-connect could replace the device another call is using. The router's commands block their thread on semaphores, so the queue's thread, not a thread of the cooperative pool, is the one that blocks; the request's Task suspends on a continuation until the work returns.
-4. *Stop.* Each call has a `StopRequest`, attached to the router with `run(stoppingOn:)` for the call's duration; `run(stoppingOn:)` also makes the whole call one `ProcessSignals` span. `waitInterruptible` treats a set request like a SIGINT: it cancels the waiting operation and returns `.interrupted`. The request is set to `.cancelled` when the swift-sdk cancels the request's Task (it does on `notifications/cancelled`), and to `.budgetExhausted` when the call's budget runs out: its duration plus `setupAllowance` (60 s), or plus four times `-t` when that is longer, counted from when the call starts. A cancelled call throws `CancellationError`, so the swift-sdk sends no response; a cancelled call still waiting its turn never starts. A call whose budget ran out and that did not succeed fails with exit code 4 and keeps the output it collected.
+4. *Stop.* Each call has a `StopRequest`, attached to the router with `run(stoppingOn:)` for the call's duration; `run(stoppingOn:)` also makes the whole call one `ProcessSignals` span. `waitInterruptible` treats a set request like a SIGINT: it cancels the waiting operation and returns `.interrupted`. The request is set to `.cancelled` when the swift-sdk cancels the request's Task (it does on `notifications/cancelled`), and to `.budgetExhausted` when the call's budget runs out (a cancellation replaces an exhausted budget, never the reverse): its duration plus `setupAllowance` (60 s), or plus four times `-t` when that is longer, counted from when the call starts. A cancelled call throws `CancellationError`, so the swift-sdk sends no response; a cancelled call still waiting its turn never starts. A call whose budget ran out and that did not succeed fails with exit code 4 and keeps the output it collected.
 
 **SIGINT in MCP mode.** `ProcessSignals` keeps one process-wide interrupt flag. With calls serialized and each call one span, a SIGINT while a call runs stops exactly that call, at its next wait if it is between two, which returns exit code 130 to its client; the server keeps serving. A SIGINT with no call running ends the server with 130, as in every other mode, and SIGTERM ends it with 143.
 
@@ -732,16 +729,18 @@ Swift cooperative pool  async Task bodies (BLECentral and BLEPeripheral)
 
 The `blew.pm` queue is separate from `blew.cb`. Both can coexist during `periph clone` (which temporarily runs in central mode to snapshot a real device, then switches to peripheral mode).
 
-The semaphore-based bridge is the key synchronisation point:
+The semaphore-based bridge, `CommandRouter.waitInterruptible`, is the key synchronisation point:
 
 ```swift
-let semaphore = DispatchSemaphore(value: 0)
-Task {
+let operation: () async -> Void = {
     do { try await BLECentral.shared.someOperation() }
     catch { ... }
-    semaphore.signal()
 }
-semaphore.wait()
+switch waitInterruptible(operation, timeout: 5) {   // Task + DispatchSemaphore inside
+case .completed: ...
+case .interrupted: ...   // SIGINT or StopRequest; exit 130
+case .timedOut: ...      // exit 4
+}
 ```
 
 This lets the REPL and `--exec` runner remain purely synchronous while the BLE stack operates asynchronously. The cost is one thread blocked per in-flight BLE operation, which is acceptable given the interactive/scripting nature of the tool.
