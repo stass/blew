@@ -214,6 +214,64 @@ final class GATTDecoderTests: XCTestCase {
         XCTAssertEqual(try condition("2C27", "Cooking Step Index"), nil)
     }
 
+    /// The JSON object of one field of `gatt info`, as FieldInfo encodes it.
+    private func fieldJSON(_ uuid: String, _ field: String) throws -> NSDictionary {
+        let info = try XCTUnwrap(GATTDecoder.info(for: uuid))
+        let fieldInfo = try XCTUnwrap(info.fields.first { $0.name == field })
+        let data = try JSONEncoder().encode(fieldInfo)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? NSDictionary)
+    }
+
+    func testInfoJSONEncodesEveryConditionKind() throws {
+        func condition(_ uuid: String, _ field: String) throws -> NSDictionary? {
+            try fieldJSON(uuid, field)["condition"] as? NSDictionary
+        }
+        XCTAssertEqual(try condition("2BED", "Identifier"),
+                       ["kind": "bit", "field": "Flags", "bit": 0, "value": 1])
+        XCTAssertEqual(try condition("2C27", "Temperature Gradient"),
+                       ["kind": "allOf", "conditions": [
+                           ["kind": "bit", "field": "Flags", "bit": 3, "value": 1],
+                           ["kind": "bit", "field": "Flags", "bit": 4, "value": 1],
+                       ]])
+        XCTAssertEqual(try condition("2B4D", "Threshold as Heart Rate"),
+                       ["kind": "equals", "field": "Field Selector", "value": 4])
+        XCTAssertEqual(try condition("2C27", "Duration"),
+                       ["kind": "notEquals", "field": "Cooking Process Type", "value": 0])
+        XCTAssertEqual(try condition("2AA9", "E2E-CRC"),
+                       ["kind": "external",
+                        "description": "E2E-CRC Supported bit in CGM Feature characteristic is set to 1"])
+    }
+
+    func testInfoJSONKeepsConditionDescriptionBesideCondition() throws {
+        let json = try fieldJSON("2C27", "Temperature Gradient")
+        XCTAssertEqual(json["conditionDescription"] as? String,
+                       "present if bit 3 of Flags is 1 and bit 4 of Flags is 1")
+    }
+
+    func testInfoJSONOmitsConditionForUnconditionalField() throws {
+        let json = try fieldJSON("2C27", "Cooking Step Index")
+        XCTAssertEqual(Set(json.allKeys.compactMap { $0 as? String }),
+                       ["name", "typeName", "sizeDescription"])
+    }
+
+    func testInfoJSONConditionRoundTrips() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        for (uuid, field) in [("2C27", "Temperature Gradient"), ("2AA9", "E2E-CRC"),
+                              ("2C27", "Duration"), ("2C27", "Cooking Step Index")] {
+            let info = try XCTUnwrap(GATTDecoder.info(for: uuid))
+            let original = try XCTUnwrap(info.fields.first { $0.name == field })
+            let data = try encoder.encode(original)
+            let decoded = try JSONDecoder().decode(GATTDecoder.FieldInfo.self, from: data)
+            XCTAssertEqual(try encoder.encode(decoded), data, "\(uuid) \(field)")
+        }
+    }
+
+    func testInfoJSONRejectsUnknownConditionKind() {
+        let json = #"{"name":"X","typeName":"uint8","sizeDescription":"1 byte","condition":{"kind":"anyOf","conditions":[]}}"#
+        XCTAssertThrowsError(try JSONDecoder().decode(GATTDecoder.FieldInfo.self, from: Data(json.utf8)))
+    }
+
     // MARK: - SFLOAT and FLOAT (IEEE 11073-20601)
 
     private func sfloat(_ raw: UInt16) -> String {

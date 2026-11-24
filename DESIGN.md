@@ -560,7 +560,7 @@ Supported types include all standard GATT integer types (`uint8` through `uint64
 
 **Info query** (`GATTDecoder.info(for:)`)
 
-Returns a `CharacteristicInfo` struct for use by `gatt info`, containing the name, description, and a `FieldInfo` array with human-readable type and size descriptions.
+Returns a `CharacteristicInfo` struct for use by `gatt info`, containing the name, description, and a `FieldInfo` array with human-readable type and size descriptions. Each `FieldInfo` keeps the field's `conditions`, the same values the decoder evaluates, and derives both of its condition outputs from them: `conditionDescription` ("present if bit 3 of Flags is 1 and bit 4 of Flags is 1", shown by the text and kv renderers) and, in JSON (MCP `structuredContent`), a `condition` object, which `GATTCharacteristicDB.Condition`'s `Codable` conformance writes with one `kind` per case (`allOf` wraps several). An unconditional field has neither. README.md's `gatt info` section is the schema.
 
 ### 4.10 BLENames
 

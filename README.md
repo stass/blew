@@ -351,7 +351,40 @@ Structure:
   Day of Week.Day of Week  uint8   1 byte
 ```
 
-With `-o kv`, one record per field is emitted (for scripting).
+With `-o kv`, one record per field is emitted (for scripting); a conditional field's record has `condition=` with the "present if ..." text.
+
+The MCP tool `ble_gatt_info` returns the same fields as JSON in `structuredContent`, at `characteristicInfo.fields`. A conditional field has two more keys: `conditionDescription`, the "present if ..." text, and `condition`, the same condition as an object. A field that is always present has neither. Part of the result for `char_uuid` `2C27` (Recipe Parameters), with `description` and most fields left out:
+
+```json
+{
+  "type": "characteristicInfo",
+  "characteristicInfo": {
+    "uuid": "2C27",
+    "name": "Recipe Parameters",
+    "fields": [
+      {"name": "Cooking Step Index", "typeName": "uint16", "sizeDescription": "2 bytes"},
+      {"name": "Duration", "typeName": "uint16", "sizeDescription": "2 bytes",
+       "condition": {"kind": "notEquals", "field": "Cooking Process Type", "value": 0},
+       "conditionDescription": "present if Cooking Process Type is not 0"},
+      {"name": "Temperature Gradient", "typeName": "uint8", "sizeDescription": "1 byte",
+       "condition": {"kind": "allOf", "conditions": [
+         {"kind": "bit", "field": "Flags", "bit": 3, "value": 1},
+         {"kind": "bit", "field": "Flags", "bit": 4, "value": 1}]},
+       "conditionDescription": "present if bit 3 of Flags is 1 and bit 4 of Flags is 1"}
+    ]
+  }
+}
+```
+
+`condition` has one of these shapes. `field` names an earlier field of the same characteristic, read as a little-endian unsigned integer.
+
+| `kind` | Other keys | The field is present when |
+|---|---|---|
+| `bit` | `field`, `bit`, `value` (0 or 1) | bit `bit` of `field` (bit 0 is the least significant) equals `value` |
+| `equals` | `field`, `value` | `field` equals `value` |
+| `notEquals` | `field`, `value` | `field` does not equal `value` |
+| `external` | `description` | something outside this value says so, such as a bit of another characteristic; `description` says what. Only the last field has this kind, and blew decodes it when bytes remain for it |
+| `allOf` | `conditions`: two or more of the kinds above | every condition in `conditions` holds |
 
 **Examples:**
 ```sh

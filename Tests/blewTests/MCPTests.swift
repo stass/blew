@@ -387,7 +387,7 @@ final class MCPStructuredResultTests: XCTestCase {
     }
 
     func testCharacteristicInfoRoundTrip() throws {
-        let field = GATTDecoder.FieldInfo(name: "Level", typeName: "uint8", sizeDescription: "1 byte", conditionDescription: nil)
+        let field = GATTDecoder.FieldInfo(name: "Level", typeName: "uint8", sizeDescription: "1 byte", conditions: [])
         let info = GATTCharInfo(uuid: "2A19", name: "Battery Level", description: "Battery %", fields: [field])
         let original = StructuredResult.characteristicInfo(info)
         let json = try jsonString(original)
@@ -572,7 +572,7 @@ final class MCPEncodeStructuredContentTests: XCTestCase {
     }
 
     func testCharacteristicInfoMapped() {
-        let field = GATTDecoder.FieldInfo(name: "Level", typeName: "uint8", sizeDescription: "1 byte", conditionDescription: nil)
+        let field = GATTDecoder.FieldInfo(name: "Level", typeName: "uint8", sizeDescription: "1 byte", conditions: [])
         let info = GATTCharInfo(uuid: "2A19", name: "Battery Level", description: "Battery %", fields: [field])
         let result = server.encodeStructuredContent([.characteristicInfo(info)])
         guard case .characteristicInfo(let i) = result else {
@@ -710,6 +710,22 @@ final class MCPToolDispatchTests: XCTestCase {
         } else {
             XCTFail("Expected structuredContent with type=characteristicInfo")
         }
+    }
+
+    func testGATTInfoStructuredContentCarriesFieldCondition() async throws {
+        let params = CallTool.Parameters(name: "ble_gatt_info", arguments: ["char_uuid": .string("2C27")])
+        let result = try await server.handleToolCall(params)
+        let sc = try XCTUnwrap(result.structuredContent)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(sc)) as? NSDictionary)
+        let info = try XCTUnwrap(json["characteristicInfo"] as? NSDictionary)
+        let fields = try XCTUnwrap(info["fields"] as? [NSDictionary])
+        let duration = try XCTUnwrap(fields.first { $0["name"] as? String == "Duration" })
+        XCTAssertEqual(duration["condition"] as? NSDictionary,
+                       ["kind": "notEquals", "field": "Cooking Process Type", "value": 0])
+        XCTAssertEqual(duration["conditionDescription"] as? String, "present if Cooking Process Type is not 0")
+        let index = try XCTUnwrap(fields.first { $0["name"] as? String == "Cooking Step Index" })
+        XCTAssertNil(index["condition"])
+        XCTAssertNil(index["conditionDescription"])
     }
 
     func testGATTInfoFullUUID() async throws {

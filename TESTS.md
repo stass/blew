@@ -28,7 +28,7 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 
 **Pure data logic**
 
-`DataFormatterTests`, `BLENamesTests`, `GATTDecoderTests` — stateless functions with no I/O. Format and parse all data representations, UUID lookups, and GATT characteristic decoding. Fast and fully deterministic.
+`DataFormatterTests`, `BLENamesTests`, `GATTDecoderTests` — stateless functions with no I/O. Format and parse all data representations, UUID lookups, GATT characteristic decoding, and the `gatt info` field JSON (each `condition` kind, its omission for unconditional fields, and its round trip). Fast and fully deterministic.
 
 **REPL command parsing**
 
@@ -99,7 +99,7 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 
 `MCPEncodeStructuredContentTests` — tests for `BlewMCPServer.encodeStructuredContent(_:)`: empty arrays, `empty`-only arrays, individual output cases, notification aggregation (multiple `.notification` items collapsed into `.notifications([...])`), and peripheral-event aggregation.
 
-`MCPToolDispatchTests` — exercises `handleToolCall` for commands that do not require a BLE connection: `ble_gatt_info` (known UUID, unknown UUID, missing param), `ble_status`, `ble_periph_status`, `ble_periph_stop`, and unknown tool name (expects `MCPError.methodNotFound`). Also tests `executeTool`, `buildMCPResult`, and `buildTextContent` directly.
+`MCPToolDispatchTests` — exercises `handleToolCall` for commands that do not require a BLE connection: `ble_gatt_info` (known UUID, unknown UUID, missing param, a field's `condition` and `conditionDescription` in `structuredContent`), `ble_status`, `ble_periph_status`, `ble_periph_stop`, and unknown tool name (expects `MCPError.methodNotFound`). Also tests `executeTool`, `buildMCPResult`, and `buildTextContent` directly.
 
 `MCPToolDefinitionTests` — verifies the static `toolDefinitions` array: correct count (19 tools), all expected tool names present, `readOnlyHint` and `idempotentHint` annotations, and required-field schemas for `ble_gatt_info`, `ble_write`, and `ble_gatt_chars`.
 

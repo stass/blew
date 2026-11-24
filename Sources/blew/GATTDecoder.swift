@@ -34,7 +34,7 @@ enum GATTDecoder {
                 name: f.name,
                 typeName: typeName(f.type),
                 sizeDescription: sizeDescription(f.size),
-                conditionDescription: conditionDescription(f.conditions)
+                conditions: f.conditions
             )
         }
         return CharacteristicInfo(
@@ -47,12 +47,75 @@ enum GATTDecoder {
 
     // MARK: - Info types
 
+    /// One field of `gatt info`. Its JSON `condition` and
+    /// `conditionDescription` both derive from `conditions`, so they cannot
+    /// disagree with each other or with the decoder; README.md's `gatt info`
+    /// section is the schema.
     struct FieldInfo: Codable {
         let name: String
         let typeName: String
         let sizeDescription: String
+        /// The decoder's presence conditions; all must hold, empty means always.
+        let conditions: [GATTCharacteristicDB.Condition]
+
         /// "present if ..." for a conditional field, nil for one always present.
-        let conditionDescription: String?
+        var conditionDescription: String? { GATTDecoder.conditionDescription(conditions) }
+
+        init(name: String, typeName: String, sizeDescription: String,
+             conditions: [GATTCharacteristicDB.Condition]) {
+            self.name = name
+            self.typeName = typeName
+            self.sizeDescription = sizeDescription
+            self.conditions = conditions
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case name, typeName, sizeDescription, condition, conditionDescription
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(name, forKey: .name)
+            try container.encode(typeName, forKey: .typeName)
+            try container.encode(sizeDescription, forKey: .sizeDescription)
+            guard let description = conditionDescription else { return }
+            if conditions.count == 1 {
+                try container.encode(conditions[0], forKey: .condition)
+            } else {
+                var allOf = container.nestedContainer(keyedBy: ConditionKey.self, forKey: .condition)
+                try allOf.encode(ConditionKind.allOf, forKey: .kind)
+                try allOf.encode(conditions, forKey: .conditions)
+            }
+            try container.encode(description, forKey: .conditionDescription)
+        }
+
+        /// Reads `condition` back; `conditionDescription` is derived from it,
+        /// so its encoded text is not read. Decoding exists because
+        /// `StructuredResult` is `Codable`; blew only encodes these values,
+        /// so this is not a trust boundary, and its checks only keep a
+        /// decoded `.bit` from trapping in `holds`.
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            name = try container.decode(String.self, forKey: .name)
+            typeName = try container.decode(String.self, forKey: .typeName)
+            sizeDescription = try container.decode(String.self, forKey: .sizeDescription)
+            guard container.contains(.condition) else {
+                conditions = []
+                return
+            }
+            let condition = try container.nestedContainer(keyedBy: ConditionKey.self, forKey: .condition)
+            if try condition.decode(ConditionKind.self, forKey: .kind) == .allOf {
+                let all = try condition.decode([GATTCharacteristicDB.Condition].self, forKey: .conditions)
+                guard all.count >= 2 else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .conditions, in: condition,
+                        debugDescription: "allOf needs at least two conditions")
+                }
+                conditions = all
+            } else {
+                conditions = [try container.decode(GATTCharacteristicDB.Condition.self, forKey: .condition)]
+            }
+        }
     }
 
     struct CharacteristicInfo {
@@ -322,6 +385,71 @@ enum GATTDecoder {
         case -1:         return "variable"
         case 1:          return "1 byte"
         default:         return "\(size) bytes"
+        }
+    }
+}
+
+/// The keys of a `condition` object in `gatt info` JSON.
+private enum ConditionKey: String, CodingKey {
+    case kind, field, bit, value, description, conditions
+}
+
+/// The `kind` of a `condition` object: one per `Condition` case, and
+/// `allOf`, FieldInfo's wrapper for several conditions.
+private enum ConditionKind: String, Codable {
+    case bit, equals, notEquals, external, allOf
+}
+
+/// A presence condition as one `condition` object of `gatt info` JSON.
+extension GATTCharacteristicDB.Condition: Codable {
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ConditionKey.self)
+        switch self {
+        case .bit(let field, let bit, let set):
+            try container.encode(ConditionKind.bit, forKey: .kind)
+            try container.encode(field, forKey: .field)
+            try container.encode(bit, forKey: .bit)
+            try container.encode(set ? 1 : 0, forKey: .value)
+        case .equals(let field, let value):
+            try container.encode(ConditionKind.equals, forKey: .kind)
+            try container.encode(field, forKey: .field)
+            try container.encode(value, forKey: .value)
+        case .notEquals(let field, let value):
+            try container.encode(ConditionKind.notEquals, forKey: .kind)
+            try container.encode(field, forKey: .field)
+            try container.encode(value, forKey: .value)
+        case .external(let text):
+            try container.encode(ConditionKind.external, forKey: .kind)
+            try container.encode(text, forKey: .description)
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: ConditionKey.self)
+        switch try container.decode(ConditionKind.self, forKey: .kind) {
+        case .bit:
+            let bit = try container.decode(Int.self, forKey: .bit)
+            guard (0..<64).contains(bit) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .bit, in: container, debugDescription: "a bit condition needs a bit in 0...63")
+            }
+            let value = try container.decode(Int.self, forKey: .value)
+            guard value == 0 || value == 1 else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .value, in: container, debugDescription: "a bit condition needs a value of 0 or 1")
+            }
+            self = .bit(field: try container.decode(String.self, forKey: .field), bit: bit, set: value == 1)
+        case .equals:
+            self = .equals(field: try container.decode(String.self, forKey: .field),
+                           value: try container.decode(UInt64.self, forKey: .value))
+        case .notEquals:
+            self = .notEquals(field: try container.decode(String.self, forKey: .field),
+                              value: try container.decode(UInt64.self, forKey: .value))
+        case .external:
+            self = .external(try container.decode(String.self, forKey: .description))
+        case .allOf:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: container, debugDescription: "allOf cannot nest inside a condition")
         }
     }
 }
