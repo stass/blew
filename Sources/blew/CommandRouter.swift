@@ -2109,12 +2109,17 @@ private final class ScanWatchDisplay {
         let header = "\(frame) Scanning \(String(format: "%.0f", elapsed))s  \(countStr)  (Ctrl-C to stop)"
 
         let rows = CommandRouter.deviceRows(devices).map { TextTable.Row(cells: TextRenderer.deviceCells($0)) }
-        let lines = [TextLine(header)]
-            + TextTable.lines(headers: TextRenderer.deviceHeaders.map(\.title), rows: rows)
+        let table = TextTable.lines(headers: TextRenderer.deviceHeaders.map(\.title), rows: rows)
+        // The table's header line and rule stay when a short terminal cuts
+        // device rows; the rows are cut from the bottom, the weakest RSSI
+        // (`devices` comes sorted strongest first).
+        let tableHead = table.prefix(2)
 
         // Replace the lines drawn last.
-        StandardErrorLog.redraw(lines, replacing: previousLineCount, styled: formatter.styled)
-        previousLineCount = lines.count
+        previousLineCount = StandardErrorLog.redraw(
+            head: [TextLine(header)] + tableHead, rows: Array(table.dropFirst(tableHead.count)),
+            overflow: { TextLine("… \($0) more (use -o kv for all)", .dim) },
+            replacing: previousLineCount, styled: formatter.styled)
     }
 }
 

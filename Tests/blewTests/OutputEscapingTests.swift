@@ -221,10 +221,15 @@ final class OutputEscapingTests: XCTestCase {
     func testLiveDisplayRedrawsEscapeText() {
         let spinner = captureFD(STDERR_FILENO) { StandardErrorLog.redraw(TextLine("\u{1B}[2J"), styled: false) }
         XCTAssertEqual(spinner, "\r\u{1B}[K\\x1b[2J")
-        let lines = [TextLine("a\u{9B}"), TextLine("b")]
-        let first = captureFD(STDERR_FILENO) { StandardErrorLog.redraw(lines, replacing: 0, styled: false) }
+        let head = [TextLine("a\u{9B}")], rows = [TextLine("b")]
+        func redraw(replacing previous: Int) -> Int {
+            StandardErrorLog.redraw(head: head, rows: rows, overflow: Self.more, replacing: previous, styled: false)
+        }
+        var written = 0
+        let first = captureFD(STDERR_FILENO) { written = redraw(replacing: 0) }
         XCTAssertEqual(first, "a\\u009b\nb\n")
-        let next = captureFD(STDERR_FILENO) { StandardErrorLog.redraw(lines, replacing: 2, styled: false) }
+        XCTAssertEqual(written, 2)
+        let next = captureFD(STDERR_FILENO) { _ = redraw(replacing: 2) }
         XCTAssertEqual(next, "\u{1B}[2A\u{1B}[Ja\\u009b\nb\n")
         let erased = captureFD(STDERR_FILENO) { StandardErrorLog.erase(.eraseLinesAbove(0)) }
         XCTAssertEqual(erased, "")
@@ -282,8 +287,12 @@ final class OutputEscapingTests: XCTestCase {
     func testRedrawClipsToTerminalWidth() {
         let lines = [TextLine("⠋ Scanning 3s  2 devices"), TextLine("温度 \u{1B}]0;title\u{07}", .bold),
                      TextLine(String(repeating: "x", count: 30), .dim)]
-        let first = StandardErrorLog.frame(lines, replacing: 0, columns: 20, styled: true)
-        let next = StandardErrorLog.frame(lines, replacing: lines.count, columns: 20, styled: true)
+        func frame(replacing previous: Int, columns: Int?, styled: Bool) -> String {
+            StandardErrorLog.frame(head: [], rows: lines, overflow: Self.more, replacing: previous,
+                                   terminal: TerminalSize(columns: columns, rows: nil), styled: styled).text
+        }
+        let first = frame(replacing: 0, columns: 20, styled: true)
+        let next = frame(replacing: lines.count, columns: 20, styled: true)
         XCTAssertTrue(next.hasPrefix("\u{1B}[3A\u{1B}[J"))
         XCTAssertEqual(rows(of: first, columns: 20), 3)
         XCTAssertEqual(rows(of: next, columns: 20), 3)
@@ -291,12 +300,65 @@ final class OutputEscapingTests: XCTestCase {
         XCTAssertTrue(first.contains("\u{1B}[1m温度 \\x1b]0;title…\u{1B}[0m\n"))  // cut before \x07
 
         // A width that is not known clips nothing.
-        let whole = StandardErrorLog.frame(lines, replacing: 0, columns: nil, styled: false)
+        let whole = frame(replacing: 0, columns: nil, styled: false)
         XCTAssertTrue(whole.contains(String(repeating: "x", count: 30) + "\n"))
 
         let spinner = StandardErrorLog.frame(TextLine("⠋ Scanning… 1.2/5s · 3 devices"), columns: 12,
                                              styled: false)
         XCTAssertEqual(spinner, "\r\u{1B}[K⠋ Scanning……")
+    }
+
+    /// The overflow line of the row-cap tests: how many rows are cut.
+    private static func more(_ cut: Int) -> TextLine { TextLine("… \(cut) more rows here", .dim) }
+
+    /// A frame of `head` and the rows `r0`, `r1`, ... on a terminal `size`.
+    private func capped(_ head: [String], rows count: Int, _ size: TerminalSize,
+                        replacing previous: Int = 0) -> StandardErrorLog.LiveFrame {
+        StandardErrorLog.frame(head: head.map { TextLine($0) }, rows: (0..<count).map { TextLine("r\($0)") },
+                               overflow: Self.more, replacing: previous, terminal: size, styled: false)
+    }
+
+    /// A `scan -w` frame never takes more than `rows - 1` lines of a terminal
+    /// `rows` high, so it never scrolls and the next frame's cursor-up reaches
+    /// its first line. The head lines stay; the last line counts the rows cut.
+    func testRedrawCapsToTerminalHeight() {
+        let head = ["status", "header", "rule"]
+
+        // Exact fit: 3 + 6 lines in a 10-row terminal, nothing cut.
+        let fit = capped(head, rows: 6, TerminalSize(columns: nil, rows: 10))
+        XCTAssertEqual(fit.lineCount, 9)
+        XCTAssertEqual(fit.text, "status\nheader\nrule\nr0\nr1\nr2\nr3\nr4\nr5\n")
+
+        // One over: the last row and the one before it give way to the
+        // overflow line, which counts both.
+        let over = capped(head, rows: 7, TerminalSize(columns: nil, rows: 10))
+        XCTAssertEqual(over.lineCount, 9)
+        XCTAssertEqual(over.text, "status\nheader\nrule\nr0\nr1\nr2\nr3\nr4\n… 2 more rows here\n")
+
+        // The next frame erases exactly the lines written, not the rows asked.
+        let next = capped(head, rows: 60, TerminalSize(columns: nil, rows: 10), replacing: over.lineCount)
+        XCTAssertTrue(next.text.hasPrefix("\u{1B}[9A\u{1B}[J"))
+        XCTAssertEqual(next.lineCount, 9)
+        XCTAssertTrue(next.text.hasSuffix("r4\n… 55 more rows here\n"))
+
+        // The overflow line is clipped to the width like every other line.
+        let narrow = capped(head, rows: 60, TerminalSize(columns: 8, rows: 10))
+        XCTAssertEqual(narrow.lineCount, 9)
+        XCTAssertTrue(narrow.text.hasSuffix("\n… 55 mo…\n"))
+
+        // A terminal too short for the head: the frame still fits, and the
+        // overflow line counts every row; one row high, nothing is drawn.
+        let short = capped(head, rows: 5, TerminalSize(columns: nil, rows: 3))
+        XCTAssertEqual(short.text, "status\n… 5 more rows here\n")
+        XCTAssertEqual(short.lineCount, 2)
+        let none = capped(head, rows: 5, TerminalSize(columns: nil, rows: 1))
+        XCTAssertEqual(none.text, "")
+        XCTAssertEqual(none.lineCount, 0)
+
+        // A height that is not known caps nothing.
+        let whole = capped(head, rows: 60, TerminalSize(columns: 8, rows: nil))
+        XCTAssertEqual(whole.lineCount, 63)
+        XCTAssertFalse(whole.text.contains("more"))
     }
 
     /// A table's kv keys are its literal headers, lowercased with spaces as `_`.

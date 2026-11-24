@@ -64,6 +64,13 @@ enum StandardOutput {
     }
 }
 
+/// The size of a terminal in character cells, from one TIOCGWINSZ query; nil
+/// for a dimension the terminal does not report.
+struct TerminalSize {
+    let columns: Int?
+    let rows: Int?
+}
+
 enum StandardErrorLog {
     static var isTerminal: Bool { isatty(STDERR_FILENO) != 0 }
 
@@ -92,15 +99,21 @@ enum StandardErrorLog {
     /// cursor's line and writes `line`, clipped to stderr's width, leaving
     /// the cursor at its end.
     static func redraw(_ line: TextLine, styled: Bool) {
-        emit(frame(line, columns: terminalColumns, styled: styled))
+        emit(frame(line, columns: terminalSize.columns, styled: styled))
     }
 
     /// Redraws a live display of several lines (`scan -w`): erases the
-    /// `previous` lines it drew last and writes `lines`, each clipped to
-    /// stderr's width and ending in a newline, in one write so the terminal
-    /// never shows half a frame.
-    static func redraw(_ lines: [TextLine], replacing previous: Int, styled: Bool) {
-        emit(frame(lines, replacing: previous, columns: terminalColumns, styled: styled))
+    /// `previous` lines it drew last and writes `head` and `rows` as
+    /// `frame(head:rows:overflow:replacing:terminal:styled:)` fits them to
+    /// stderr's terminal, in one write so the terminal never shows half a
+    /// frame. Returns the number of lines written: the `previous` of the
+    /// next redraw and of the `erase` that ends the display.
+    static func redraw(head: [TextLine], rows: [TextLine], overflow: (Int) -> TextLine,
+                       replacing previous: Int, styled: Bool) -> Int {
+        let frame = frame(head: head, rows: rows, overflow: overflow, replacing: previous,
+                          terminal: terminalSize, styled: styled)
+        emit(frame.text)
+        return frame.lineCount
     }
 
     /// The bytes of a one-line redraw on a terminal `columns` wide (nil:
@@ -109,28 +122,55 @@ enum StandardErrorLog {
         TerminalControl.eraseLine.sequence + clipped(line, to: columns).rendered(styled: styled)
     }
 
-    /// The bytes of a redraw of several lines on a terminal `columns` wide
-    /// (nil: not known, and not clipped). Clipped, each line takes one row,
-    /// so the `lines.count` a display passes as `previous` next time is the
-    /// number of rows to erase.
-    static func frame(_ lines: [TextLine], replacing previous: Int, columns: Int?,
-                      styled: Bool) -> String {
-        TerminalControl.eraseLinesAbove(previous).sequence
-            + lines.map { clipped($0, to: columns).rendered(styled: styled) + "\n" }.joined()
+    /// One redraw of a live display of several lines: its bytes, and the
+    /// number of lines they write, each ending in a newline.
+    struct LiveFrame {
+        let text: String
+        let lineCount: Int
+    }
+
+    /// A redraw of `head` then `rows` on `terminal`. Every line is clipped
+    /// to the terminal's width, so it takes one row. On a terminal `h`
+    /// rows high the frame takes at most `h - 1` lines, so the newline
+    /// after its last line does not scroll its first off the screen, where
+    /// the next frame's cursor-up could not reach it. When `head` and
+    /// `rows` do not fit, the lines are kept in order (the head first, then
+    /// the rows from the top) and the last line is `overflow(n)`, `n` the
+    /// rows not shown. A dimension the terminal does not report (nil)
+    /// neither clips nor caps.
+    static func frame(head: [TextLine], rows: [TextLine], overflow: (Int) -> TextLine,
+                      replacing previous: Int, terminal: TerminalSize, styled: Bool) -> LiveFrame {
+        var lines = head + rows
+        if let height = terminal.rows, lines.count > height - 1 {
+            let budget = max(height - 1, 0)
+            if rows.isEmpty || budget == 0 {
+                lines = Array(head.prefix(budget))
+            } else {
+                // One line of the budget is the overflow line; the head
+                // takes what it can of the rest, the rows what remains.
+                let shownRows = max(budget - 1 - head.count, 0)
+                lines = Array(head.prefix(budget - 1)) + rows.prefix(shownRows)
+                    + [overflow(rows.count - shownRows)]
+            }
+        }
+        let text = TerminalControl.eraseLinesAbove(previous).sequence
+            + lines.map { clipped($0, to: terminal.columns).rendered(styled: styled) + "\n" }.joined()
+        return LiveFrame(text: text, lineCount: lines.count)
     }
 
     private static func clipped(_ line: TextLine, to columns: Int?) -> TextLine {
         columns.map { line.clipped(to: $0) } ?? line
     }
 
-    /// The width of the terminal on stderr, asked at each redraw so a live
-    /// display follows a resized window; nil when stderr is not a terminal
-    /// or the terminal reports a width of 0 (a pty nobody sized), where the
-    /// width is not known and lines are written whole.
-    private static var terminalColumns: Int? {
+    /// The size of the terminal on stderr, asked at each redraw so a live
+    /// display follows a resized window. A dimension is nil when stderr is
+    /// not a terminal or the terminal reports it as 0 (a pty nobody sized):
+    /// it is not known, and lines are neither clipped nor capped by it.
+    private static var terminalSize: TerminalSize {
         var size = winsize()
-        guard ioctl(STDERR_FILENO, TIOCGWINSZ, &size) == 0, size.ws_col > 0 else { return nil }
-        return Int(size.ws_col)
+        guard ioctl(STDERR_FILENO, TIOCGWINSZ, &size) == 0 else { return TerminalSize(columns: nil, rows: nil) }
+        return TerminalSize(columns: size.ws_col > 0 ? Int(size.ws_col) : nil,
+                            rows: size.ws_row > 0 ? Int(size.ws_row) : nil)
     }
 
     /// Erases what a live display drew, when it stops.

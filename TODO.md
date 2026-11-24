@@ -198,7 +198,7 @@ None open.
     (`Sources/blew/Output/TextEscaping.swift`); LineNoise is its own
     target, so the fix moves that function to a target both depend on
     rather than writing a second one, with the terminal size query
-    (`linenoise.swift:316` and `StandardErrorLog.terminalColumns`).
+    (`linenoise.swift:316` and `StandardErrorLog.terminalSize`).
 - [ ] A `scan -w` frame drawn before the window is made narrower can leave
   stale rows. `Sources/blew/Output/StandardStreams.swift` (`frame`) clips
   each frame to the width at its own redraw, and the next redraw moves up
@@ -206,15 +206,18 @@ None open.
   (Terminal.app, iTerm2) gives the old lines more rows than that.
   Scenario: `blew scan -w` at 160 columns, then shrink the window to 80:
   the old frame's extra rows stay on the screen above the table. No more
-  pile up once frames are drawn at the new width.
-- [ ] A `scan -w` table taller than the terminal piles up partial frames
-  in scrollback. `Sources/blew/Output/StandardStreams.swift` (`frame`)
-  writes every device row (`CommandRouter.swift` `deviceRows` has no cap);
-  once the frame scrolls, the next cursor-up stops at the top row and
-  `ESC[J` cannot erase what scrolled off. Scenario: `blew scan -w` with 60
-  devices in range in a 40-row window: every 250 ms another partial table
-  goes into scrollback. Fix: read `ws_row` with the width and cap the frame
-  at `ws_row - 1` lines, the last one saying how many rows are not shown.
+  pile up once frames are drawn at the new width. Making the window
+  shorter does the same once: the terminal pushes the top rows of a frame
+  taller than the new height into scrollback, out of the cursor-up's reach.
+- [ ] `ScanWatchDisplay` (`Sources/blew/CommandRouter.swift`, `tick` and
+  `stop`) reads and writes `previousLineCount` from the timer's global
+  queue and from the caller of `stop()` with no lock, and
+  `DispatchSourceTimer.cancel()` does not wait for a running handler.
+  Scenario: Ctrl-C while a `tick` is between its redraw and storing the
+  line count: `stop()` erases the previous frame's count of lines, or the
+  tick's frame lands after the erase and stays on stderr above the final
+  table. Fix: run the timer on a private serial queue and have `stop()`
+  cancel and erase inside `queue.sync`.
 - [ ] A `scan -w` row can still wrap where the terminal and
   `TerminalText.width` disagree on a character's width.
   `Sources/blew/Output/TextEscaping.swift` (`width`) counts East Asian
@@ -227,6 +230,8 @@ None open.
   switch autowrap off for the frame (`ESC[?7l` ... `ESC[?7h` in the same
   write), so a row the terminal measures wider is cut by the terminal
   instead of wrapping; that needs autowrap restored on every exit path.
+  A frame capped at the terminal's height has no spare line, so one row
+  that wraps this way scrolls the frame by a line at each redraw.
 - [ ] LineNoise input hygiene (`linenoise.swift`):
   - Typed or pasted C0 and C1 controls and bidi overrides are inserted and
     echoed raw by `refreshLine` (`:340`); pasting `C2 9B` (8-bit CSI) can
