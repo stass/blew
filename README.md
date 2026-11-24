@@ -199,7 +199,7 @@ Scans for advertising BLE peripherals and prints a table of discovered devices. 
 | `-i, --id` | Show only the device with this identifier (the full identifier, any case). |
 | `-m, --manufacturer` | Filter by manufacturer: the company identifier, in decimal (`76`) or hex (`0x004C`). |
 | `-p, --pick` | Show only the device auto-connect would pick with this strategy: `strongest`, `first`, `only`. Not valid with `-w`. |
-| `-w, --watch` | Continuously scan and show a live-updating device list. Runs until Ctrl-C or `-t` expires. Requires a TTY in text mode; use `-o kv` for piped output. |
+| `-w, --watch` | Continuously scan and show a live-updating device list. Runs until Ctrl-C or `-t` expires. Requires a TTY in text mode; use `-o kv` for piped output. Each row is cut to the terminal's width so the table redraws in place; a cut row ends in `…`, and `-o kv` gives full rows. On a terminal that reports no width, rows are written whole. |
 
 **Output columns (text):** ID, Name, RSSI, Signal (visual bar), Manufacturer, Services
 

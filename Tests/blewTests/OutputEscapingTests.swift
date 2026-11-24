@@ -230,6 +230,75 @@ final class OutputEscapingTests: XCTestCase {
         XCTAssertEqual(erased, "")
     }
 
+    // MARK: - clipping live displays
+
+    /// `line` clipped to `columns`, rendered with its styles.
+    private func clip(_ line: TextLine, _ columns: Int) -> String {
+        let clipped = line.clipped(to: columns)
+        XCTAssertLessThanOrEqual(clipped.width, max(columns, 0), clipped.rendered(styled: false))
+        return clipped.rendered(styled: true)
+    }
+
+    /// A line is cut by the columns of its escaped text, between characters
+    /// as they were added, and marked with an ellipsis.
+    func testClipCountsDisplayColumnsOfEscapedText() {
+        XCTAssertEqual(clip(TextLine("abcde"), 5), "abcde")                         // exact fit
+        XCTAssertEqual(clip(TextLine("abcdef"), 5), "abcd…")                        // one over
+        XCTAssertEqual(clip(TextLine("ab\u{1B}[2J"), 7), "ab\\x1b…")             // escape kept whole
+        XCTAssertEqual(clip(TextLine("ab\u{1B}[2J"), 5), "ab…")                     // never \x1…
+        XCTAssertEqual(clip(TextLine("温度"), 4), "温度")                             // wide, exact fit
+        XCTAssertEqual(clip(TextLine("温度计"), 5), "温度…")                          // wide, one over
+        XCTAssertEqual(clip(TextLine("温度计"), 4), "温…")                            // no half character
+        XCTAssertEqual(clip(TextLine("🔥🔥"), 3), "🔥…")
+        XCTAssertEqual(clip(TextLine("e\u{301}e\u{301}e\u{301}"), 2), "e\u{301}…")  // mark stays
+        XCTAssertEqual(clip(TextLine("abc"), 1), "…")
+        XCTAssertEqual(clip(TextLine("abc"), 0), "")
+    }
+
+    /// Styles survive a cut: the ANSI codes are never cut, and the ellipsis
+    /// takes the style of the run it ends.
+    func testClipKeepsStyledRunsWhole() {
+        XCTAssertEqual(clip(TextLine("Manufacturer", .bold), 5), "\u{1B}[1mManu…\u{1B}[0m")
+        var line = TextLine("ID", .bold)
+        line.append("  ")
+        line.append("name", .dim)
+        XCTAssertEqual(clip(line, 8), "\u{1B}[1mID\u{1B}[0m  \u{1B}[2mname\u{1B}[0m")
+        XCTAssertEqual(clip(line, 5), "\u{1B}[1mID\u{1B}[0m  \u{1B}[2m…\u{1B}[0m")
+    }
+
+    /// The rows a redraw's text takes on a terminal `columns` wide.
+    private func rows(of frame: String, columns: Int) -> Int {
+        let text = frame.replacingOccurrences(of: "\u{1B}\\[[0-9;]*[AJKm]", with: "",
+                                              options: .regularExpression)
+        return text.split(separator: "\n").reduce(0) { total, line in
+            total + max(1, (TerminalText.width(String(line)) + columns - 1) / columns)
+        }
+    }
+
+    /// Clipped to the terminal's width, each line of a `scan -w` frame takes
+    /// one row, so the next frame's cursor-up (the lines written) erases
+    /// exactly the rows written and leaves no stale rows. The scan spinner
+    /// is clipped the same way.
+    func testRedrawClipsToTerminalWidth() {
+        let lines = [TextLine("⠋ Scanning 3s  2 devices"), TextLine("温度 \u{1B}]0;title\u{07}", .bold),
+                     TextLine(String(repeating: "x", count: 30), .dim)]
+        let first = StandardErrorLog.frame(lines, replacing: 0, columns: 20, styled: true)
+        let next = StandardErrorLog.frame(lines, replacing: lines.count, columns: 20, styled: true)
+        XCTAssertTrue(next.hasPrefix("\u{1B}[3A\u{1B}[J"))
+        XCTAssertEqual(rows(of: first, columns: 20), 3)
+        XCTAssertEqual(rows(of: next, columns: 20), 3)
+        XCTAssertTrue(first.contains("\u{1B}[2m" + String(repeating: "x", count: 19) + "…\u{1B}[0m\n"))
+        XCTAssertTrue(first.contains("\u{1B}[1m温度 \\x1b]0;title…\u{1B}[0m\n"))  // cut before \x07
+
+        // A width that is not known clips nothing.
+        let whole = StandardErrorLog.frame(lines, replacing: 0, columns: nil, styled: false)
+        XCTAssertTrue(whole.contains(String(repeating: "x", count: 30) + "\n"))
+
+        let spinner = StandardErrorLog.frame(TextLine("⠋ Scanning… 1.2/5s · 3 devices"), columns: 12,
+                                             styled: false)
+        XCTAssertEqual(spinner, "\r\u{1B}[K⠋ Scanning……")
+    }
+
     /// A table's kv keys are its literal headers, lowercased with spaces as `_`.
     func testColumnHeaderKeys() {
         XCTAssertEqual(KVText.records(headers: ["Device ID", "RSSI"], rows: [["a b", "-5"]]),

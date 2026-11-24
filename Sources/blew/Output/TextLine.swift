@@ -1,11 +1,12 @@
 import Foundation
 
-/// One line of text output: a sequence of runs, each with one style. All
-/// text is escaped with `TerminalText.escape` when it is added, blew's own
-/// literals included (escaping them changes nothing), and no method adds a
-/// `String` any other way. The only bytes of a rendered line that are not
-/// escaped text are the ANSI codes of its styles, so a line cannot carry a
-/// device's control characters to the terminal.
+/// One line of text output: a sequence of runs, each with one style. The
+/// runs hold text as it was added; every way out of a line escapes it with
+/// `TerminalText.escape`, blew's own literals included (escaping them
+/// changes nothing): `rendered` writes the escaped text, and `width` and
+/// `clipped(to:)` measure it. The only bytes of a rendered line that are
+/// not escaped text are the ANSI codes of its styles, so a line cannot
+/// carry a device's control characters to the terminal.
 struct TextLine {
     enum Style {
         case plain, bold, dim
@@ -20,7 +21,7 @@ struct TextLine {
         }
     }
 
-    /// Escaped text, one run per `append`.
+    /// Text as added, one run per `append`; escaped on the way out.
     private var runs: [(style: Style, text: String)] = []
 
     init() {}
@@ -29,9 +30,9 @@ struct TextLine {
         append(text, style)
     }
 
-    /// Adds `text`, escaped, as a run in `style`.
+    /// Adds `text` as a run in `style`.
     mutating func append(_ text: String, _ style: Style = .plain) {
-        runs.append((style, TerminalText.escape(text)))
+        runs.append((style, text))
     }
 
     /// Adds the runs of `line`.
@@ -39,9 +40,51 @@ struct TextLine {
         runs += line.runs
     }
 
-    /// The terminal columns the line takes.
+    /// The terminal columns the rendered line takes: the sum of
+    /// `displayWidth(of:)` over its characters.
     var width: Int {
-        runs.reduce(0) { $0 + TerminalText.width($1.text) }
+        var total = 0
+        for run in runs {
+            for character in run.text { total += Self.displayWidth(of: character) }
+        }
+        return total
+    }
+
+    /// The columns `character` takes once escaped: an escape sequence
+    /// (`\x1b`) is as wide as its text. A line's width is defined as the
+    /// sum over its characters, so `width` and `clipped(to:)` agree. Where
+    /// an escaped control is followed by a mark, this counts one column
+    /// more than the whole escaped text measures, never fewer.
+    private static func displayWidth(of character: Character) -> Int {
+        TerminalText.width(TerminalText.escape(String(character)))
+    }
+
+    /// The line cut to at most `columns` terminal columns, so a live display
+    /// never wraps. A line that fits is returned whole. A longer one keeps
+    /// the characters that fit in `columns - 1` and ends in `…` (one column)
+    /// in the style of the run it was cut in. It is cut only between the
+    /// characters that were added, never inside the escape sequence of one,
+    /// a wide character or a style. Nothing fits in fewer than one column.
+    func clipped(to columns: Int) -> TextLine {
+        guard width > columns else { return self }
+        guard columns > 0 else { return TextLine() }
+        let budget = columns - 1
+        var line = TextLine()
+        var used = 0
+        for run in runs {
+            var kept = ""
+            for character in run.text {
+                let characterWidth = Self.displayWidth(of: character)
+                if used + characterWidth > budget {
+                    line.runs.append((run.style, kept + "…"))
+                    return line
+                }
+                kept.append(character)
+                used += characterWidth
+            }
+            line.runs.append((run.style, kept))
+        }
+        return line
     }
 
     /// Whether the line shows nothing: no text in any run.
@@ -74,8 +117,9 @@ struct TextLine {
     /// when `styled`.
     func rendered(styled: Bool) -> String {
         runs.map { run in
-            guard styled, let start = run.style.ansiStart else { return run.text }
-            return "\(start)\(run.text)\u{1B}[0m"
+            let text = TerminalText.escape(run.text)
+            guard styled, let start = run.style.ansiStart else { return text }
+            return "\(start)\(text)\u{1B}[0m"
         }.joined()
     }
 }

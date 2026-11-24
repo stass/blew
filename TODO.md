@@ -18,17 +18,7 @@ None open.
 
 ## P1: important (0.3.0)
 
-- [ ] **W1. `scan -w` leaves stale rows on a terminal narrower than the
-  table.** `Sources/blew/Output/StandardStreams.swift:100` (`redraw`) moves
-  the cursor up by the number of lines it wrote, not the terminal rows they
-  took, and `TextTable` pads every row to the table width. The Manufacturer
-  column makes rows of about 130 columns routine (`0x0075 Samsung
-  Electronics Co. Ltd.` beside a service list). Scenario: `blew scan -w` in
-  an 80- or 120-column terminal near Apple and Samsung devices: every row
-  wraps, each redraw erases only part of the previous frame, and old rows
-  pile up. Unverified on a narrow TTY. Fix: clip each redraw line to the
-  terminal width (`TIOCGWINSZ`) in `ScanWatchDisplay`, or count wrapped
-  rows in `redraw`.
+None open.
 
 ## P2: release hygiene (0.3.0)
 
@@ -196,6 +186,39 @@ None open.
   - A bare Esc swallows the next two keys (`linenoise.swift:555`).
   - `ESC[1;5C` inserts "5C".
   - Cursor columns count graphemes, not display width (`:234`, `:349`).
+    blew's display width is `TerminalText.width`
+    (`Sources/blew/Output/TextEscaping.swift`); LineNoise is its own
+    target, so the fix moves that function to a target both depend on
+    rather than writing a second one, with the terminal size query
+    (`linenoise.swift:316` and `StandardErrorLog.terminalColumns`).
+- [ ] A `scan -w` frame drawn before the window is made narrower can leave
+  stale rows. `Sources/blew/Output/StandardStreams.swift` (`frame`) clips
+  each frame to the width at its own redraw, and the next redraw moves up
+  one row per line; a terminal that rewraps its screen on resize
+  (Terminal.app, iTerm2) gives the old lines more rows than that.
+  Scenario: `blew scan -w` at 160 columns, then shrink the window to 80:
+  the old frame's extra rows stay on the screen above the table. No more
+  pile up once frames are drawn at the new width.
+- [ ] A `scan -w` table taller than the terminal piles up partial frames
+  in scrollback. `Sources/blew/Output/StandardStreams.swift` (`frame`)
+  writes every device row (`CommandRouter.swift` `deviceRows` has no cap);
+  once the frame scrolls, the next cursor-up stops at the top row and
+  `ESC[J` cannot erase what scrolled off. Scenario: `blew scan -w` with 60
+  devices in range in a 40-row window: every 250 ms another partial table
+  goes into scrollback. Fix: read `ws_row` with the width and cap the frame
+  at `ws_row - 1` lines, the last one saying how many rows are not shown.
+- [ ] A `scan -w` row can still wrap where the terminal and
+  `TerminalText.width` disagree on a character's width.
+  `Sources/blew/Output/TextEscaping.swift` (`width`) counts East Asian
+  Ambiguous characters (the `…` that ends a cut row, the `─` rule, the
+  spinner's `·`) as one column and ZWJ emoji sequences as two; Terminal.app
+  and iTerm2 can show ambiguous characters as two columns, and a terminal
+  that measures code points one by one shows ZWJ sequences wider.
+  Scenario: `blew scan -w` with "ambiguous characters are wide" set: every
+  cut row is one column too wide, wraps, and stale rows pile up. Fix:
+  switch autowrap off for the frame (`ESC[?7l` ... `ESC[?7h` in the same
+  write), so a row the terminal measures wider is cut by the terminal
+  instead of wrapping; that needs autowrap restored on every exit path.
 - [ ] LineNoise input hygiene (`linenoise.swift`):
   - Typed or pasted C0 and C1 controls and bidi overrides are inserted and
     echoed raw by `refreshLine` (`:340`); pasting `C2 9B` (8-bit CSI) can

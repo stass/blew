@@ -2,7 +2,7 @@ import Foundation
 
 // The only code in blew that writes to stdout and stderr. Each function
 // takes text in a form that is escaped on the way out: a `TextLine`
-// (escaped as it is built), kv pairs (literal keys, values escaped by
+// (escaped as it is rendered), kv pairs (literal keys, values escaped by
 // `KVText.value`) or a message (escaped by `TerminalText.escape`). The only
 // other bytes written are the ANSI codes of `TextLine` styles and the
 // `TerminalControl` sequences a live display redraws itself with. Raw bytes
@@ -89,17 +89,48 @@ enum StandardErrorLog {
     }
 
     /// Redraws a one-line live display (the scan spinner): erases the
-    /// cursor's line and writes `line`, leaving the cursor at its end.
+    /// cursor's line and writes `line`, clipped to stderr's width, leaving
+    /// the cursor at its end.
     static func redraw(_ line: TextLine, styled: Bool) {
-        emit(TerminalControl.eraseLine.sequence + line.rendered(styled: styled))
+        emit(frame(line, columns: terminalColumns, styled: styled))
     }
 
     /// Redraws a live display of several lines (`scan -w`): erases the
-    /// `previous` lines it drew last and writes `lines`, each ending in a
-    /// newline, in one write so the terminal never shows half a frame.
+    /// `previous` lines it drew last and writes `lines`, each clipped to
+    /// stderr's width and ending in a newline, in one write so the terminal
+    /// never shows half a frame.
     static func redraw(_ lines: [TextLine], replacing previous: Int, styled: Bool) {
-        emit(TerminalControl.eraseLinesAbove(previous).sequence
-              + lines.map { $0.rendered(styled: styled) + "\n" }.joined())
+        emit(frame(lines, replacing: previous, columns: terminalColumns, styled: styled))
+    }
+
+    /// The bytes of a one-line redraw on a terminal `columns` wide (nil:
+    /// not known, and not clipped).
+    static func frame(_ line: TextLine, columns: Int?, styled: Bool) -> String {
+        TerminalControl.eraseLine.sequence + clipped(line, to: columns).rendered(styled: styled)
+    }
+
+    /// The bytes of a redraw of several lines on a terminal `columns` wide
+    /// (nil: not known, and not clipped). Clipped, each line takes one row,
+    /// so the `lines.count` a display passes as `previous` next time is the
+    /// number of rows to erase.
+    static func frame(_ lines: [TextLine], replacing previous: Int, columns: Int?,
+                      styled: Bool) -> String {
+        TerminalControl.eraseLinesAbove(previous).sequence
+            + lines.map { clipped($0, to: columns).rendered(styled: styled) + "\n" }.joined()
+    }
+
+    private static func clipped(_ line: TextLine, to columns: Int?) -> TextLine {
+        columns.map { line.clipped(to: $0) } ?? line
+    }
+
+    /// The width of the terminal on stderr, asked at each redraw so a live
+    /// display follows a resized window; nil when stderr is not a terminal
+    /// or the terminal reports a width of 0 (a pty nobody sized), where the
+    /// width is not known and lines are written whole.
+    private static var terminalColumns: Int? {
+        var size = winsize()
+        guard ioctl(STDERR_FILENO, TIOCGWINSZ, &size) == 0, size.ws_col > 0 else { return nil }
+        return Int(size.ws_col)
     }
 
     /// Erases what a live display drew, when it stops.
