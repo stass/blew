@@ -464,9 +464,20 @@ Three implementations:
 
 Narrowed to a formatting utility used internally by `TextRenderer`. Provides:
 - `bold(_:)` / `dim(_:)` — ANSI escape wrappers (no-op when not a TTY or in KV mode)
-- `boldPaddingWidth` — byte-count adjustment for ANSI sequences in column alignment
-- `formatTable(headers:rows:)` — builds an aligned text table as a `String`
+- `formatTable(headers:rows:)` — builds an aligned text table as a `String`; it escapes every cell, then pads it to the column's width in terminal columns
 - `printTable(headers:rows:)` / `printRecord(_:)` — convenience methods that format and write to stdout
+- `printError` / `printInfo` / `printDebug` — the stderr lines, through `StandardErrorLog`
+
+**Escaping and display width** (`Sources/blew/Output/TextEscaping.swift`)
+
+Text from devices, config files, MCP clients and arguments is untrusted, so each output format has one function that every such string passes through on its way out, applied by the renderers rather than by the commands that produce the text:
+
+- `TerminalText.escape` — text output and every stderr line: `StandardErrorLog.write` (error, info, debug and `nus` status lines, through `OutputFormatter.printError`/`printInfo`/`printDebug`) and `StandardErrorLog.writeLive` (`renderLive`). It escapes the characters of `TextEscaping.isEscaped`: C0 and C1 controls, DEL, U+2028/U+2029 and Unicode format characters (category Cf) other than ZWJ and ZWNJ.
+- `KVText.value` / `KVText.record` — kv values: bare, or double-quoted with `\` and `"` escaped as well. README's "Key-value output" is the specification. A multi-field characteristic value is one `value=`, flattened by `LabeledValue.flattened`.
+
+Both write escapes in one syntax (`\n`, `\r`, `\t`, `\xHH`, `\uHHHH`, `\UHHHHHHHH`). The renderers add their own ANSI bold and dim around escaped text, never inside it. `nusData` in text mode is the one raw path: the bytes a UART delivers, written unchanged because the user asked for a byte stream.
+
+`TerminalText.width` gives a string's width in terminal columns (East Asian wide and fullwidth characters and emoji 2, combining marks and format characters 0), and `TerminalText.pad` pads to a width without truncating; all table code measures and pads with them. The wide ranges are a merged copy of the W and F blocks of Unicode's EastAsianWidth.txt; emoji come from the standard library's `isEmojiPresentation`.
 
 The `isTTY` flag is detected at init time via `isatty(fileno(stdout))`. ANSI escapes are only applied in text mode with a TTY, so piped output is never polluted.
 

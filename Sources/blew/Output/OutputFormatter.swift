@@ -26,43 +26,35 @@ struct OutputFormatter {
     // MARK: - Logging (stderr)
 
     func printError(_ message: String) {
-        FileHandle.standardError.write(Data("Error: \(message)\n".utf8))
+        StandardErrorLog.write("Error: ", message)
     }
 
     func printInfo(_ message: String) {
         guard verbosity >= 1 else { return }
-        FileHandle.standardError.write(Data("\(message)\n".utf8))
+        StandardErrorLog.write("", message)
     }
 
     func printDebug(_ message: String) {
         guard verbosity >= 2 else { return }
-        FileHandle.standardError.write(Data("[debug] \(message)\n".utf8))
+        StandardErrorLog.write("[debug] ", message)
     }
 
     // MARK: - Output (stdout)
-
-    func print(_ text: String) {
-        Swift.print(text)
-    }
 
     func printRecord(_ pairs: (String, String)...) {
         printRecord(pairs)
     }
 
+    /// One record: in text mode a `key: value` line per pair, in kv mode one
+    /// kv line. Values are untrusted and escaped for the format.
     func printRecord(_ pairs: [(String, String)]) {
         switch format {
         case .text:
             for (key, value) in pairs {
-                Swift.print("\(bold(key)): \(value)")
+                Swift.print("\(bold(key)): \(TerminalText.escape(value))")
             }
         case .kv:
-            let line = pairs.map { key, value in
-                if value.contains(" ") || value.contains("\"") || value.isEmpty {
-                    return "\(key)=\"\(value.replacingOccurrences(of: "\"", with: "\\\""))\""
-                }
-                return "\(key)=\(value)"
-            }.joined(separator: " ")
-            Swift.print(line)
+            Swift.print(KVText.record(pairs))
         }
     }
 
@@ -71,15 +63,8 @@ struct OutputFormatter {
         case .text:
             Swift.print(formatTable(headers: headers, rows: rows))
         case .kv:
-            let lowerHeaders = headers.map { $0.lowercased().replacingOccurrences(of: " ", with: "_") }
-            for row in rows {
-                let pairs = zip(lowerHeaders, row).map { key, value in
-                    if value.contains(" ") || value.contains("\"") || value.isEmpty {
-                        return "\(key)=\"\(value.replacingOccurrences(of: "\"", with: "\\\""))\""
-                    }
-                    return "\(key)=\(value)"
-                }.joined(separator: " ")
-                Swift.print(pairs)
+            for line in KVText.records(headers: headers, rows: rows) {
+                Swift.print(line)
             }
         }
     }
@@ -87,39 +72,29 @@ struct OutputFormatter {
     /// Build a formatted text table and return it as a string (without printing).
     /// Only meaningful in text mode; the string includes ANSI bold/dim escapes
     /// when isTTY is true. Returns an empty string when rows is empty.
+    /// Cells are untrusted: each is escaped for the terminal, then measured
+    /// and padded in terminal columns (`TerminalText.width`).
     func formatTable(headers: [String], rows: [[String]]) -> String {
         guard !rows.isEmpty else { return "" }
-        var widths = headers.map { $0.count }
-        for row in rows {
+        let cells = rows.map { $0.map(TerminalText.escape) }
+        var widths = headers.map(TerminalText.width)
+        for row in cells {
             for (i, cell) in row.enumerated() where i < widths.count {
-                widths[i] = max(widths[i], cell.count)
+                widths[i] = max(widths[i], TerminalText.width(cell))
             }
         }
         var lines: [String] = []
         let header = headers.enumerated().map { i, h in
-            bold(h).padding(toLength: widths[i] + boldPadding(h), withPad: " ", startingAt: 0)
+            bold(TerminalText.pad(h, toWidth: widths[i]))
         }.joined(separator: "  ")
         lines.append(header)
         lines.append(dim(String(repeating: "─", count: widths.reduce(0, +) + max(0, widths.count - 1) * 2)))
-        for row in rows {
+        for row in cells {
             let line = row.enumerated().map { i, cell in
-                cell.padding(toLength: i < widths.count ? widths[i] : cell.count, withPad: " ", startingAt: 0)
+                i < widths.count ? TerminalText.pad(cell, toWidth: widths[i]) : cell
             }.joined(separator: "  ")
             lines.append(line)
         }
         return lines.joined(separator: "\n")
     }
-
-    // MARK: - Helpers
-
-    // When we bold a header string, we add ANSI escape sequences that are invisible
-    // but take up bytes. padding(toLength:) counts bytes, not visible characters,
-    // so we need to widen the target length by the number of escape bytes added.
-    // bold() wraps with \e[1m (4 bytes) + \e[0m (4 bytes) = 8 extra bytes.
-    var boldPaddingWidth: Int {
-        guard isTTY && format == .text else { return 0 }
-        return 8
-    }
-
-    private func boldPadding(_ text: String) -> Int { boldPaddingWidth }
 }

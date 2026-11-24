@@ -37,6 +37,18 @@ struct LabeledValue: Codable {
     let value: String
 }
 
+extension LabeledValue {
+    /// A characteristic value on one line: `value` when there is one,
+    /// otherwise the decoded fields as `label: value` joined by ` | `.
+    /// Nil when the characteristic was not read.
+    static func flattened(value: String?, fields: [LabeledValue]?) -> String? {
+        if let value { return value }
+        guard let fields, !fields.isEmpty else { return nil }
+        return fields.map { $0.label.isEmpty ? $0.value : "\($0.label): \($0.value)" }
+            .joined(separator: " | ")
+    }
+}
+
 // MARK: - Row types
 
 struct DeviceRow: Codable {

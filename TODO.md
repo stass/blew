@@ -131,25 +131,19 @@ None open.
 
 ### Output
 
-- [ ] **O1. kv output escaping and missing values.**
-  `Sources/blew/Output/KVRenderer.swift:84-105,137,170`,
-  `Sources/blew/Output/OutputFormatter.swift:57-82`.
-  - Newlines, tabs, control characters and backslashes are not escaped, so a
-    device name `x\nconnected=yes` forges a record.
-  - Decoded multi-field values print no `value=`.
-- [ ] **O2. Text output passes device strings raw.** ESC sequences in a
-  device name reach the terminal. Error messages do the same with config
-  and argument text (`TextRenderer.swift:58`, `KVRenderer.swift:64`): a
-  config with `"properties": ["\u001b]0;x\u0007"]` sends an OSC sequence to
-  stderr through `PeripheralConfig.describe`, and so do
-  `ConfigError.invalidValue` and `periph set`'s "invalid value". The UUID
-  error quotes with `String.debugDescription`, which escapes C0 but passes C1
-  controls and bidi overrides; it should use the shared escaping function
-  once one exists.
-- [ ] **O3. Table widths use grapheme counts while `padding(toLength:)`
-  counts UTF-16 units.** `OutputFormatter.swift:93-109`,
-  `TextRenderer.swift:108-139,216-220`. Names with emoji are truncated, and
-  wide characters misalign columns.
+- [ ] **O4. TextRenderer escapes at each `Swift.print` call site.**
+  `Sources/blew/Output/TextRenderer.swift` (GATT tree, characteristic info,
+  peripheral summary and events). Tables, records and stderr lines escape
+  inside one function, but the other text lines call `esc(...)` per field
+  before a bare `Swift.print`, because blew's own bold and dim cannot be
+  escaped with the text. A new line that forgets `esc` sends a device
+  name's ESC sequence to the terminal. Fix: one line writer taking styled
+  segments that escapes each one, as the only path to stdout.
+- [ ] **O5. `renderCharacteristics` repeats `formatTable`'s layout.**
+  `Sources/blew/Output/TextRenderer.swift:110-139` and the field list of
+  `renderCharacteristicInfo` compute their own widths, header and
+  separator. A change to one table layout misses the others. Fix: let
+  `formatTable` take a trailing unpadded column and use it for both.
 
 ### Commands
 

@@ -636,6 +636,12 @@ The `exec` subcommand runs a semicolon-separated sequence of commands in a singl
 | stdout | Command results — tables, values, notification lines |
 | stderr | Operational messages (errors, verbose info, debug) |
 
+### Text from devices
+
+Names, values and other text that come from a device, a config file or an argument are untrusted: a device name could carry ANSI or OSC escape sequences that recolor the terminal, set its title or move the cursor. In text output and in every line on stderr, blew writes C0 and C1 control characters, the line and paragraph separators and the invisible format characters (bidirectional overrides, zero-width space and the others listed under [Key-value output](#key-value-output---out-kv)) as escape sequences of the same syntax: `\n`, `\t`, `\x1b`, `\u202e`. Backslash itself is left as is in text output. What `nus` relays to stdout is the device's bytes, unchanged; `-f raw` and `-f hex` print a value as hex digits, which need no escaping. A `-f utf8` value that is not valid UTF-8 is printed as hex. Escaping every format character also escapes the tag characters of subdivision flags and the left-to-right and right-to-left marks in names that use them.
+
+Table columns are measured in terminal columns: East Asian wide and fullwidth characters and emoji take two, combining marks none, so CJK names and names with emoji stay aligned and no name is cut short. Scripts whose clusters a terminal draws wider than one column per character (Devanagari vowel signs, for example) can still misalign.
+
 ### Log format (stderr)
 
 Errors are always printed:
@@ -657,7 +663,7 @@ With `-vv`, debug-level messages are added:
 
 ### Key-value output (`--out kv`)
 
-Pass `-o kv` to get machine-parseable output. Each record is one line of space-separated `key=value` pairs (values containing spaces are quoted). Easy to process with `awk`, `grep`, or any log parser:
+Pass `-o kv` to get machine-parseable output. Each record is one line of space-separated `key=value` pairs. Easy to process with `awk`, `grep`, or any log parser:
 
 ```
 id=F3C2A1B0-... name=Thingy rssi=-58 services=180F,180A
@@ -666,6 +672,17 @@ ts=2026-02-21T12:34:56.789Z char=fff1 value=deadbeef
 ```
 
 The `name=` field is included when the UUID is a known Bluetooth SIG UUID. It is omitted for custom or vendor UUIDs.
+
+The syntax, exactly:
+
+- A record is `key=value` pairs separated by one space and ended by a newline. A value can never contain a raw newline, so one record is always one line.
+- Keys are lowercase letters, digits and `_`, never quoted.
+- A value is written bare when it is non-empty and contains no whitespace (space, or any other Unicode whitespace such as U+00A0 or U+3000), `=`, `"`, `\` or escaped character (below). Whitespace other than newline, carriage return and tab is kept as is inside the quotes. Otherwise it is written in double quotes, with `\` as `\\` and `"` as `\"`.
+- Escaped characters, inside the quotes: newline `\n`, carriage return `\r`, tab `\t`, other characters below U+0080 (C0 controls, DEL) as `\xHH`, and C1 controls (U+0080 to U+009F), the line and paragraph separators (U+2028, U+2029) and the invisible format characters (Unicode category Cf: bidirectional overrides and isolates, zero-width space, soft hyphen, byte order mark, tag characters) as `\uHHHH`, or `\UHHHHHHHH` above U+FFFF. Zero-width joiner and non-joiner (U+200D, U+200C) are kept, so emoji sequences stay intact. Hex digits are lowercase.
+
+This is a subset of Go's string-literal syntax: `strconv.Unquote` in Go reads a quoted value back, quotes included. A device name `x` newline `connected=yes` is printed as `name="x\nconnected=yes"`.
+
+A characteristic whose decoded value has several fields (`gatt tree -r`, `gatt chars -r`) has one `value=` holding the fields as `<label>: <value>` joined by ` | `, the same fields text output prints one per line.
 
 ```sh
 % blew -n "Thingy" -o kv sub -d 60 fff1 | awk -F'value=' '{print $2}'

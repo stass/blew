@@ -34,7 +34,7 @@ final class CommandRouter {
 
         if dryRun {
             for (i, cmd) in commands.enumerated() {
-                print("[\(i + 1)] \(cmd)")
+                print("[\(i + 1)] \(TerminalText.escape(cmd))")
             }
             return 0
         }
@@ -1811,7 +1811,7 @@ extension CommandRouter {
         let matches: [String]
 
         var errorDescription: String? {
-            "\(input.debugDescription) matches several characteristics: "
+            "\"\(input)\" matches several characteristics: "
                 + matches.joined(separator: ", ")
         }
     }

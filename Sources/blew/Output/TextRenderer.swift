@@ -1,6 +1,11 @@
 import Foundation
 import BLEManager
 
+/// Human-readable output. Every string from a device, a config file or an
+/// argument passes through `TerminalText.escape` (directly, or inside
+/// `OutputFormatter.formatTable`/`printRecord` and `StandardErrorLog`)
+/// before it reaches the terminal; blew's own ANSI bold and dim are added
+/// around the escaped text.
 final class TextRenderer: OutputRenderer {
     let verbosity: Int
     let formatter: OutputFormatter
@@ -29,11 +34,11 @@ final class TextRenderer: OutputRenderer {
         case .peripheralStatus(let status):
             renderPeripheralStatus(status)
         case .readValue(let result):
-            Swift.print(result.value)
+            Swift.print(esc(result.value))
         case .writeSuccess:
             break
         case .notification(let nv):
-            Swift.print(nv.value)
+            Swift.print(esc(nv.value))
         case .peripheralSummary(let summary):
             renderPeriphSummary(summary)
         case .peripheralEvent(let record):
@@ -47,30 +52,28 @@ final class TextRenderer: OutputRenderer {
         case .nusStatus(let status):
             // stderr, so stdout carries only the device's bytes.
             let detail = status.detail.isEmpty ? "" : ": \(status.detail)"
-            FileHandle.standardError.write(Data("nus \(status.event)\(detail)\n".utf8))
+            StandardErrorLog.write("nus ", "\(status.event)\(detail)")
         case .message(let msg):
-            Swift.print(msg)
+            Swift.print(esc(msg))
         case .empty:
             break
         }
     }
 
     func renderError(_ message: String) {
-        FileHandle.standardError.write(Data("Error: \(message)\n".utf8))
+        formatter.printError(message)
     }
 
     func renderInfo(_ message: String) {
-        guard verbosity >= 1 else { return }
-        FileHandle.standardError.write(Data("\(message)\n".utf8))
+        formatter.printInfo(message)
     }
 
     func renderDebug(_ message: String) {
-        guard verbosity >= 2 else { return }
-        FileHandle.standardError.write(Data("[debug] \(message)\n".utf8))
+        formatter.printDebug(message)
     }
 
     func renderLive(_ text: String) {
-        FileHandle.standardError.write(Data("\r\u{1B}[K\(text)\r\n".utf8))
+        StandardErrorLog.writeLive(text)
     }
 
     // MARK: - Devices table
@@ -102,47 +105,36 @@ final class TextRenderer: OutputRenderer {
     // MARK: - Characteristics table
 
     private func renderCharacteristics(_ chars: [CharacteristicRow]) {
-        let hasValues = chars.contains { $0.value != nil }
+        let hasValues = chars.contains { LabeledValue.flattened(value: $0.value, fields: $0.valueFields) != nil }
         if hasValues {
+            // Like `OutputFormatter.formatTable` for the first three columns;
+            // the value follows them unpadded, a multi-field value as one
+            // indented `label: value` line per field.
             let headers = ["UUID", "Name", "Properties", "Value"]
-            let uuidW  = chars.map { $0.uuid.count }.max().map { max($0, headers[0].count) } ?? headers[0].count
-            let nameW  = chars.map { ($0.name ?? "").count }.max().map { max($0, headers[1].count) } ?? headers[1].count
-            let propsW = chars.map { $0.properties.joined(separator: ",").count }.max().map { max($0, headers[2].count) } ?? headers[2].count
-
-            let headerLine = [
-                formatter.bold(headers[0]).padding(toLength: uuidW  + formatter.boldPaddingWidth, withPad: " ", startingAt: 0),
-                formatter.bold(headers[1]).padding(toLength: nameW  + formatter.boldPaddingWidth, withPad: " ", startingAt: 0),
-                formatter.bold(headers[2]).padding(toLength: propsW + formatter.boldPaddingWidth, withPad: " ", startingAt: 0),
-                formatter.bold(headers[3]),
-            ].joined(separator: "  ")
-            let sepWidth = uuidW + 2 + nameW + 2 + propsW + 2 + headers[3].count
+            let cells = chars.map { [esc($0.uuid), esc($0.name ?? ""), esc($0.properties.joined(separator: ","))] }
+            var widths = headers.prefix(3).map(TerminalText.width)
+            for row in cells {
+                for i in widths.indices { widths[i] = max(widths[i], TerminalText.width(row[i])) }
+            }
+            let leading = { (row: [String]) in
+                row.indices.map { TerminalText.pad(row[$0], toWidth: widths[$0]) }.joined(separator: "  ")
+            }
+            let headerLine = (headers.prefix(3).indices.map {
+                formatter.bold(TerminalText.pad(headers[$0], toWidth: widths[$0]))
+            } + [formatter.bold(headers[3])]).joined(separator: "  ")
+            let indentWidth = widths.reduce(0, +) + 2 * widths.count
             Swift.print(headerLine)
-            Swift.print(formatter.dim(String(repeating: "─", count: sepWidth)))
-            let valueIndent = String(repeating: " ", count: uuidW + 2 + nameW + 2 + propsW + 2)
-            for row in chars {
-                let props = row.properties.joined(separator: ",")
+            Swift.print(formatter.dim(String(repeating: "─", count: indentWidth + TerminalText.width(headers[3]))))
+            let valueIndent = String(repeating: " ", count: indentWidth)
+            for (row, rowCells) in zip(chars, cells) {
                 if let fields = row.valueFields, fields.count > 1 {
-                    let rowLine = [
-                        row.uuid.padding(toLength: uuidW,  withPad: " ", startingAt: 0),
-                        (row.name ?? "").padding(toLength: nameW,  withPad: " ", startingAt: 0),
-                        props.padding(toLength: propsW, withPad: " ", startingAt: 0),
-                    ].joined(separator: "  ")
-                    Swift.print(rowLine)
+                    Swift.print(leading(rowCells))
                     for lv in fields {
-                        Swift.print(formatter.dim(valueIndent + lv.label + ": ") + lv.value)
+                        Swift.print(formatter.dim(valueIndent + esc(lv.label) + ": ") + esc(lv.value))
                     }
                 } else {
-                    let value = row.value ?? ""
-                    let rowLine = [
-                        row.uuid.padding(toLength: uuidW,  withPad: " ", startingAt: 0),
-                        (row.name ?? "").padding(toLength: nameW,  withPad: " ", startingAt: 0),
-                        props.padding(toLength: propsW, withPad: " ", startingAt: 0),
-                    ].joined(separator: "  ")
-                    if !value.isEmpty {
-                        Swift.print(rowLine + "  " + value)
-                    } else {
-                        Swift.print(rowLine)
-                    }
+                    let value = esc(row.value ?? "")
+                    Swift.print(value.isEmpty ? leading(rowCells) : leading(rowCells) + "  " + value)
                 }
             }
         } else {
@@ -165,8 +157,8 @@ final class TextRenderer: OutputRenderer {
 
     private func renderGATTTree(_ tree: [GATTTreeService]) {
         for (svcIdx, service) in tree.enumerated() {
-            var svcLine = "Service \(formatter.bold(service.uuid))"
-            if let name = service.name { svcLine += "  \(name)" }
+            var svcLine = "Service \(formatter.bold(esc(service.uuid)))"
+            if let name = service.name { svcLine += "  \(esc(name))" }
             Swift.print(svcLine)
 
             for (charIdx, char) in service.characteristics.enumerated() {
@@ -175,18 +167,18 @@ final class TextRenderer: OutputRenderer {
                 let descIndent = isLastChar ? "    " : "│   "
                 let valueIndent = descIndent + "  "
 
-                let props = char.properties.joined(separator: ", ")
-                var charLine = charBranch + formatter.bold(char.uuid)
-                if let name = char.name { charLine += "  \(name)" }
+                let props = esc(char.properties.joined(separator: ", "))
+                var charLine = charBranch + formatter.bold(esc(char.uuid))
+                if let name = char.name { charLine += "  \(esc(name))" }
                 charLine += "  \(formatter.dim("[\(props)]"))"
 
                 if let fields = char.valueFields, fields.count > 1 {
                     Swift.print(charLine)
                     for lv in fields {
-                        Swift.print(formatter.dim(valueIndent + lv.label + ": ") + lv.value)
+                        Swift.print(formatter.dim(valueIndent + esc(lv.label) + ": ") + esc(lv.value))
                     }
                 } else if let value = char.value {
-                    Swift.print(charLine + formatter.dim("  = ") + value)
+                    Swift.print(charLine + formatter.dim("  = ") + esc(value))
                 } else {
                     Swift.print(charLine)
                 }
@@ -194,8 +186,8 @@ final class TextRenderer: OutputRenderer {
                 for (descIdx, desc) in char.descriptors.enumerated() {
                     let isLastDesc = descIdx == char.descriptors.count - 1
                     let descBranch = isLastDesc ? "└── " : "├── "
-                    var descLine = descIndent + descBranch + formatter.dim(desc.uuid)
-                    if let name = desc.name { descLine += formatter.dim("  \(name)") }
+                    var descLine = descIndent + descBranch + formatter.dim(esc(desc.uuid))
+                    if let name = desc.name { descLine += formatter.dim("  \(esc(name))") }
                     Swift.print(descLine)
                 }
             }
@@ -207,20 +199,22 @@ final class TextRenderer: OutputRenderer {
     // MARK: - Characteristic info
 
     private func renderCharacteristicInfo(_ info: GATTCharInfo) {
-        Swift.print("\(formatter.bold("\(info.name) (\(info.uuid))"))")
+        Swift.print(formatter.bold(esc("\(info.name) (\(info.uuid))")))
         Swift.print("")
-        Swift.print(info.description)
+        Swift.print(esc(info.description))
         if !info.fields.isEmpty {
             Swift.print("")
             Swift.print(formatter.bold("Structure:"))
-            let nameWidth = info.fields.map { $0.name.count }.max() ?? 0
-            let typeWidth = info.fields.map { $0.typeName.count }.max() ?? 0
-            for f in info.fields {
-                var line = "  \(f.name.padding(toLength: nameWidth, withPad: " ", startingAt: 0))"
-                line += "  \(f.typeName.padding(toLength: typeWidth, withPad: " ", startingAt: 0))"
-                line += "  \(f.sizeDescription)"
+            let names = info.fields.map { esc($0.name) }
+            let types = info.fields.map { esc($0.typeName) }
+            let nameWidth = names.map(TerminalText.width).max() ?? 0
+            let typeWidth = types.map(TerminalText.width).max() ?? 0
+            for (i, f) in info.fields.enumerated() {
+                var line = "  \(TerminalText.pad(names[i], toWidth: nameWidth))"
+                line += "  \(TerminalText.pad(types[i], toWidth: typeWidth))"
+                line += "  \(esc(f.sizeDescription))"
                 if let cond = f.conditionDescription {
-                    line += "  \(formatter.dim("[\(cond)]"))"
+                    line += "  \(formatter.dim("[\(esc(cond))]"))"
                 }
                 Swift.print(line)
             }
@@ -259,15 +253,15 @@ final class TextRenderer: OutputRenderer {
 
     private func renderPeriphSummary(_ summary: PeriphSummaryResult) {
         let displayUUIDs = summary.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) }.joined(separator: ", ")
-        Swift.print("Advertising \"\(summary.name)\" [\(displayUUIDs)]")
+        Swift.print(esc("Advertising \"\(summary.name)\" [\(displayUUIDs)]"))
 
         for svc in summary.services where !svc.characteristics.isEmpty {
             let svcDisplay = BLENames.displayUUID(svc.uuid.string, category: .service)
-            Swift.print("  Service \(svcDisplay)")
+            Swift.print(esc("  Service \(svcDisplay)"))
             for char in svc.characteristics {
                 let charDisplay = BLENames.displayUUID(char.uuid.string, category: .characteristic)
                 let props = char.properties.map { $0.rawValue }.joined(separator: ", ")
-                Swift.print("  +-- \(charDisplay) [\(props)]")
+                Swift.print(esc("  +-- \(charDisplay) [\(props)]"))
             }
         }
     }
@@ -288,18 +282,18 @@ final class TextRenderer: OutputRenderer {
                 renderError("[\(ts)] service add failed: \(error)")
             }
         case .centralConnected(let id):
-            Swift.print("[\(ts)] central \(shortId(id)) connected")
+            Swift.print(esc("[\(ts)] central \(shortId(id)) connected"))
         case .centralDisconnected(let id):
-            Swift.print("[\(ts)] central \(shortId(id)) disconnected")
+            Swift.print(esc("[\(ts)] central \(shortId(id)) disconnected"))
         case .readRequest(let id, let uuid):
-            Swift.print("[\(ts)] read \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))")
+            Swift.print(esc("[\(ts)] read \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))"))
         case .writeRequest(let id, let uuid, let value):
             let hex = DataFormatter.format(value, as: "hex")
-            Swift.print("[\(ts)] write \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id)) <- \(hex)")
+            Swift.print(esc("[\(ts)] write \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id)) <- \(hex)"))
         case .subscribed(let id, let uuid):
-            Swift.print("[\(ts)] subscribe \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))")
+            Swift.print(esc("[\(ts)] subscribe \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))"))
         case .unsubscribed(let id, let uuid):
-            Swift.print("[\(ts)] unsubscribe \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))")
+            Swift.print(esc("[\(ts)] unsubscribe \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))"))
         case .notificationSent(let uuid, let count):
             renderInfo("[\(ts)] notification sent on \(uuid) to \(count) subscriber(s)")
         }
@@ -313,12 +307,16 @@ final class TextRenderer: OutputRenderer {
         } else {
             Swift.print("Active background subscriptions:")
             for uuid in uuids {
-                Swift.print("  \(BLENames.displayUUID(uuid, category: .characteristic))")
+                Swift.print(esc("  \(BLENames.displayUUID(uuid, category: .characteristic))"))
             }
         }
     }
 
     // MARK: - Helpers
+
+    private func esc(_ text: String) -> String {
+        TerminalText.escape(text)
+    }
 
     private func shortId(_ uuidString: String) -> String {
         String(uuidString.prefix(8))

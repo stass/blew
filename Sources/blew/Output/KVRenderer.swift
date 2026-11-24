@@ -1,11 +1,17 @@
 import Foundation
 import BLEManager
 
+/// Machine-readable output: one `key=value` record per line, every value
+/// through `KVText.value` (README, "Key-value output"). Lines on stderr go
+/// through `StandardErrorLog`, like the text renderer's.
 final class KVRenderer: OutputRenderer {
     let verbosity: Int
+    /// The stderr lines, shared with the text renderer.
+    private let formatter: OutputFormatter
 
     init(verbosity: Int) {
         self.verbosity = verbosity
+        self.formatter = OutputFormatter(format: .kv, verbosity: verbosity)
     }
 
     func render(_ output: CommandOutput) {
@@ -55,52 +61,37 @@ final class KVRenderer: OutputRenderer {
         case .nusStatus(let status):
             printKV([("nus", status.event), ("detail", status.detail)])
         case .message(let msg):
-            Swift.print(msg)
+            Swift.print(TerminalText.escape(msg))
         case .empty:
             break
         }
     }
 
     func renderError(_ message: String) {
-        FileHandle.standardError.write(Data("Error: \(message)\n".utf8))
+        formatter.printError(message)
     }
 
     func renderInfo(_ message: String) {
-        guard verbosity >= 1 else { return }
-        FileHandle.standardError.write(Data("\(message)\n".utf8))
+        formatter.printInfo(message)
     }
 
     func renderDebug(_ message: String) {
-        guard verbosity >= 2 else { return }
-        FileHandle.standardError.write(Data("[debug] \(message)\n".utf8))
+        formatter.printDebug(message)
     }
 
     func renderLive(_ text: String) {
-        FileHandle.standardError.write(Data("\r\u{1B}[K\(text)\r\n".utf8))
+        StandardErrorLog.writeLive(text)
     }
 
     // MARK: - KV formatting
 
     private func printKV(_ pairs: [(String, String)]) {
-        let line = pairs.map { key, value in
-            if value.contains(" ") || value.contains("\"") || value.isEmpty {
-                return "\(key)=\"\(value.replacingOccurrences(of: "\"", with: "\\\""))\""
-            }
-            return "\(key)=\(value)"
-        }.joined(separator: " ")
-        Swift.print(line)
+        Swift.print(KVText.record(pairs))
     }
 
     private func printTable(headers: [String], rows: [[String]]) {
-        let lowerHeaders = headers.map { $0.lowercased().replacingOccurrences(of: " ", with: "_") }
-        for row in rows {
-            let pairs = zip(lowerHeaders, row).map { key, value in
-                if value.contains(" ") || value.contains("\"") || value.isEmpty {
-                    return "\(key)=\"\(value.replacingOccurrences(of: "\"", with: "\\\""))\""
-                }
-                return "\(key)=\(value)"
-            }.joined(separator: " ")
-            Swift.print(pairs)
+        for line in KVText.records(headers: headers, rows: rows) {
+            Swift.print(line)
         }
     }
 
@@ -130,11 +121,12 @@ final class KVRenderer: OutputRenderer {
     // MARK: - Characteristics
 
     private func renderCharacteristics(_ chars: [CharacteristicRow]) {
-        let hasValues = chars.contains { $0.value != nil }
+        let hasValues = chars.contains { LabeledValue.flattened(value: $0.value, fields: $0.valueFields) != nil }
         if hasValues {
             let headers = ["UUID", "Name", "Properties", "Value"]
             let rows = chars.map { char -> [String] in
-                [char.uuid, char.name ?? "", char.properties.joined(separator: ","), char.value ?? ""]
+                [char.uuid, char.name ?? "", char.properties.joined(separator: ","),
+                 LabeledValue.flattened(value: char.value, fields: char.valueFields) ?? ""]
             }
             printTable(headers: headers, rows: rows)
         } else {
@@ -167,7 +159,9 @@ final class KVRenderer: OutputRenderer {
                 ]
                 if let name = char.name { charPairs.append(("name", name)) }
                 charPairs.append(("properties", char.properties.joined(separator: ",")))
-                if let value = char.value { charPairs.append(("value", value)) }
+                if let value = LabeledValue.flattened(value: char.value, fields: char.valueFields) {
+                    charPairs.append(("value", value))
+                }
                 printKV(charPairs)
                 for desc in char.descriptors {
                     var descPairs: [(String, String)] = [

@@ -32,7 +32,7 @@ public struct BLEUUID: Hashable, Sendable, CustomStringConvertible {
         public let text: String
 
         public var errorDescription: String? {
-            "invalid UUID \(text.debugDescription): expected 4 or 8 hex digits, "
+            "invalid UUID \"\(text)\": expected 4 or 8 hex digits, "
                 + "or a 128-bit UUID such as 6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
         }
     }

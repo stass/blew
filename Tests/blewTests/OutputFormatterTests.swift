@@ -159,13 +159,6 @@ final class OutputFormatterTests: XCTestCase {
         XCTAssertEqual(lines[0], "id=1 val=a")
         XCTAssertEqual(lines[1], "id=2 val=b")
     }
-
-    // MARK: - boldPaddingWidth
-
-    func testBoldPaddingWidthIsZeroWhenNotTTY() {
-        let fmt = OutputFormatter(format: .text, verbosity: 0)
-        XCTAssertEqual(fmt.boldPaddingWidth, 0)
-    }
 }
 
 // MARK: - Stdout capture helper
