@@ -340,30 +340,55 @@ enum GATTDecoder {
     }
 
     /// raw * multiplier * 10^decimalExponent * 2^binaryExponent, printed
-    /// exactly: 2^-k is 5^k * 10^-k, so the value is an integer times a
-    /// power of ten, and it gets one decimal place per negative power
-    /// (d = -2 gives 2 places, b = -1 gives 1). nil when the integer
-    /// overflows 64 bits.
+    /// with the decimal places its resolution supports: max(0, -d) for the
+    /// decimal exponent, plus ceil(k * log10 2) for b = -k (d = -2 gives 2
+    /// places; b = -1 gives 1, b = -16 gives 5); b >= 0 adds none. A value
+    /// with more places is rounded half away from zero (0.015625 at 5 places
+    /// is 0.01563). The arithmetic is integer, so no binary floating-point
+    /// error reaches the output: 2^-k is 5^k * 10^-k, so the exact value is
+    /// n * 10^(d - k) for a 64-bit n. nil when the arithmetic overflows 64
+    /// bits.
     static func scaled(
         negative: Bool,
         magnitude: UInt64,
         by scale: GATTCharacteristicDB.Scale
     ) -> String? {
-        var n = magnitude
+        // n = magnitude * |M| * 5^k for b = -k, or * 2^b for b >= 0.
+        let k = scale.binaryExponent < 0 ? Int(scale.binaryExponent.magnitude) : 0
+        var factor: UInt64 = 1
         var overflow: Bool
-        (n, overflow) = n.multipliedReportingOverflow(by: scale.multiplier.magnitude)
-        guard !overflow else { return nil }
-        let factor: UInt64 = scale.binaryExponent < 0 ? 5 : 2
         for _ in 0..<scale.binaryExponent.magnitude {
-            (n, overflow) = n.multipliedReportingOverflow(by: factor)
+            (factor, overflow) = factor.multipliedReportingOverflow(by: k > 0 ? 5 : 2)
             guard !overflow else { return nil }
         }
-        let exponent = scale.decimalExponent + min(scale.binaryExponent, 0)
-        var digits = String(n)
-        if exponent >= 0 {
-            if n != 0 { digits += String(repeating: "0", count: exponent) }
+        (factor, overflow) = factor.multipliedReportingOverflow(by: scale.multiplier.magnitude)
+        guard !overflow else { return nil }
+        var n: UInt64
+        (n, overflow) = magnitude.multipliedReportingOverflow(by: factor)
+        guard !overflow else { return nil }
+        let exactPlaces = k - scale.decimalExponent  // the value is n * 10^-exactPlaces
+        // ceil(k * log10 2) is the number of digits of 2^k, floor(k * log10 2)
+        // + 1, as k * log10 2 is not an integer for k >= 1. 5^k fit in 64
+        // bits above, so k < 28 and 2^k fits too.
+        let binaryPlaces = k == 0 ? 0 : String(UInt64(1) << UInt64(k)).count
+        let places = max(0, -scale.decimalExponent) + binaryPlaces
+
+        var digits: String
+        if exactPlaces > places {
+            // Drop the extra places; the last digit dropped is the most
+            // significant of them, and decides the rounding.
+            var dropped: UInt64 = 0
+            for _ in 0..<(exactPlaces - places) {
+                dropped = n % 10
+                n /= 10
+            }
+            if dropped >= 5 { n += 1 }
+            digits = String(n)
         } else {
-            let places = -exponent
+            digits = String(n)
+            if n != 0 { digits += String(repeating: "0", count: places - exactPlaces) }
+        }
+        if places > 0 {
             if digits.count <= places {
                 digits = String(repeating: "0", count: places + 1 - digits.count) + digits
             }

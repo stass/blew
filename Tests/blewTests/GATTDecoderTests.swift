@@ -351,11 +351,37 @@ final class GATTDecoderTests: XCTestCase {
     /// percentage_8.yaml (uint8, unit percentage) and temperature_8.yaml
     /// (sint8, unit degree_celsius): M = 1, d = 0, b = -1;
     /// chromaticity_coordinate.yaml (uint16, unit only in prose): b = -16.
-    /// A binary exponent of -k prints k places, exactly.
-    func testDecodeAppliesBinaryExponentExactly() {
+    /// A binary exponent of -k prints ceil(k * log10 2) places, the places
+    /// its resolution 2^-k supports: 1 for b = -1, 5 for b = -16
+    /// (0x8000 / 65536 is 0.5).
+    func testDecodeAppliesBinaryExponentToItsResolution() {
         XCTAssertEqual(GATTDecoder.decode(Data([201]), uuid: "2B04"), "100.5 percentage")
         XCTAssertEqual(GATTDecoder.decode(Data([0xFD]), uuid: "2B0D"), "-1.5 degree Celsius")
-        XCTAssertEqual(GATTDecoder.decode(Data([0x00, 0x80]), uuid: "2B1C"), "0.5000000000000000")
+        XCTAssertEqual(GATTDecoder.decode(Data([0x00, 0x80]), uuid: "2B1C"), "0.50000")
+    }
+
+    /// A value with more places than its resolution supports is rounded
+    /// half away from zero, in integer arithmetic.
+    func testScaledRoundsBinaryExponentsHalfAwayFromZero() {
+        typealias Scale = GATTCharacteristicDB.Scale
+        let chromaticity = Scale(multiplier: 1, decimalExponent: 0, binaryExponent: -16)
+        // 1024 / 65536 = 0.015625, a tie at 5 places.
+        XCTAssertEqual(GATTDecoder.scaled(negative: false, magnitude: 1024, by: chromaticity), "0.01563")
+        XCTAssertEqual(GATTDecoder.scaled(negative: true, magnitude: 1024, by: chromaticity), "-0.01563")
+        // 1 / 65536 = 0.0000152587890625; 65535 / 65536 = 0.9999847412109375.
+        XCTAssertEqual(GATTDecoder.scaled(negative: false, magnitude: 1, by: chromaticity), "0.00002")
+        XCTAssertEqual(GATTDecoder.scaled(negative: false, magnitude: 65535, by: chromaticity), "0.99998")
+        XCTAssertEqual(GATTDecoder.scaled(negative: false, magnitude: 0, by: chromaticity), "0.00000")
+        // b = -3: 1 place; 1/8 = 0.125 rounds down, 3/8 = 0.375 up.
+        let eighths = Scale(multiplier: 1, decimalExponent: 0, binaryExponent: -3)
+        XCTAssertEqual(GATTDecoder.scaled(negative: false, magnitude: 1, by: eighths), "0.1")
+        XCTAssertEqual(GATTDecoder.scaled(negative: false, magnitude: 3, by: eighths), "0.4")
+        // d and b together: 201 * 10^-2 * 2^-1 = 1.005 at 2 + 1 places;
+        // 7 * 10^-1 * 2^-3 = 0.0875 at 1 + 1 places.
+        XCTAssertEqual(GATTDecoder.scaled(negative: false, magnitude: 201,
+                                          by: Scale(multiplier: 1, decimalExponent: -2, binaryExponent: -1)), "1.005")
+        XCTAssertEqual(GATTDecoder.scaled(negative: false, magnitude: 7,
+                                          by: Scale(multiplier: 1, decimalExponent: -1, binaryExponent: -3)), "0.09")
     }
 
     /// temperature.yaml:49 and humidity.yaml:49: "A value of 0x8000 (0xFFFF)
@@ -367,7 +393,8 @@ final class GATTDecoderTests: XCTestCase {
         // time_accuracy.yaml (b = -3, second): "A value of 255 means drift is
         // unknown", a decimal special value; 253 is a number.
         XCTAssertEqual(GATTDecoder.decode(Data([0xFF]), uuid: "2A12"), "drift is unknown")
-        XCTAssertEqual(GATTDecoder.decode(Data([0xFD]), uuid: "2A12"), "31.625 second")
+        // 253 / 8 = 31.625, at the 1 place b = -3 supports.
+        XCTAssertEqual(GATTDecoder.decode(Data([0xFD]), uuid: "2A12"), "31.6 second")
         // high_voltage.yaml is in CONTRADICTED_SCALES but keeps its special value.
         XCTAssertEqual(GATTDecoder.decode(Data([0xFF, 0xFF, 0xFF]), uuid: "2BE0"), "value is not known")
     }
