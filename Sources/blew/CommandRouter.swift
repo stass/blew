@@ -462,16 +462,11 @@ final class CommandRouter {
         do {
             let arguments = try CommandSyntax.connect.parse(args)
             target = try DeviceTarget(arguments)
-            switch arguments.positionals.count {
-            case 0:
-                break
-            case 1:
+            if let id = arguments.positionals.first {
                 guard target == DeviceTarget() else {
                     return Self.invalidArguments("name the device as an argument or with targeting options, not both")
                 }
-                return ensureConnected(to: DeviceTarget(id: arguments.positionals[0]), reconnect: true)
-            default:
-                throw InvalidArgument("unexpected argument '\(arguments.positionals[1])'")
+                return ensureConnected(to: DeviceTarget(id: id), reconnect: true)
             }
         } catch {
             return CommandResult(failing: error)
@@ -511,7 +506,7 @@ final class CommandRouter {
     }
 
     func runDisconnect(_ args: [String]) -> CommandResult {
-        if let failure = Self.checkNoArguments(args) { return failure }
+        if let failure = Self.checkArguments(args, .disconnect) { return failure }
         var result = CommandResult()
 
         let operation: () async -> Void = { [self] in
@@ -536,7 +531,7 @@ final class CommandRouter {
     }
 
     func runStatus(_ args: [String]) -> CommandResult {
-        if let failure = Self.checkNoArguments(args) { return failure }
+        if let failure = Self.checkArguments(args, .status) { return failure }
         var result = CommandResult()
 
         let operation: () async -> Void = { [self] in
@@ -551,13 +546,11 @@ final class CommandRouter {
         return result
     }
 
-    /// The failure of a command that takes no arguments when `args` has
-    /// one; nil when it is empty.
-    static func checkNoArguments(_ args: [String]) -> CommandResult? {
+    /// The failure of a command that reads nothing from its arguments when
+    /// `args` does not fit its `syntax`; nil when they do.
+    static func checkArguments(_ args: [String], _ syntax: CommandSyntax) -> CommandResult? {
         do {
-            if let stray = try CommandSyntax.none.parse(args).positionals.first {
-                throw InvalidArgument("unexpected argument '\(stray)'")
-            }
+            _ = try syntax.parse(args)
             return nil
         } catch {
             return CommandResult(failing: error)
@@ -566,13 +559,13 @@ final class CommandRouter {
 
     func runSleep(_ args: [String]) -> CommandResult {
         var result = CommandResult()
-        let positionals: [String]
+        let text: String
         do {
-            positionals = try CommandSyntax.none.parse(args).positionals
+            text = try CommandSyntax.sleep.parse(args).positionals[0]
         } catch {
             return CommandResult(failing: error)
         }
-        guard positionals.count == 1, let seconds = Double(positionals[0]) else {
+        guard let seconds = Double(text) else {
             result.errors.append("sleep requires a numeric argument (seconds; 0 = infinite)")
             result.exitCode = BlewExitCode.invalidArguments.code
             return result
@@ -603,15 +596,16 @@ final class CommandRouter {
 
     /// `gatt <sub>`. The subcommand is the first positional, so options may
     /// come before it (`gatt -n foo tree`); once it is known, the arguments
-    /// are read again with its own options (`CommandSyntax.gattSubcommands`),
-    /// so `gatt svcs -d` is an unknown option.
+    /// are read again with its own options and positionals
+    /// (`CommandSyntax.gattSubcommands`), so `gatt svcs -d` is an unknown
+    /// option and `gatt svcs x` an unexpected argument.
     func runGATT(_ args: [String]) -> CommandResult {
         let usage = CommandOutput.message("Usage: gatt <svcs|tree|chars|desc|info>")
         let sub: String
         let arguments: ParsedArguments
         let target: DeviceTarget
         do {
-            guard let first = try CommandSyntax.gatt.parse(args).positionals.first else {
+            guard let first = try CommandSyntax.gatt.subcommand(in: args) else {
                 var result = Self.invalidArguments("missing subcommand")
                 result.output.append(usage)
                 return result
@@ -624,7 +618,6 @@ final class CommandRouter {
             sub = first
             arguments = try syntax.parse(args)
             if sub == "info" {
-                guard arguments.positionals.count >= 2 else { return Self.invalidArguments("missing characteristic UUID") }
                 return runGATTInfo(arguments.positionals[1])
             }
             target = try DeviceTarget(arguments)
@@ -632,16 +625,11 @@ final class CommandRouter {
             return CommandResult(failing: error)
         }
 
-        // Arguments are checked before auto-connect, which may replace the connected device.
+        // Arguments are checked before auto-connect, which may replace the
+        // connected device; the syntax gives `chars` and `desc` their operand.
         let operand = arguments.positionals.dropFirst().first
         let includeDescriptors = sub == "tree" && arguments.flag(.descriptors)
         let includeValues = (sub == "tree" || sub == "chars") && arguments.flag(.readValues)
-        if sub == "chars", operand == nil {
-            return Self.invalidArguments("missing service UUID")
-        }
-        if sub == "desc", operand == nil {
-            return Self.invalidArguments("missing characteristic UUID")
-        }
 
         let connectResult = ensureConnected(to: target)
         guard connectResult.exitCode == 0 else { return connectResult }
@@ -810,9 +798,7 @@ final class CommandRouter {
         } catch {
             return CommandResult(failing: error)
         }
-        guard let charInput = arguments.positionals.first else {
-            return Self.invalidArguments("missing characteristic UUID")
-        }
+        let charInput = arguments.positionals[0]
         let connectResult = ensureConnected(to: target)
         guard connectResult.exitCode == 0 else { return connectResult }
 
@@ -862,13 +848,8 @@ final class CommandRouter {
         } catch {
             return CommandResult(failing: error)
         }
-        let positional = arguments.positionals
-        guard positional.count >= 2 else {
-            return positional.isEmpty ? Self.invalidArguments("missing characteristic UUID and data")
-                                      : Self.invalidArguments("missing data to write")
-        }
-        let charInput = positional[0]
-        let dataStr = positional[1]
+        let charInput = arguments.positionals[0]
+        let dataStr = arguments.positionals[1]
         guard let data = DataFormatter.parse(dataStr, as: fmt) else {
             return CommandResult(failing: InvalidArgument("invalid data '\(dataStr)' for format '\(fmt.rawValue)'"))
         }
@@ -951,9 +932,7 @@ final class CommandRouter {
             return CommandResult(failing: error)
         }
         let background = !foregroundOnly && arguments.flag(.background)
-        guard let charInput = arguments.positionals.first else {
-            return Self.invalidArguments("missing characteristic UUID")
-        }
+        let charInput = arguments.positionals[0]
         if background, !isInteractiveMode {
             return Self.invalidArguments("-b is only available in interactive mode")
         }
@@ -1028,8 +1007,7 @@ final class CommandRouter {
         var result = CommandResult()
         let positionals: [String]
         do {
-            positionals = try CommandSyntax.none.parse(args).positionals
-            if positionals.count > 1 { throw InvalidArgument("unexpected argument '\(positionals[1])'") }
+            positionals = try CommandSyntax.subStop.parse(args).positionals
         } catch {
             return CommandResult(failing: error)
         }
@@ -1060,7 +1038,7 @@ final class CommandRouter {
     }
 
     func runSubStatus(_ args: [String]) -> CommandResult {
-        if let failure = Self.checkNoArguments(args) { return failure }
+        if let failure = Self.checkArguments(args, .subStatus) { return failure }
         var result = CommandResult()
         let uuids = backgroundSubscriptions.characteristics
         result.output.append(.subscriptionList(uuids))
@@ -1440,7 +1418,6 @@ extension CommandRouter {
         let arguments: ParsedArguments
         do {
             arguments = try CommandSyntax.periphAdv.parse(args)
-            if let stray = arguments.positionals.first { throw InvalidArgument("unexpected argument '\(stray)'") }
         } catch {
             return CommandResult(failing: error)
         }
@@ -1555,7 +1532,6 @@ extension CommandRouter {
         let savePath: String?
         do {
             let arguments = try CommandSyntax.periphClone.parse(args)
-            if let stray = arguments.positionals.first { throw InvalidArgument("unexpected argument '\(stray)'") }
             target = try DeviceTarget(arguments)
             savePath = arguments.value(.save)
             if let savePath, let problem = Self.unwritableReason(savePath) {
@@ -1772,7 +1748,7 @@ extension CommandRouter {
     }
 
     func runPeriphStop(_ args: [String]) -> CommandResult {
-        if let failure = Self.checkNoArguments(args) { return failure }
+        if let failure = Self.checkArguments(args, .periphStop) { return failure }
         var result = CommandResult()
         backgroundPeriphTask?.cancel()
         backgroundPeriphTask = nil
@@ -1784,12 +1760,10 @@ extension CommandRouter {
     /// The characteristic, value and format of `periph set` and
     /// `periph notify`. Throws an `InvalidArgument` for arguments it cannot
     /// use, a characteristic it cannot resolve among them.
-    private func parsePeriphValue(_ args: [String]) throws -> (char: BLEUUID, data: Data, format: ValueFormat) {
-        let arguments = try CommandSyntax.periphValue.parse(args)
+    private func parsePeriphValue(_ args: [String], _ subcommand: CommandSyntax.PeriphValueSubcommand) throws
+        -> (char: BLEUUID, data: Data, format: ValueFormat) {
+        let arguments = try CommandSyntax.periphValue(subcommand).parse(args)
         let positional = arguments.positionals
-        guard positional.count >= 2 else {
-            throw InvalidArgument(positional.isEmpty ? "missing characteristic UUID and value" : "missing value")
-        }
         let fmt = try Self.valueFormat(arguments)
         let charUUID: BLEUUID
         do {
@@ -1807,7 +1781,7 @@ extension CommandRouter {
         var result = CommandResult()
         let (charUUID, data, fmt): (BLEUUID, Data, ValueFormat)
         do {
-            (charUUID, data, fmt) = try parsePeriphValue(args)
+            (charUUID, data, fmt) = try parsePeriphValue(args, .set)
         } catch {
             return CommandResult(failing: error)
         }
@@ -1825,7 +1799,7 @@ extension CommandRouter {
         var result = CommandResult()
         let (charUUID, data): (BLEUUID, Data)
         do {
-            (charUUID, data, _) = try parsePeriphValue(args)
+            (charUUID, data, _) = try parsePeriphValue(args, .notify)
         } catch {
             return CommandResult(failing: error)
         }
@@ -1847,7 +1821,7 @@ extension CommandRouter {
     }
 
     func runPeriphStatus(_ args: [String]) -> CommandResult {
-        if let failure = Self.checkNoArguments(args) { return failure }
+        if let failure = Self.checkArguments(args, .periphStatus) { return failure }
         var result = CommandResult()
         let status = BLEPeripheral.shared.peripheralStatus()
         result.output.append(.peripheralStatus(status))

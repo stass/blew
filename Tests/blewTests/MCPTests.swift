@@ -1192,20 +1192,24 @@ final class MCPCommandLineTests: XCTestCase {
     }
 
     func testPeripheralValueThatLooksLikeAnOptionIsTheValue() throws {
-        for command in ["set", "notify"] {
+        for subcommand in [CommandSyntax.PeriphValueSubcommand.set, .notify] {
+            let command = subcommand.rawValue
             let built = server.buildPeriphSetArgs(command, [
                 "char_uuid": .string("FFF1"), "value": .string("-abc"), "format": .string("utf8"),
             ])
             XCTAssertEqual(built.first, command)
-            let parsed = try CommandSyntax.periphValue.parse(Array(built.dropFirst()))
+            let parsed = try CommandSyntax.periphValue(subcommand).parse(Array(built.dropFirst()))
             XCTAssertEqual(parsed.positionals, ["FFF1", "-abc"], command)
             XCTAssertEqual(try CommandRouter.valueFormat(parsed), .utf8, command)
         }
     }
 
-    /// The `gatt` command line of a call, read with every gatt option.
+    /// The `gatt` command line of a call, read with the syntax `runGATT`
+    /// reads it with: its subcommand's.
     private func gatt(_ sub: String, _ args: [String: Value]) throws -> ParsedArguments {
-        try CommandSyntax.gatt.parse(server.buildGATTArgs(sub, args))
+        let line = server.buildGATTArgs(sub, args)
+        XCTAssertEqual(try CommandSyntax.gatt.subcommand(in: line), sub)
+        return try XCTUnwrap(CommandSyntax.gattSubcommands[sub]).parse(line)
     }
 
     func testGATTServiceAndCharacteristicAreNeverOptions() throws {
@@ -1229,7 +1233,7 @@ final class MCPCommandLineTests: XCTestCase {
         for (sub, args) in calls {
             let parsed = try gatt(sub, args)
             XCTAssertFalse(parsed.flag(.readValues), "\(sub) \(args)")
-            XCTAssertFalse(parsed.flag(.descriptors), "\(sub) \(args)")
+            if sub == "tree" { XCTAssertFalse(parsed.flag(.descriptors), "\(sub) \(args)") }
         }
         let both = try gatt("tree", ["descriptors": .bool(true), "read_values": .bool(true)])
         XCTAssertTrue(both.flag(.readValues))

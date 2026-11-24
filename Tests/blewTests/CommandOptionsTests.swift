@@ -53,11 +53,11 @@ final class CommandOptionsTests: XCTestCase {
         XCTAssertEqual(parsed.values(.service), ["-S"])
         XCTAssertEqual(parsed.value(.rssiMin), "-70")
         XCTAssertEqual(parsed.positionals, ["2A19"])
-        XCTAssertEqual(try CommandSyntax.targeting.parse(["-n", "--", "x"]).value(.name), "--")
+        XCTAssertEqual(try CommandSyntax.connect.parse(["-n", "--", "x"]).value(.name), "--")
     }
 
     func testShortFlagsCombineAndAValueOptionEndsTheGroup() throws {
-        let tree = try CommandSyntax.gatt.parse(["tree", "-dr"])
+        let tree = try CommandSyntax.gattSubcommands["tree"]!.parse(["tree", "-dr"])
         XCTAssertTrue(tree.flag(.descriptors))
         XCTAssertTrue(tree.flag(.readValues))
         let scan = try CommandSyntax.scan.parse(["-wR", "-70"])
@@ -68,13 +68,16 @@ final class CommandOptionsTests: XCTestCase {
     }
 
     func testNumbersBareDashAndEndOfOptionsArePositionals() throws {
-        let write = try CommandSyntax.write.parse(["-f", "float32le", "fff1", "-1.5", "-", "-7"])
-        XCTAssertEqual(write.positionals, ["fff1", "-1.5", "-", "-7"])
+        let write = try CommandSyntax.write.parse(["-f", "float32le", "-", "-1.5"])
+        XCTAssertEqual(write.positionals, ["-", "-1.5"])
         XCTAssertEqual(write.value(.format), "float32le")
-        let ended = try CommandSyntax.write.parse(["-r", "--", "fff1", "-w", "-ab", "--"])
+        XCTAssertEqual(try CommandSyntax.write.parse(["-7", "-f", "uint8", "-"]).positionals, ["-7", "-"])
+        let ended = try CommandSyntax.write.parse(["-r", "--", "-w", "--"])
         XCTAssertTrue(ended.flag(.withResponse))
         XCTAssertFalse(ended.flag(.withoutResponse))
-        XCTAssertEqual(ended.positionals, ["fff1", "-w", "-ab", "--"])
+        XCTAssertEqual(ended.positionals, ["-w", "--"])
+        XCTAssertEqual(parseError(.write, ["--", "fff1", "-ab", "--"]),
+                       "unexpected argument '--' -- usage: write [options] <char> <data>")
     }
 
     // MARK: - Commands
@@ -99,7 +102,7 @@ final class CommandOptionsTests: XCTestCase {
     func testFlagSpellingAfterAValueOptionIsTheValue() {
         let result = router.runSub(["-p", "-b", "2A19"])
         XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code)
-        XCTAssertFalse(result.errors.contains { $0.contains("missing characteristic UUID") }, "\(result.errors)")
+        XCTAssertFalse(result.errors.contains { $0.contains("missing <char>") }, "\(result.errors)")
         XCTAssertTrue(result.errors.contains { $0.contains("'-b'") }, "\(result.errors)")
     }
 
@@ -143,14 +146,14 @@ final class CommandOptionsTests: XCTestCase {
         XCTAssertEqual(both.exitCode, BlewExitCode.invalidArguments.code)
         XCTAssertEqual(both.errors, ["name the device as an argument or with targeting options, not both"])
         let two = router.runConnect(["ABCD", "EF01"])
-        XCTAssertEqual(two.errors, ["unexpected argument 'EF01'"])
+        XCTAssertEqual(two.errors, ["unexpected argument 'EF01' -- usage: connect [options] [<id>]"])
     }
 
     /// The value reaches the write; it fails only for want of a device.
     func testWriteTakesNegativeValue() {
         for args in [["-f", "float32le", "fff1", "-1.5"], ["-f", "float32le", "--", "fff1", "-1.5"]] {
             let result = router.runWrite(args)
-            XCTAssertFalse(result.errors.contains { $0.contains("missing data") }, "\(args): \(result.errors)")
+            XCTAssertFalse(result.errors.contains { $0.contains("missing <data>") }, "\(args): \(result.errors)")
             XCTAssertTrue(result.errors.contains { $0.contains("not connected") }, "\(args): \(result.errors)")
         }
     }
@@ -214,5 +217,116 @@ final class CommandOptionsTests: XCTestCase {
         let result = router.runPeriphClone(["--save", "/nonexistent-blew-dir/clone.json"])
         XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code)
         XCTAssertTrue(result.errors.contains { $0.contains("cannot save to") }, "\(result.errors)")
+    }
+
+    // MARK: - Positionals
+
+    private func assertFails(_ result: CommandResult, _ prefix: String, _ label: String,
+                             file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code, "\(label): \(result.errors)",
+                       file: file, line: line)
+        XCTAssertTrue(result.errors.count == 1 && result.errors[0].hasPrefix(prefix) && result.errors[0].contains(" -- usage: "),
+                      "\(label): \(result.errors)", file: file, line: line)
+    }
+
+    /// The reader rejects too many and too few positionals and names the
+    /// command's usage, derived from its declared positionals.
+    func testParseChecksPositionalCount() {
+        XCTAssertEqual(parseError(.write, ["fff1", "01", "02"]),
+                       "unexpected argument '02' -- usage: write [options] <char> <data>")
+        XCTAssertEqual(parseError(.write, ["fff1"]), "missing <data> -- usage: write [options] <char> <data>")
+        XCTAssertEqual(parseError(.write, []), "missing <char> -- usage: write [options] <char> <data>")
+        XCTAssertEqual(parseError(.connect, ["a", "b"]), "unexpected argument 'b' -- usage: connect [options] [<id>]")
+        XCTAssertEqual(parseError(.disconnect, ["x"]), "unexpected argument 'x' -- usage: disconnect")
+        XCTAssertEqual(parseError(CommandSyntax.gattSubcommands["chars"]!, ["chars"]),
+                       "missing <service> -- usage: gatt chars [options] <service>")
+        XCTAssertEqual(parseError(CommandSyntax.gattSubcommands["info"]!, ["info", "2A19", "x"]),
+                       "unexpected argument 'x' -- usage: gatt info <char>")
+        XCTAssertEqual(try CommandSyntax.write.parse(["-r", "fff1", "--", "-1"]).positionals, ["fff1", "-1"])
+        XCTAssertEqual(try CommandSyntax.connect.parse([]).positionals, [])
+    }
+
+    /// An extra positional fails with exit 6 before anything connects:
+    /// `write fff1 01 02` does not write `01`.
+    func testExtraPositionalFailsBeforeConnecting() {
+        let cases: [(String, CommandResult)] = [
+            ("read", router.runRead(["2a19", "x"])),
+            ("write", router.runWrite(["fff1", "01", "02"])),
+            ("sub", router.runSub(["2a19", "x"])),
+            ("sub mcp", router.runSub(["--", "2a19", "x"], foregroundOnly: true)),
+            ("gatt svcs", router.runGATT(["svcs", "x"])),
+            ("gatt tree", router.runGATT(["-d", "tree", "x"])),
+            ("gatt chars", router.runGATT(["chars", "180F", "x"])),
+            ("gatt desc", router.runGATT(["desc", "2A19", "x"])),
+            ("gatt info", router.runGATT(["info", "2A19", "x"])),
+            ("periph set", router.runPeriphSet(["fff1", "00", "01"])),
+            ("periph notify", router.runPeriphNotify(["fff1", "00", "01"])),
+        ]
+        for (label, result) in cases {
+            assertFails(result, "unexpected argument '", label)
+        }
+    }
+
+    /// A `gatt` subcommand's errors name its own usage, however many extra
+    /// arguments follow it; without a subcommand, `gatt` shows its usage.
+    func testGATTPositionalErrorsNameTheSubcommandUsage() {
+        XCTAssertEqual(router.runGATT(["info", "2A19", "x", "y"]).errors,
+                       ["unexpected argument 'x' -- usage: gatt info <char>"])
+        XCTAssertEqual(router.runGATT(["-n", "d", "chars", "180F", "x"]).errors,
+                       ["unexpected argument 'x' -- usage: gatt chars [options] <service>"])
+        XCTAssertEqual(router.runGATT(["desc"]).errors, ["missing <char> -- usage: gatt desc [options] <char>"])
+        XCTAssertEqual(router.runGATT(["nope", "a", "b"]).errors, ["unknown gatt subcommand 'nope'"])
+        let missing = router.runGATT(["-n", "x"])
+        XCTAssertEqual(missing.exitCode, BlewExitCode.invalidArguments.code)
+        XCTAssertEqual(missing.errors, ["missing subcommand"])
+        guard missing.output.count == 1, case .message(let usage) = missing.output[0] else {
+            return XCTFail("\(missing.output)")
+        }
+        XCTAssertEqual(usage, "Usage: gatt <svcs|tree|chars|desc|info>")
+    }
+
+    /// `scan` takes no positional: `scan Thingy` does not scan everything.
+    func testScanRejectsPositional() {
+        assertFails(router.runScan(["Thingy"]), "unexpected argument 'Thingy'", "scan")
+        assertFails(router.runScan(["-w", "Thingy"]), "unexpected argument 'Thingy'", "scan -w")
+    }
+
+    /// A missing required positional fails with exit 6 and names it.
+    func testMissingPositionalFails() {
+        let cases: [(String, CommandResult)] = [
+            ("read", router.runRead([])),
+            ("write", router.runWrite(["fff1"])),
+            ("sub", router.runSub(["-c", "1"])),
+            ("gatt chars", router.runGATT(["chars"])),
+            ("gatt desc", router.runGATT(["desc"])),
+            ("gatt info", router.runGATT(["info"])),
+            ("periph set", router.runPeriphSet(["fff1"])),
+            ("sleep", router.runSleep([])),
+        ]
+        for (label, result) in cases {
+            assertFails(result, "missing <", label)
+        }
+    }
+
+    /// The commands that take no positional, or at most one, reject more.
+    func testCommandsWithFewPositionalsRejectMore() {
+        let cases: [(String, CommandResult)] = [
+            ("connect", router.runConnect(["ABCD", "EF01"])),
+            ("disconnect", router.runDisconnect(["x"])),
+            ("status", router.runStatus(["x"])),
+            ("sleep", router.runSleep(["1", "x"])),
+            ("sub stop", router.runSubStop(["2a19", "x"])),
+            ("sub status", router.runSubStatus(["x"])),
+            ("periph adv", router.runPeriphAdv(["x"])),
+            ("periph clone", router.runPeriphClone(["x"])),
+            ("periph stop", router.runPeriphStop(["x"])),
+            ("periph status", router.runPeriphStatus(["x"])),
+        ]
+        for (label, result) in cases {
+            assertFails(result, "unexpected argument '", label)
+        }
+        XCTAssertThrowsError(try CommandRouter.parseNUSOptions(["x"], stdinAvailable: false)) { error in
+            XCTAssertEqual(error.localizedDescription, "unexpected argument 'x' -- usage: nus [options]")
+        }
     }
 }

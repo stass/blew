@@ -475,6 +475,8 @@ A write the characteristic does not allow is not sent and fails with exit code 5
 
 `--` ends the options: every argument after it is a value, even one that starts with `-`. On the command line a negative number needs it; in `exec` and the REPL a number such as `-1.5` is always a value, and `--` is needed only for other text that starts with `-`.
 
+The data is one argument: quote a value that holds spaces (`write -f utf8 fff2 "hello world"`). `write fff1 01 02` writes nothing and fails with exit code 6, as does any command given more arguments than it takes; in `exec` and the REPL the error shows the command's usage (`unexpected argument '02' -- usage: write [options] <char> <data>`).
+
 ---
 
 ### `sub` — Subscribe to notifications or indications
@@ -761,7 +763,7 @@ A characteristic whose decoded value has several fields (`gatt tree -r`, `gatt c
 | `3` | Bluetooth unavailable or permission denied |
 | `4` | Timeout |
 | `5` | Operation failed (connect / GATT / read / write / subscribe, or the REPL cannot read or write its terminal or standard input) |
-| `6` | Invalid arguments: an unknown option or subcommand, a missing argument, or an option value blew cannot use (an unknown `-f` format, a `-c` that is not a whole number of at least 1, an invalid `-t`) |
+| `6` | Invalid arguments: an unknown option or subcommand, a missing argument, an extra argument (`write fff1 01 02`, `scan Thingy`; the error shows the command's usage), or an option value blew cannot use (an unknown `-f` format, a `-c` that is not a whole number of at least 1, an invalid `-t`) |
 | `130` | Interrupted by Ctrl-C (SIGINT) |
 | `143` | Terminated by SIGTERM |
 

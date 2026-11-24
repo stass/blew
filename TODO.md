@@ -66,23 +66,22 @@ None open.
   `NUSOptions`) and drop the round trip. Until then no test parses every
   builder's line with the syntax its `run*` uses (`MCPTests.swift`,
   `MCPCommandLineTests` parses gatt lines with the union `CommandSyntax.gatt`).
-- [ ] **C12. Extra positionals are ignored by `scan`, `read`, `write`, `sub`
-  and `gatt`.** `CommandRouter.swift` (`runScan`, `runRead`, `runWrite`,
-  `runSub`, `runGATT`); the commands that reject them repeat the check by
-  hand. `exec "write fff1 01 02"` writes only `01` and exits 0; `scan Thingy`
-  scans everything. Fix: positional arity in `CommandSyntax`, checked by
-  `parse`.
 - [ ] **C13. `gatt` subcommands are strings kept in step by hand.**
   `CommandOptions.swift` (`gatt`, `gattSubcommands`), `CommandRouter.swift`
   (`runGATT` switch and usage, `printHelp`). The union syntax must cover
-  every subcommand's options, and the operand is recovered after connecting
-  with a `preconditionFailure`. Fix: an enum of subcommands with its syntax
-  and operand, the union computed from it.
-- [ ] **C14. REPL completion and help keep their own option lists.**
-  `REPL/REPL.swift` (`completionPositionalUUID`, `optionsWithValue`),
+  every subcommand's options, the operand is recovered after connecting with
+  a `preconditionFailure`, and `PositionalSpec.word` repeats the dictionary
+  key. `sub` and `periph` take their subcommand only as the first token
+  (`sub -n foo stop` subscribes to `stop`), unlike `gatt`. Fix: an enum of
+  subcommands with its syntax and operand, the union computed from it, one
+  subcommand model for `gatt`, `sub` and `periph`.
+- [ ] **C14. REPL completion and help keep their own option and operand
+  lists.** `REPL/REPL.swift` (`completionPositionalUUID`, `optionsWithValue`),
   `CommandRouter.swift` (`printHelp`). `read -n foo <TAB>` takes `foo` as
-  the characteristic and offers nothing; help omits `scan -t`. Fix: derive
-  both from `CommandSyntax`.
+  the characteristic and offers nothing; help omits `scan -t`, and its
+  operand names (`<char>`, `<data>`) repeat the `PositionalSpec`s. Fix:
+  derive both from `CommandSyntax` (its `usage` already renders the
+  positionals).
 - [ ] Codegen backslash escaping is a no-op (`gsub("\\", "\\\\")`).
   `generate-ble-characteristics.rb:164`, `generate-ble-names.rb:31`. "CO2
   Concentration" renders a TAB.

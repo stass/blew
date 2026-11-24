@@ -1,8 +1,9 @@
-// The one reader of command-line options for the REPL, `exec` scripts and
+// The one reader of command-line arguments for the REPL, `exec` scripts and
 // the CommandRouter entry points the ArgumentParser commands and the MCP
-// server call. Each command declares its options once, as a
+// server call. Each command declares its options and positionals once, as a
 // `CommandSyntax`; `CommandSyntax.parse` walks the arguments once and is the
-// only code that decides which token is an option, a value or a positional.
+// only code that decides which token is an option, a value or a positional,
+// and whether the command has the positionals it takes.
 
 /// One option of a command: its names and whether it takes a value.
 struct OptionSpec: Hashable, Sendable {
@@ -58,7 +59,47 @@ struct OptionSpec: Hashable, Sendable {
     static let reconnect = OptionSpec(nil, "--reconnect", .flag)
 }
 
-/// The options one command accepts. `parse` reads them by these rules:
+/// One positional of a command, in the order the command takes them.
+enum PositionalSpec: Hashable, Sendable {
+    /// A subcommand word that is a positional of its command, so options
+    /// may come before it (`gatt -n foo tree`); the token must be this word.
+    case word(String)
+    /// An operand the command needs, by the name its usage shows (`char`).
+    case required(String)
+    /// An operand the command may go without.
+    case optional(String)
+
+    /// How the command's usage shows it: `tree`, `<char>`, `[<id>]`.
+    var usage: String {
+        switch self {
+        case .word(let word): word
+        case .required(let name): "<\(name)>"
+        case .optional(let name): "[<\(name)>]"
+        }
+    }
+
+    var isWord: Bool {
+        if case .word = self { true } else { false }
+    }
+
+    /// Whether the command fails without it: a word or a required operand.
+    var isRequired: Bool {
+        if case .optional = self { false } else { true }
+    }
+
+    /// The place of its kind in a command's list: words, then required
+    /// operands, then optional ones.
+    fileprivate var rank: Int {
+        switch self {
+        case .word: 0
+        case .required: 1
+        case .optional: 2
+        }
+    }
+}
+
+/// The options and positionals one command accepts. `parse` reads them by
+/// these rules:
 /// - `--` ends the options; every token after it is positional.
 /// - A token that starts with `-`, is longer than `-` and is not a number
 ///   (`-1.5`) is an option; a bare `-` and a number are positionals. An
@@ -71,18 +112,66 @@ struct OptionSpec: Hashable, Sendable {
 ///   group (`-wR -70`) and takes the next token.
 /// - A missing value, a value given to a flag, and a second value of an
 ///   option that takes one are errors.
+/// - Fewer positionals than the words and required ones, more than all the
+///   declared ones, and a token in place of a word that is not that word are
+///   errors that name the command's usage.
 struct CommandSyntax: Sendable {
+    /// The command as its usage names it (`write`, `sub stop`, `gatt`).
+    let command: String
     let options: [OptionSpec]
+    let positionals: [PositionalSpec]
 
-    init(_ options: [OptionSpec]) {
+    init(_ command: String, _ options: [OptionSpec] = [], positionals: [PositionalSpec] = []) {
         precondition(Set(options.map(\.long)).count == options.count, "an option is declared twice")
         let shorts = options.compactMap(\.short)
         precondition(Set(shorts).count == shorts.count, "a short option is declared twice")
+        precondition(positionals.map(\.rank) == positionals.map(\.rank).sorted(),
+                     "positionals are declared as words, then required ones, then optional ones")
+        self.command = command
         self.options = options
+        self.positionals = positionals
     }
 
-    /// A command without options.
-    static let none = CommandSyntax([])
+    /// `write [options] <char> <data>`, `gatt tree [options]`, `disconnect`.
+    var usage: String {
+        let words = positionals.filter(\.isWord)
+        let operands = positionals.filter { !$0.isWord }
+        return ([command] + words.map(\.usage) + (options.isEmpty ? [] : ["[options]"]) + operands.map(\.usage))
+            .joined(separator: " ")
+    }
+
+    private func usageError(_ message: String) -> InvalidArgument {
+        InvalidArgument("\(message) -- usage: \(usage)")
+    }
+
+    /// Checks the positionals `parse` read against the declared ones.
+    private func checkPositionals(_ tokens: [String]) throws {
+        for (spec, token) in zip(positionals, tokens) {
+            if case .word(let word) = spec, token != word {
+                throw usageError("unexpected argument '\(token)'")
+            }
+        }
+        if tokens.count > positionals.count {
+            throw usageError("unexpected argument '\(tokens[positionals.count])'")
+        }
+        if let missing = positionals.dropFirst(tokens.count).first(where: \.isRequired) {
+            throw usageError("missing \(missing.usage)")
+        }
+    }
+
+    /// The first positional of `args`, read with these options but without
+    /// checking the positionals: how a command whose subcommand may follow
+    /// options (`gatt -n foo tree`) finds which subcommand's syntax to
+    /// `parse` the arguments with. Nil when there is none.
+    func subcommand(in args: [String]) throws -> String? {
+        try readTokens(args).positionals.first
+    }
+
+    func parse(_ args: [String]) throws -> ParsedArguments {
+        let parsed = try readTokens(args)
+        try checkPositionals(parsed.positionals)
+        return parsed
+    }
 
     static func isOption(_ token: String) -> Bool {
         token.count > 1 && token.hasPrefix("-") && Double(token) == nil
@@ -90,7 +179,9 @@ struct CommandSyntax: Sendable {
 
     static let endOfOptions = "--"
 
-    func parse(_ args: [String]) throws -> ParsedArguments {
+    /// Reads options and positionals by the rules above, the positionals
+    /// unchecked.
+    private func readTokens(_ args: [String]) throws -> ParsedArguments {
         var parsed = ParsedArguments(syntax: self)
         var tokens = args[...]
         func takeValue(_ option: OptionSpec, as spelled: String) throws -> String {
@@ -146,7 +237,8 @@ struct CommandSyntax: Sendable {
 /// value in the wrong arity, is a programming error and traps.
 struct ParsedArguments {
     let syntax: CommandSyntax
-    /// The tokens that are not options or their values, in order.
+    /// The tokens that are not options or their values, in order: at least
+    /// the syntax's words and required positionals, at most all it declares.
     fileprivate(set) var positionals: [String] = []
     fileprivate var values: [String: [String]] = [:]
     fileprivate var flags: Set<String> = []
@@ -186,42 +278,61 @@ struct ParsedArguments {
 
 // MARK: - The commands' syntaxes
 
-/// The options of every command the router runs, in one place. The
-/// ArgumentParser commands and the MCP server build command lines for these
-/// syntaxes, so a change here is a change to every front end.
+/// The options and positionals of every command the router runs, in one
+/// place. The ArgumentParser commands and the MCP server build command lines
+/// for these syntaxes, so a change here is a change to every front end.
 extension CommandSyntax {
-    /// The device-targeting options alone (`DeviceTarget`).
-    static let targeting = CommandSyntax(OptionSpec.targeting)
+    /// The device-targeting options alone: blew's global options
+    /// (`DeviceTarget`) and the targeting fields of an MCP `ble_nus` call.
+    static let targeting = CommandSyntax("blew", OptionSpec.targeting)
 
-    static let scan = CommandSyntax(OptionSpec.targeting + [.timeout, .watch])
-    /// `connect [<device>]`.
-    static let connect = targeting
-    static let read = CommandSyntax(OptionSpec.targeting + [.format])
-    static let write = CommandSyntax(OptionSpec.targeting + [.format, .withResponse, .withoutResponse])
+    static let scan = CommandSyntax("scan", OptionSpec.targeting + [.timeout, .watch])
+    static let connect = CommandSyntax("connect", OptionSpec.targeting, positionals: [.optional("id")])
+    static let disconnect = CommandSyntax("disconnect")
+    static let status = CommandSyntax("status")
+    static let sleep = CommandSyntax("sleep", positionals: [.required("seconds")])
+
+    static let read = CommandSyntax("read", OptionSpec.targeting + [.format], positionals: [.required("char")])
+    static let write = CommandSyntax("write", OptionSpec.targeting + [.format, .withResponse, .withoutResponse],
+                                     positionals: [.required("char"), .required("data")])
     /// `sub` from the REPL, a script or the command line.
-    static let sub = CommandSyntax(OptionSpec.targeting + [.format, .duration, .count, .background])
+    static let sub = CommandSyntax("sub", OptionSpec.targeting + [.format, .duration, .count, .background],
+                                   positionals: [.required("char")])
     /// `sub` from the MCP server: no `-b`, so no argument can start a
     /// background subscription that outlives the call.
-    static let subForeground = CommandSyntax(OptionSpec.targeting + [.format, .duration, .count])
+    static let subForeground = CommandSyntax("sub", OptionSpec.targeting + [.format, .duration, .count],
+                                             positionals: [.required("char")])
+    static let subStop = CommandSyntax("sub stop", positionals: [.optional("char")])
+    static let subStatus = CommandSyntax("sub status")
 
     /// `gatt`: the options of all its subcommands, read only to find the
-    /// subcommand (the first positional); `gattSubcommands` then reads the
-    /// arguments again with that subcommand's own options.
-    static let gatt = CommandSyntax(OptionSpec.targeting + [.descriptors, .readValues])
+    /// subcommand (`subcommand(in:)`); `gattSubcommands` then reads the
+    /// arguments again with that subcommand's own options and positionals.
+    static let gatt = CommandSyntax("gatt", OptionSpec.targeting + [.descriptors, .readValues])
     static let gattSubcommands: [String: CommandSyntax] = [
-        "svcs": targeting,
-        "tree": gatt,
-        "chars": CommandSyntax(OptionSpec.targeting + [.readValues]),
-        "desc": targeting,
-        "info": none,
+        "svcs": CommandSyntax("gatt", OptionSpec.targeting, positionals: [.word("svcs")]),
+        "tree": CommandSyntax("gatt", OptionSpec.targeting + [.descriptors, .readValues],
+                              positionals: [.word("tree")]),
+        "chars": CommandSyntax("gatt", OptionSpec.targeting + [.readValues],
+                               positionals: [.word("chars"), .required("service")]),
+        "desc": CommandSyntax("gatt", OptionSpec.targeting, positionals: [.word("desc"), .required("char")]),
+        "info": CommandSyntax("gatt", positionals: [.word("info"), .required("char")]),
     ]
 
-    static let periphAdv = CommandSyntax([.config, .name, .service])
-    static let periphClone = CommandSyntax(OptionSpec.targeting + [.save])
-    /// `periph set` and `periph notify`.
-    static let periphValue = CommandSyntax([.format])
+    static let periphAdv = CommandSyntax("periph adv", [.config, .name, .service])
+    static let periphClone = CommandSyntax("periph clone", OptionSpec.targeting + [.save])
+    static let periphStop = CommandSyntax("periph stop")
+    static let periphStatus = CommandSyntax("periph status")
+    /// `periph set` and `periph notify`, which take the same arguments.
+    static func periphValue(_ subcommand: PeriphValueSubcommand) -> CommandSyntax {
+        CommandSyntax("periph \(subcommand.rawValue)", [.format], positionals: [.required("char"), .required("value")])
+    }
 
-    static let nus = CommandSyntax(OptionSpec.targeting + [
+    enum PeriphValueSubcommand: String, Sendable {
+        case set, notify
+    }
+
+    static let nus = CommandSyntax("nus", OptionSpec.targeting + [
         .send, .file, .expect, .duration, .pty, .listen, .bind, .reconnect, .withResponse, .withoutResponse,
     ])
 }

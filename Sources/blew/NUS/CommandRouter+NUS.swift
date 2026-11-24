@@ -177,9 +177,6 @@ extension CommandRouter {
     /// `InvalidArgument` on invalid input.
     static func parseNUSOptions(_ args: [String], stdinAvailable: Bool) throws -> NUSOptions {
         let arguments = try CommandSyntax.nus.parse(args)
-        if let stray = arguments.positionals.first {
-            throw InvalidArgument("unexpected argument '\(stray)'")
-        }
         let listen = try arguments.value(.listen).map { text in
             guard let port = UInt16(text) else { throw InvalidArgument("invalid port '\(text)'") }
             return port
