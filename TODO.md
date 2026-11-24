@@ -84,19 +84,17 @@ None open.
 
 ### Output
 
-- [ ] **O4. TextRenderer escapes at each `Swift.print` call site.**
-  `Sources/blew/Output/TextRenderer.swift` (GATT tree, characteristic info,
-  peripheral summary and events). Tables, records and stderr lines escape
-  inside one function, but the other text lines call `esc(...)` per field
-  before a bare `Swift.print`, because blew's own bold and dim cannot be
-  escaped with the text. A new line that forgets `esc` sends a device
-  name's ESC sequence to the terminal. Fix: one line writer taking styled
-  segments that escapes each one, as the only path to stdout.
-- [ ] **O5. `renderCharacteristics` repeats `formatTable`'s layout.**
-  `Sources/blew/Output/TextRenderer.swift:110-139` and the field list of
-  `renderCharacteristicInfo` compute their own widths, header and
-  separator. A change to one table layout misses the others. Fix: let
-  `formatTable` take a trailing unpadded column and use it for both.
+- [ ] **O6. Stream writes outside `Sources/blew/Output` escape per call site.**
+  `CommandRouter.swift` prints the `exec --dry-run` listing (script text)
+  with `print` and a per-line `TerminalText.escape`, the help listing from
+  `OutputFormatter.bold` strings, and the scan spinner and watch display
+  straight to stderr; `Blew.swift` writes ArgumentParser's message to
+  stderr unescaped. A new `print` there that interpolates device text has
+  no guard. kv keys are unescaped `String`s (`KVText.record`), safe only
+  while every key is a literal. Fix: route these through `TextLine` and
+  `StandardOutput`/`StandardErrorLog`, give kv keys a literal-only type,
+  and widen `OutputSourceTests` to `Sources/blew` with an allowlist for the
+  REPL's terminal control.
 
 ### Commands
 

@@ -174,21 +174,3 @@ enum KVText {
         return rows.map { record(Array(zip(keys, $0))) }
     }
 }
-
-// MARK: - stderr
-
-enum StandardErrorLog {
-    /// Writes one line to stderr: `prefix` (blew's own text) followed by
-    /// `message` escaped for the terminal. Every error, info, debug and
-    /// `nus` status line goes out here.
-    static func write(_ prefix: String, _ message: String) {
-        FileHandle.standardError.write(Data("\(prefix)\(TerminalText.escape(message))\n".utf8))
-    }
-
-    /// Writes `text`, escaped, as a line of its own while a prompt or a live
-    /// display may hold the cursor: carriage return and erase-line first,
-    /// CR LF after (the terminal may be in raw mode).
-    static func writeLive(_ text: String) {
-        FileHandle.standardError.write(Data("\r\u{1B}[K\(TerminalText.escape(text))\r\n".utf8))
-    }
-}

@@ -8,19 +8,20 @@ struct OutputFormatter {
     init(format: OutputFormat, verbosity: Int = 0) {
         self.format = format
         self.verbosity = verbosity
-        self.isTTY = isatty(fileno(stdout)) != 0
+        self.isTTY = StandardOutput.isTerminal
     }
 
     // MARK: - ANSI helpers
 
+    /// `text`, escaped, in bold when styled: for text built outside the
+    /// renderers, such as the help listing. Renderers build a `TextLine`.
     func bold(_ text: String) -> String {
-        guard isTTY && format == .text else { return text }
-        return "\u{1B}[1m\(text)\u{1B}[0m"
+        TextLine(text, .bold).rendered(styled: styled)
     }
 
+    /// `text`, escaped, dimmed when styled; see `bold`.
     func dim(_ text: String) -> String {
-        guard isTTY && format == .text else { return text }
-        return "\u{1B}[2m\(text)\u{1B}[0m"
+        TextLine(text, .dim).rendered(styled: styled)
     }
 
     // MARK: - Logging (stderr)
@@ -41,6 +42,18 @@ struct OutputFormatter {
 
     // MARK: - Output (stdout)
 
+    /// Whether lines carry their ANSI styles: text output on a terminal.
+    private var styled: Bool { isTTY && format == .text }
+
+    /// Writes `line` to stdout, the one way the renderers print text.
+    func write(_ line: TextLine) {
+        StandardOutput.write(line, styled: styled)
+    }
+
+    func write(_ lines: [TextLine]) {
+        for line in lines { write(line) }
+    }
+
     func printRecord(_ pairs: (String, String)...) {
         printRecord(pairs)
     }
@@ -51,50 +64,34 @@ struct OutputFormatter {
         switch format {
         case .text:
             for (key, value) in pairs {
-                Swift.print("\(bold(key)): \(TerminalText.escape(value))")
+                var line = TextLine(key, .bold)
+                line.append(": ")
+                line.append(value)
+                write(line)
             }
         case .kv:
-            Swift.print(KVText.record(pairs))
+            StandardOutput.write(record: pairs)
         }
     }
 
+    /// A table: in text mode laid out by `TextTable` (an empty table is one
+    /// empty line), in kv mode one record per row.
     func printTable(headers: [String], rows: [[String]]) {
         switch format {
         case .text:
-            Swift.print(formatTable(headers: headers, rows: rows))
+            let lines = TextTable.lines(headers: headers, rows: rows.map { TextTable.Row(cells: $0) })
+            write(lines.isEmpty ? [TextLine()] : lines)
         case .kv:
-            for line in KVText.records(headers: headers, rows: rows) {
-                Swift.print(line)
-            }
+            StandardOutput.write(recordsWithHeaders: headers, rows: rows)
         }
     }
 
-    /// Build a formatted text table and return it as a string (without printing).
-    /// Only meaningful in text mode; the string includes ANSI bold/dim escapes
-    /// when isTTY is true. Returns an empty string when rows is empty.
-    /// Cells are untrusted: each is escaped for the terminal, then measured
-    /// and padded in terminal columns (`TerminalText.width`).
+    /// A text table (`TextTable`) as one string of newline-separated lines,
+    /// with ANSI bold and dim when styled; empty when `rows` is. Cells are
+    /// untrusted and escaped.
     func formatTable(headers: [String], rows: [[String]]) -> String {
-        guard !rows.isEmpty else { return "" }
-        let cells = rows.map { $0.map(TerminalText.escape) }
-        var widths = headers.map(TerminalText.width)
-        for row in cells {
-            for (i, cell) in row.enumerated() where i < widths.count {
-                widths[i] = max(widths[i], TerminalText.width(cell))
-            }
-        }
-        var lines: [String] = []
-        let header = headers.enumerated().map { i, h in
-            bold(TerminalText.pad(h, toWidth: widths[i]))
-        }.joined(separator: "  ")
-        lines.append(header)
-        lines.append(dim(String(repeating: "─", count: widths.reduce(0, +) + max(0, widths.count - 1) * 2)))
-        for row in cells {
-            let line = row.enumerated().map { i, cell in
-                i < widths.count ? TerminalText.pad(cell, toWidth: widths[i]) : cell
-            }.joined(separator: "  ")
-            lines.append(line)
-        }
-        return lines.joined(separator: "\n")
+        TextTable.lines(headers: headers, rows: rows.map { TextTable.Row(cells: $0) })
+            .map { $0.rendered(styled: styled) }
+            .joined(separator: "\n")
     }
 }

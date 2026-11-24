@@ -473,17 +473,26 @@ protocol OutputRenderer {
 
 Three implementations:
 
-- **TextRenderer** (`Sources/blew/Output/TextRenderer.swift`): produces human-readable text output with aligned tables, GATT tree drawing, ANSI bold/dim when stdout is a TTY. Uses `OutputFormatter` internally for table formatting and ANSI helpers.
+- **TextRenderer** (`Sources/blew/Output/TextRenderer.swift`): produces human-readable text output with aligned tables, GATT tree drawing, ANSI bold/dim when stdout is a TTY. Every line it prints is a `TextLine` (below), written through `OutputFormatter.write`.
 - **KVRenderer** (`Sources/blew/Output/KVRenderer.swift`): produces machine-readable `key=value` lines.
 - **NullRenderer** (`Sources/blew/Output/NullRenderer.swift`): discards all output. Used by the MCP server to prevent any command output from reaching the JSON-RPC stdout transport.
 
 **OutputFormatter** (`Sources/blew/Output/OutputFormatter.swift`)
 
-Narrowed to a formatting utility used internally by `TextRenderer`. Provides:
-- `bold(_:)` / `dim(_:)` — ANSI escape wrappers (no-op when not a TTY or in KV mode)
-- `formatTable(headers:rows:)` — builds an aligned text table as a `String`; it escapes every cell, then pads it to the column's width in terminal columns
-- `printTable(headers:rows:)` / `printRecord(_:)` — convenience methods that format and write to stdout
+The renderers' writer for one output format. Provides:
+- `write(_:)` — writes a `TextLine`, with its styles as ANSI codes only in text mode on a TTY
+- `printTable(headers:rows:)` / `printRecord(_:)` — a table or record: through `TextTable` and `TextLine` in text mode, as kv records in kv mode
+- `formatTable(headers:rows:)` — a `TextTable` rendered as one `String`, for the scan watch display on stderr
+- `bold(_:)` / `dim(_:)` — one styled, escaped `TextLine` run as a `String`, for text built outside the renderers (the help listing)
 - `printError` / `printInfo` / `printDebug` — the stderr lines, through `StandardErrorLog`
+
+**Lines and tables** (`Sources/blew/Output/TextLine.swift`)
+
+A `TextLine` is a sequence of runs, each plain, bold or dim. Every run's text is escaped with `TerminalText.escape` when it is added, and no method adds text any other way, so the only bytes of a rendered line that are not escaped text are the ANSI codes of its styles. `TextTable.lines` is the one table layout: columns padded to their widest cell in terminal columns, two spaces apart, an optional bold header and dim rule, an optional unpadded trailing column (a characteristic's value, a field's size and condition) and continuation lines under a row indented to that column (the fields of a multi-field value). The characteristics table, the `gatt info` field list and every `printTable` table use it.
+
+**Streams** (`Sources/blew/Output/StandardStreams.swift`)
+
+`StandardOutput` and `StandardErrorLog` are the only code in `Sources/blew/Output` that writes to stdout or stderr: a `TextLine`, kv records, an escaped stderr message, or raw `nus` bytes (`StandardOutput.writeRaw`). `OutputSourceTests` reads the other files of the directory and fails on any direct stream write, since access control cannot keep a file from calling `print`. The rest of `Sources/blew` (help, `exec --dry-run`, the scan display, the REPL) writes to the streams itself; TODO.md O6 tracks it.
 
 **Escaping and display width** (`Sources/blew/Output/TextEscaping.swift`)
 
@@ -492,13 +501,11 @@ Text from devices, config files, MCP clients and arguments is untrusted, so each
 - `TerminalText.escape` — text output and every stderr line: `StandardErrorLog.write` (error, info, debug and `nus` status lines, through `OutputFormatter.printError`/`printInfo`/`printDebug`) and `StandardErrorLog.writeLive` (`renderLive`). It escapes the characters of `TextEscaping.isEscaped`: C0 and C1 controls, DEL, U+2028/U+2029 and Unicode format characters (category Cf) other than ZWJ and ZWNJ.
 - `KVText.value` / `KVText.record` — kv values: bare, or double-quoted with `\` and `"` escaped as well. README's "Key-value output" is the specification. A multi-field characteristic value is one `value=`, flattened by `LabeledValue.flattened`.
 
-Both write escapes in one syntax (`\n`, `\r`, `\t`, `\xHH`, `\uHHHH`, `\UHHHHHHHH`). The renderers add their own ANSI bold and dim around escaped text, never inside it. `nusData` in text mode is the one raw path: the bytes a UART delivers, written unchanged because the user asked for a byte stream.
+Both write escapes in one syntax (`\n`, `\r`, `\t`, `\xHH`, `\uHHHH`, `\UHHHHHHHH`). A `TextLine` adds ANSI bold and dim around escaped runs, never inside them. `nusData` in text mode is the one raw path: the bytes a UART delivers, written unchanged because the user asked for a byte stream.
 
 `TerminalText.width` gives a string's width in terminal columns (East Asian wide and fullwidth characters and emoji 2, combining marks and format characters 0), and `TerminalText.pad` pads to a width without truncating; all table code measures and pads with them. The wide ranges are a merged copy of the W and F blocks of Unicode's EastAsianWidth.txt; emoji come from the standard library's `isEmojiPresentation`.
 
-The `isTTY` flag is detected at init time via `isatty(fileno(stdout))`. ANSI escapes are only applied in text mode with a TTY, so piped output is never polluted.
-
-The `ScanWatchDisplay` still uses `OutputFormatter.formatTable` directly to compose its in-place redraw buffer on stderr.
+The `isTTY` flag is detected at init time via `StandardOutput.isTerminal`. ANSI escapes are only applied in text mode with a TTY, so piped output is never polluted.
 
 ### 4.7 DataFormatter
 

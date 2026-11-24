@@ -2,11 +2,12 @@ import Foundation
 import BLEManager
 
 /// Machine-readable output: one `key=value` record per line, every value
-/// through `KVText.value` (README, "Key-value output"). Lines on stderr go
-/// through `StandardErrorLog`, like the text renderer's.
+/// through `KVText.value` (README, "Key-value output"), written by
+/// `StandardOutput`. Lines on stderr go through `StandardErrorLog`, like
+/// the text renderer's.
 final class KVRenderer: OutputRenderer {
     let verbosity: Int
-    /// The stderr lines, shared with the text renderer.
+    /// The stderr lines, shared with the text renderer, and `.message` lines.
     private let formatter: OutputFormatter
 
     init(verbosity: Int) {
@@ -61,7 +62,7 @@ final class KVRenderer: OutputRenderer {
         case .nusStatus(let status):
             printKV([("nus", status.event), ("detail", status.detail)])
         case .message(let msg):
-            Swift.print(TerminalText.escape(msg))
+            formatter.write(TextLine(msg))
         case .empty:
             break
         }
@@ -86,13 +87,11 @@ final class KVRenderer: OutputRenderer {
     // MARK: - KV formatting
 
     private func printKV(_ pairs: [(String, String)]) {
-        Swift.print(KVText.record(pairs))
+        StandardOutput.write(record: pairs)
     }
 
     private func printTable(headers: [String], rows: [[String]]) {
-        for line in KVText.records(headers: headers, rows: rows) {
-            Swift.print(line)
-        }
+        StandardOutput.write(recordsWithHeaders: headers, rows: rows)
     }
 
     // MARK: - Devices
