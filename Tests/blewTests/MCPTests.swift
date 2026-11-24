@@ -476,7 +476,7 @@ final class MCPStructuredResultTests: XCTestCase {
         let json = try jsonString(original)
         XCTAssertTrue(json.contains("\"type\":\"notifications\""))
         let decoded = try roundTrip(original)
-        if case .notifications(let nvs) = decoded {
+        if case .notifications(let nvs, _) = decoded {
             XCTAssertEqual(nvs.first?.char, "2A19")
             XCTAssertEqual(nvs.first?.value, "64")
         } else {
@@ -604,7 +604,7 @@ final class MCPEncodeStructuredContentTests: XCTestCase {
     func testSingleNotificationAggregatedToArray() {
         let nv = NotificationValue(timestamp: "T", char: "2A19", name: nil, value: "ff")
         let result = server.encodeStructuredContent([.notification(nv)])
-        guard case .notifications(let nvs) = result else {
+        guard case .notifications(let nvs, _) = result else {
             XCTFail("Expected .notifications")
             return
         }
@@ -617,11 +617,28 @@ final class MCPEncodeStructuredContentTests: XCTestCase {
         let nv2 = NotificationValue(timestamp: "T2", char: "2A19", name: nil, value: "02")
         let nv3 = NotificationValue(timestamp: "T3", char: "2A19", name: nil, value: "03")
         let result = server.encodeStructuredContent([.notification(nv1), .notification(nv2), .notification(nv3)])
-        guard case .notifications(let nvs) = result else {
+        guard case .notifications(let nvs, _) = result else {
             XCTFail("Expected .notifications")
             return
         }
         XCTAssertEqual(nvs.count, 3)
+    }
+
+    /// A `ble_subscribe` result says how many notifications were dropped;
+    /// each report carries the total so far.
+    func testDroppedNotificationsInTheSubscribeResult() throws {
+        let nv = NotificationValue(timestamp: "T1", char: "2A19", name: nil, value: "01")
+        let result = server.encodeStructuredContent([
+            .notificationsDropped(NotificationDrops(char: "2A19", total: 3)), .notification(nv),
+            .notificationsDropped(NotificationDrops(char: "2A19", total: 7)),
+        ])
+        guard case .notifications(let nvs, let dropped) = result else {
+            return XCTFail("Expected .notifications")
+        }
+        XCTAssertEqual(nvs.count, 1)
+        XCTAssertEqual(dropped, 7)
+        let json = String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
+        XCTAssertTrue(json.contains("\"dropped\":7"), json)
     }
 
     func testMultiplePeripheralEventsAggregated() {

@@ -59,6 +59,8 @@ final class KVRenderer: OutputRenderer {
             }
         case .nusData(let record):
             printKV([("ts", record.timestamp), ("rx", DataFormatter.format(record.data, as: .hex))])
+        case .notificationsDropped(let drops):
+            printKV([("sub", "dropped"), ("char", drops.char), ("total", "\(drops.total)")])
         case .nusStatus(let status):
             printKV([("nus", status.event), ("detail", status.detail)])
         case .message(let msg):

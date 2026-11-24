@@ -15,6 +15,12 @@ struct DisconnectWait: Hashable, Sendable {
     fileprivate let serial: UInt64
 }
 
+/// One scan, made by `beginScan`. A scan's deadline and its reader
+/// stopping end only that scan, never a later one.
+struct ScanID: Hashable, Sendable {
+    fileprivate let serial: UInt64
+}
+
 /// Drains the BLEEventQueue on a dedicated thread and dispatches events
 /// to registered continuations and async streams. It serves one connection
 /// at a time (`link`), and owns the facts of which peripheral is connected
@@ -77,8 +83,10 @@ final class BLEEventProcessor: @unchecked Sendable {
     /// with the error that ended the connection.
     private var subscriptions = NotificationSubscriptions()
 
-    // Streams for continuous data
-    private var scanContinuation: AsyncStream<DiscoveredDevice>.Continuation?
+    typealias ScanContinuation = AsyncThrowingStream<DiscoveredDevice, Error>.Continuation
+    /// The scan running, if any: what it streams to, and how and where it
+    /// is stopped in CoreBluetooth (see `beginScan`).
+    private var scan: (id: ScanID, stream: ScanContinuation, queue: DispatchQueue, stop: @Sendable () -> Void)?
 
     init(eventQueue: BLEEventQueue) {
         self.eventQueue = eventQueue
@@ -130,15 +138,58 @@ final class BLEEventProcessor: @unchecked Sendable {
         lock.withLock { connectionCanceller = (queue, cancel) }
     }
 
-    func setScanContinuation(_ cont: AsyncStream<DiscoveredDevice>.Continuation?) {
+    /// Start a scan and return the stream of what it discovers; the scan
+    /// ends when the stream's reader stops. `start`
+    /// (scanForPeripherals) and later `stop` (stopScan) run on `queue`
+    /// (blew.cb), queued under the lock that changes the running scan, so
+    /// CoreBluetooth gets them in the order the scans begin and end. A scan
+    /// already running ends: its stream throws, as it no longer receives
+    /// anything, and CoreBluetooth is not stopped, since `start` replaces
+    /// its scan. With a `timeout`, the scan ends after it and its stream
+    /// finishes. Refused while Bluetooth is not poweredOn: the stream throws
+    /// bluetoothUnavailable and nothing is started.
+    func beginScan(timeout: TimeInterval?, on queue: DispatchQueue,
+                   start: @escaping @Sendable () -> Void, stop: @escaping @Sendable () -> Void)
+        -> AsyncThrowingStream<DiscoveredDevice, Error>
+    {
+        let (devices, stream) = AsyncThrowingStream<DiscoveredDevice, Error>.makeStream()
         lock.lock()
-        let old = scanContinuation
-        scanContinuation = cont
-        lock.unlock()
-        // Finish the old stream so `for await` terminates
-        if cont == nil {
-            old?.finish()
+        lastSerial += 1
+        let id = ScanID(serial: lastSerial)
+        // Runs outside the lock: the stream is finished only after unlocking.
+        stream.onTermination = { [weak self] _ in self?.endScan(id) }
+        guard state == .poweredOn else {
+            let error = BLEError.unavailable(state)
+            lock.unlock()
+            stream.finish(throwing: error)
+            return devices
         }
+        let replaced = Self.take(&scan)
+        scan = (id, stream, queue, stop)
+        queue.async(execute: start)
+        lock.unlock()
+        replaced?.stream.finish(throwing: BLEError.operationFailed("the scan was replaced by a newer scan"))
+        if let timeout {
+            queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                self?.endScan(id)
+            }
+        }
+        return devices
+    }
+
+    /// End scan `id`, because its time ran out or its reader stopped: its
+    /// stream finishes and CoreBluetooth stops scanning. A no-op once the
+    /// scan has ended (a newer scan replaced it, Bluetooth left poweredOn).
+    private func endScan(_ id: ScanID) {
+        lock.lock()
+        guard let ended = scan, ended.id == id else {
+            lock.unlock()
+            return
+        }
+        scan = nil
+        ended.queue.async(execute: ended.stop)
+        lock.unlock()
+        ended.stream.finish()
     }
 
     /// The peripheral that is connected, nil while none is (also while a
@@ -331,7 +382,7 @@ final class BLEEventProcessor: @unchecked Sendable {
     /// `notConnected` when `peripheral` is not connected, with the device's
     /// error when it refuses, and with the reason when the connection ends.
     func subscribe(_ id: SubscriberID, to characteristic: String,
-                   stream: AsyncThrowingStream<Data, Error>.Continuation,
+                   stream: NotificationSink,
                    confirmation: CheckedContinuation<Void, Error>,
                    peripheral: UUID, on queue: DispatchQueue,
                    setNotify: @escaping @Sendable (Bool) -> Void) {
@@ -460,9 +511,12 @@ final class BLEEventProcessor: @unchecked Sendable {
             // other state; end what waits on them. Whether a per-peripheral
             // didDisconnect comes first (ending the link with connectionFailed
             // instead) is unverified; TESTS.md has the manual check.
-            var effects = endLink(BLEError.unavailable(newState), mustCancel: false)
-            if let scan = Self.take(&scanContinuation) {
-                effects.append { scan.finish() }
+            // The scan's stream throws the reason, so it does not end as if
+            // its time ran out.
+            let error = BLEError.unavailable(newState)
+            var effects = endLink(error, mustCancel: false)
+            if let ended = Self.take(&scan) {
+                effects.append { ended.stream.finish(throwing: error) }
             }
             return effects
 
@@ -474,7 +528,7 @@ final class BLEEventProcessor: @unchecked Sendable {
                 serviceUUIDs: services,
                 manufacturerData: mfgData
             )
-            guard let stream = scanContinuation else { return [] }
+            guard let stream = scan?.stream else { return [] }
             return [{ stream.yield(device) }]
 
         case .connectIssued(let attempt):

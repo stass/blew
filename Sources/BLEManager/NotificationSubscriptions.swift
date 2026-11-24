@@ -26,7 +26,7 @@ import Foundation
 /// type; `BLEEventProcessor` owns one under its lock and runs the returned
 /// effects after unlocking.
 struct NotificationSubscriptions {
-    typealias Stream = AsyncThrowingStream<Data, Error>.Continuation
+    typealias Stream = NotificationSink
     typealias Confirmation = CheckedContinuation<Void, Error>
     typealias Effects = [() -> Void]
 

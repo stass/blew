@@ -285,15 +285,17 @@ final class BlewMCPServer {
                 return .readValue(rv)
             case .writeSuccess(let char, let name):
                 return .writeSuccess(WriteSuccessResult(char: char, name: name))
-            case .notification(let nv):
-                if output.count == 1 {
-                    return .notifications([nv])
-                }
+            case .notification, .notificationsDropped:
                 let allNotifications = output.compactMap { item -> NotificationValue? in
                     if case .notification(let n) = item { return n }
                     return nil
                 }
-                return .notifications(allNotifications)
+                // Each report carries the total so far; the last is the total.
+                let dropped = output.reduce(0) { total, item in
+                    if case .notificationsDropped(let drops) = item { return drops.total }
+                    return total
+                }
+                return .notifications(allNotifications, dropped: dropped)
             case .peripheralSummary(let summary):
                 return .peripheralSummary(summary)
             case .peripheralEvent:
@@ -497,7 +499,9 @@ enum StructuredResult: Codable {
     case peripheralStatus(PeripheralStatus)
     case readValue(ReadResult)
     case writeSuccess(WriteSuccessResult)
-    case notifications([NotificationValue])
+    /// The values a subscription received, and how many it dropped because
+    /// they came faster than it collected them.
+    case notifications([NotificationValue], dropped: Int = 0)
     case peripheralSummary(PeriphSummaryResult)
     case peripheralEvents([PeriphEventRecord])
     case subscriptionList([String])
@@ -508,7 +512,7 @@ enum StructuredResult: Codable {
         case type
         case devices, services, characteristics, descriptors, tree
         case characteristicInfo, connectionStatus, peripheralStatus
-        case readValue, writeSuccess, notifications
+        case readValue, writeSuccess, notifications, dropped
         case peripheralSummary, peripheralEvents
         case subscriptions, message, nus
     }
@@ -546,9 +550,10 @@ enum StructuredResult: Codable {
         case .writeSuccess(let ws):
             try container.encode("writeSuccess", forKey: .type)
             try container.encode(ws, forKey: .writeSuccess)
-        case .notifications(let nvs):
+        case .notifications(let nvs, let dropped):
             try container.encode("notifications", forKey: .type)
             try container.encode(nvs, forKey: .notifications)
+            try container.encode(dropped, forKey: .dropped)
         case .peripheralSummary(let summary):
             try container.encode("peripheralSummary", forKey: .type)
             try container.encode(summary, forKey: .peripheralSummary)
@@ -581,7 +586,8 @@ enum StructuredResult: Codable {
         case "peripheralStatus": self = .peripheralStatus(try container.decode(PeripheralStatus.self, forKey: .peripheralStatus))
         case "readValue":        self = .readValue(try container.decode(ReadResult.self, forKey: .readValue))
         case "writeSuccess":     self = .writeSuccess(try container.decode(WriteSuccessResult.self, forKey: .writeSuccess))
-        case "notifications":    self = .notifications(try container.decode([NotificationValue].self, forKey: .notifications))
+        case "notifications":    self = .notifications(try container.decode([NotificationValue].self, forKey: .notifications),
+                                                       dropped: try container.decodeIfPresent(Int.self, forKey: .dropped) ?? 0)
         case "peripheralSummary": self = .peripheralSummary(try container.decode(PeriphSummaryResult.self, forKey: .peripheralSummary))
         case "peripheralEvents": self = .peripheralEvents(try container.decode([PeriphEventRecord].self, forKey: .peripheralEvents))
         case "subscriptionList": self = .subscriptionList(try container.decode([String].self, forKey: .subscriptions))

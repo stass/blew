@@ -68,42 +68,23 @@ public final class BLECentral: @unchecked Sendable {
 
     // MARK: - Scan
 
-    public func scan(timeout: TimeInterval? = 5.0, allowDuplicates: Bool = false) async throws -> AsyncStream<DiscoveredDevice> {
+    /// Scan for `timeout` seconds, or until the stream's reader stops when
+    /// it is nil (`scan -w`). The stream finishes when the time runs out and
+    /// throws when the scan ends otherwise: bluetoothUnavailable when
+    /// Bluetooth leaves poweredOn, operationFailed when a newer scan
+    /// replaces it. Only this scan's deadline and reader end it.
+    public func scan(timeout: TimeInterval? = 5.0, allowDuplicates: Bool = false) async throws
+        -> AsyncThrowingStream<DiscoveredDevice, Error>
+    {
         try await waitForPoweredOn(timeout: 5.0)
 
-        let stream = AsyncStream<DiscoveredDevice> { continuation in
-            self.processor.setScanContinuation(continuation)
-            continuation.onTermination = { @Sendable _ in
-                self.cbQueue.async {
-                    self.centralManager.stopScan()
-                }
-                self.processor.setScanContinuation(nil)
-            }
-        }
-
-        cbQueue.async {
+        return processor.beginScan(timeout: timeout, on: cbQueue, start: {
             self.centralManager.scanForPeripherals(withServices: nil, options: [
                 CBCentralManagerScanOptionAllowDuplicatesKey: allowDuplicates,
             ])
-        }
-
-        // When a timeout is given, schedule a stop after that duration.
-        // When timeout is nil the stream runs until the caller cancels or
-        // calls stopScan externally (watch mode).
-        if let timeout = timeout {
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                guard let self = self else { return }
-                self.cbQueue.async {
-                    self.centralManager.stopScan()
-                }
-                // setScanContinuation(nil) calls finish() on the old continuation,
-                // which terminates the `for await` loop in the caller
-                self.processor.setScanContinuation(nil)
-            }
-        }
-
-        return stream
+        }, stop: {
+            self.centralManager.stopScan()
+        })
     }
 
     // MARK: - Connect
@@ -435,7 +416,7 @@ public final class BLECentral: @unchecked Sendable {
     /// (a disconnect, Bluetooth becoming unavailable). A subscribe given up
     /// (cancelled, or stopped by a caller's deadline) leaves at once; a
     /// stream that is dropped unread also leaves.
-    public func subscribe(characteristicUUID charUUID: String) async throws -> AsyncThrowingStream<Data, Error> {
+    public func subscribe(characteristicUUID charUUID: String) async throws -> NotificationStream {
         guard let peripheral = try getConnectedPeripheral() else {
             throw BLEError.notConnected
         }
@@ -446,11 +427,10 @@ public final class BLECentral: @unchecked Sendable {
         let processor = self.processor
         let cbQueue = self.cbQueue
         let id = processor.makeSubscriberID()
-        let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
-        continuation.onTermination = { _ in processor.unsubscribe(id) }
+        let stream = NotificationStream { processor.unsubscribe(id) }
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (confirmation: CheckedContinuation<Void, Error>) in
-                processor.subscribe(id, to: uuid, stream: continuation, confirmation: confirmation,
+                processor.subscribe(id, to: uuid, stream: stream.sink, confirmation: confirmation,
                                     peripheral: peripheral.identifier, on: cbQueue) { enable in
                     peripheral.setNotifyValue(enable, for: c)
                 }

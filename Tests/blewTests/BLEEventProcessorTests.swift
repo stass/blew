@@ -1,6 +1,7 @@
 import XCTest
 import CoreBluetooth
 @testable import BLEManager
+@testable import blew
 
 /// The event processor without CoreBluetooth: events are handed to it
 /// directly, as the delegate would queue them.
@@ -114,7 +115,7 @@ final class BLEEventProcessorTests: XCTestCase {
     /// processor's lock. `confirmed` is its wait for notifications to be
     /// on; `end` ends its stream, as a reader that stops does.
     private struct Subscriber {
-        let stream: AsyncThrowingStream<Data, Error>
+        let stream: NotificationStream
         let confirmed: Wait<Void>
         let cancel: () -> Void
         let end: () -> Void
@@ -128,19 +129,18 @@ final class BLEEventProcessorTests: XCTestCase {
                            finished: DispatchSemaphore? = nil) -> Subscriber {
         let id = p.makeSubscriberID()
         if cancelledFirst { p.unsubscribe(id) }
-        let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
-        continuation.onTermination = { _ in
+        let stream = NotificationStream {
             p.unsubscribe(id)
             finished?.signal()
         }
         let target = peripheral ?? p.connectedPeripheralId ?? UUID()
         let confirmed = Wait<Void> { cont in
-            p.subscribe(id, to: char, stream: continuation, confirmation: cont, peripheral: target,
+            p.subscribe(id, to: char, stream: stream.sink, confirmation: cont, peripheral: target,
                         on: self.gattQueue) { enable in calls.update { $0.append(enable) } }
         }
         gattQueue.sync {}
         return Subscriber(stream: stream, confirmed: confirmed, cancel: { p.unsubscribe(id) },
-                          end: { continuation.finish() })
+                          end: { stream.sink.finish() })
     }
 
     private func notifying(_ isOn: Bool, _ char: String = "TX", error: String? = nil) -> BLEEvent {
@@ -157,7 +157,7 @@ final class BLEEventProcessorTests: XCTestCase {
     /// A notification stream registered and confirmed the way
     /// BLECentral.subscribe registers one. `finished` is signalled once the
     /// stream has ended.
-    private func registerStream(_ processor: BLEEventProcessor, finished: DispatchSemaphore) -> AsyncThrowingStream<Data, Error> {
+    private func registerStream(_ processor: BLEEventProcessor, finished: DispatchSemaphore) -> NotificationStream {
         let subscriber = subscribe(processor, calls: SharedBox([]), finished: finished)
         processor.dispatch(.didUpdateNotificationState(peripheralId: processor.connectedPeripheralId ?? deviceB,
                                                        characteristicUUID: "TX", isNotifying: true, error: nil))
@@ -171,7 +171,7 @@ final class BLEEventProcessorTests: XCTestCase {
         private let ended = DispatchSemaphore(value: 0)
         private let task: Task<Void, Never>
 
-        init(_ stream: AsyncThrowingStream<Data, Error>) {
+        init(_ stream: NotificationStream) {
             let collected = self.collected, ended = self.ended
             task = Task {
                 do { for try await value in stream { collected.update { $0.append(value) } } } catch {}
@@ -223,6 +223,40 @@ final class BLEEventProcessorTests: XCTestCase {
         secondReader.stop()
         XCTAssertEqual(made(calls), [true, false], "the last subscriber leaving did not turn notifications off")
         XCTAssertEqual(processor.subscribedCharacteristicCount, 0)
+    }
+
+    /// A subscriber that stops reading (`sub` piped to a slow reader) keeps
+    /// at most `NotificationStream.capacity` values, the newest, and counts
+    /// the rest as dropped; another subscriber of the characteristic still
+    /// gets every value.
+    func testASlowSubscribersBufferIsBoundedAndCountsItsDrops() {
+        let processor = connected(to: deviceB)
+        let slow = subscribe(processor, calls: SharedBox([]))
+        processor.dispatch(notifying(true))
+        if case .success = slow.confirmed.outcome() {} else { return XCTFail("the subscribe was not confirmed") }
+        let reading = subscribe(processor, calls: SharedBox([]))
+        if case .success = reading.confirmed.outcome() {} else { return XCTFail("the subscribe was not confirmed") }
+        let reader = Reader(reading.stream)
+
+        let capacity = NotificationStream.capacity
+        let batch = capacity / 2, total = 3 * capacity
+        func payload(_ i: Int) -> [UInt8] { [UInt8(i >> 8), UInt8(i & 0xFF)] }
+        var sent = 0
+        while sent < total {
+            for i in sent..<(sent + batch) { processor.dispatch(value("TX", payload(i))) }
+            sent += batch
+            // Let the reading subscriber keep up, so only the slow one drops.
+            XCTAssertEqual(reader.values(sent).count, sent, "the reading subscriber lost values")
+        }
+        XCTAssertEqual(reading.stream.droppedCount, 0)
+        XCTAssertEqual(slow.stream.droppedCount, total - capacity, "the slow subscriber's drops were not counted")
+
+        slow.end()
+        let kept = Reader(slow.stream).values(capacity)
+        XCTAssertEqual(kept.count, capacity, "the slow subscriber's buffer is not bounded by the capacity")
+        XCTAssertEqual(kept.first, Data(payload(total - capacity)), "the slow subscriber did not keep the newest values")
+        XCTAssertEqual(kept.last, Data(payload(total - 1)))
+        reader.stop()
     }
 
     /// The stream is registered before notifications are turned on, so a
@@ -563,16 +597,138 @@ final class BLEEventProcessorTests: XCTestCase {
         XCTAssertEqual(value, Data([0x64]))
     }
 
-    /// A scan stream registered the way BLECentral.scan does. `finished` is
-    /// signalled once the stream has ended.
-    private func registerScan(_ processor: BLEEventProcessor, finished: DispatchSemaphore) -> AsyncStream<DiscoveredDevice> {
-        AsyncStream<DiscoveredDevice> { continuation in
-            processor.setScanContinuation(continuation)
-            continuation.onTermination = { _ in
-                processor.setScanContinuation(nil)
-                finished.signal()
+    /// A scan begun as BLECentral.scan begins one; each start and stop of
+    /// CoreBluetooth's scan is appended to `calls` (when given) as "start"
+    /// and "stop".
+    private func registerScan(_ processor: BLEEventProcessor, timeout: TimeInterval? = nil,
+                              calls: SharedBox<[String]> = SharedBox([])) -> AsyncThrowingStream<DiscoveredDevice, Error> {
+        let stream = processor.beginScan(timeout: timeout, on: gattQueue,
+                                         start: { calls.update { $0.append("start") } },
+                                         stop: { calls.update { $0.append("stop") } })
+        return stream
+    }
+
+    private func discovered(_ name: String) -> BLEEvent {
+        .didDiscover(peripheralId: UUID(), name: name, rssi: -50, serviceUUIDs: [], manufacturerData: nil)
+    }
+
+    /// Reads a scan stream in a task: the names it discovered and how it
+    /// ended.
+    private final class ScanReader: @unchecked Sendable {
+        private let names = SharedBox<[String]>([])
+        private let end = SharedBox<Result<Void, Error>?>(nil)
+        private let ended = DispatchSemaphore(value: 0)
+        private let task: Task<Void, Never>
+
+        init(_ stream: AsyncThrowingStream<DiscoveredDevice, Error>) {
+            let names = self.names, end = self.end, ended = self.ended
+            task = Task {
+                do {
+                    for try await device in stream { names.update { $0.append(device.name ?? "") } }
+                    end.update { $0 = .success(()) }
+                } catch {
+                    end.update { $0 = .failure(error) }
+                }
+                ended.signal()
             }
         }
+
+        /// The names read once there are `count`, or after a second.
+        func names(_ count: Int) -> [String] {
+            let deadline = Date().addingTimeInterval(1)
+            while names.get().count < count && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+            return names.get()
+        }
+
+        /// How the stream ended, or nil when it is still running after
+        /// `timeout`.
+        func outcome(timeout: TimeInterval = 1) -> Result<Void, Error>? {
+            guard ended.wait(timeout: .now() + timeout) == .success else { return nil }
+            ended.signal()
+            return end.get()
+        }
+
+        /// Stop reading, as a command that is interrupted does.
+        func stop() {
+            task.cancel()
+            _ = ended.wait(timeout: .now() + 1)
+            ended.signal()
+        }
+    }
+
+    /// An interrupted scan's deadline does not end the scan started after
+    /// it: each scan's deadline and reader end only that scan.
+    func testAnEndedScansDeadlineDoesNotEndALaterScan() {
+        let processor = poweredOn()
+        let calls = SharedBox<[String]>([])
+        let first = ScanReader(registerScan(processor, timeout: 0.2, calls: calls))
+        first.stop()
+        let second = ScanReader(registerScan(processor, calls: calls))
+
+        Thread.sleep(forTimeInterval: 0.4)
+        gattQueue.sync {}
+        XCTAssertNil(second.outcome(timeout: 0), "the first scan's deadline ended the second scan")
+        XCTAssertEqual(calls.get(), ["start", "stop", "start"], "the first scan's deadline stopped CoreBluetooth's scan")
+        processor.dispatch(discovered("later"))
+        XCTAssertEqual(second.names(1), ["later"], "the second scan no longer gets what is discovered")
+        second.stop()
+    }
+
+    /// A scan's deadline ends it: the stream finishes without an error and
+    /// CoreBluetooth stops scanning.
+    func testAScansDeadlineEndsIt() {
+        let processor = poweredOn()
+        let calls = SharedBox<[String]>([])
+        let scan = ScanReader(registerScan(processor, timeout: 0.05, calls: calls))
+        guard case .success = scan.outcome() else { return XCTFail("the scan did not finish at its deadline") }
+        XCTAssertEqual(calls.get(), ["start", "stop"])
+    }
+
+    /// A scan started while another runs (an interrupted `scan -w` whose
+    /// task outlived the interrupt) ends the earlier one: its stream throws, so its reader is
+    /// not left waiting, and the later scan gets what is discovered.
+    func testAScanStartedWhileAnotherRunsEndsTheEarlierStream() {
+        let processor = poweredOn()
+        let calls = SharedBox<[String]>([])
+        let watch = ScanReader(registerScan(processor, calls: calls))
+        let scan = ScanReader(registerScan(processor, calls: calls))
+        guard case .failure(BLEError.operationFailed) = watch.outcome() else {
+            return XCTFail("the earlier scan's stream did not end with an error")
+        }
+        processor.dispatch(discovered("new"))
+        XCTAssertEqual(scan.names(1), ["new"])
+        gattQueue.sync {}
+        XCTAssertEqual(calls.get(), ["start", "start"], "the earlier scan ending stopped the later one")
+        scan.stop()
+        gattQueue.sync {}
+        XCTAssertEqual(calls.get(), ["start", "start", "stop"])
+    }
+
+    /// Bluetooth turning off ends a scan with bluetoothUnavailable, so
+    /// `scan`, `scan -w` and the auto-connect scan exit 3 instead of ending
+    /// as if their time ran out.
+    func testBluetoothTurningOffEndsTheScanWithExitCode3() {
+        let processor = poweredOn()
+        let scan = ScanReader(registerScan(processor))
+        processor.dispatch(.centralStateChanged(.poweredOff))
+        guard case .failure(let error) = scan.outcome() else {
+            return XCTFail("the scan ended without an error")
+        }
+        XCTAssertEqual(CommandResult(failing: error).exitCode, BlewExitCode.bluetoothUnavailable.code)
+    }
+
+    /// A scan registered after Bluetooth turned off (past the facade's
+    /// poweredOn check) is refused at once instead of waiting forever.
+    func testAScanWhileBluetoothIsOffIsRefused() {
+        let processor = poweredOn()
+        processor.dispatch(.centralStateChanged(.poweredOff))
+        let calls = SharedBox<[String]>([])
+        let scan = ScanReader(registerScan(processor, calls: calls))
+        guard case .failure(BLEError.bluetoothUnavailable) = scan.outcome() else {
+            return XCTFail("the scan was not refused with bluetoothUnavailable")
+        }
+        gattQueue.sync {}
+        XCTAssertEqual(calls.get(), [], "CoreBluetooth was asked to scan while Bluetooth is off")
     }
 
     /// Bluetooth leaving poweredOn (powered off, access revoked, the stack
@@ -587,8 +743,7 @@ final class BLEEventProcessorTests: XCTestCase {
             let write = startWrite(processor, "FFF1").wait
             let streamFinished = DispatchSemaphore(value: 0)
             let stream = registerStream(processor, finished: streamFinished)
-            let scanFinished = DispatchSemaphore(value: 0)
-            let scan = registerScan(processor, finished: scanFinished)
+            let scan = registerScan(processor)
             let disconnected = DispatchSemaphore(value: 0)
             processor.onLinkEnded { _ in disconnected.signal() }
 
@@ -604,7 +759,9 @@ final class BLEEventProcessorTests: XCTestCase {
             guard case .failure(BLEError.bluetoothUnavailable) = streamEnd(stream) else {
                 return XCTFail("\(state.rawValue): the notification stream did not end with bluetoothUnavailable")
             }
-            XCTAssertEqual(scanFinished.wait(timeout: .now() + 1), .success, "\(state.rawValue): the scan did not end")
+            guard case .failure(BLEError.bluetoothUnavailable) = streamEnd(scan) else {
+                return XCTFail("\(state.rawValue): the scan did not end with bluetoothUnavailable")
+            }
             XCTAssertEqual(disconnected.wait(timeout: .now() + 1), .success, "\(state.rawValue): the disconnect callbacks did not run")
             XCTAssertNil(processor.connectedPeripheralId, "\(state.rawValue): still connected")
             withExtendedLifetime((stream, scan)) {}
@@ -613,7 +770,7 @@ final class BLEEventProcessorTests: XCTestCase {
 
     /// How a stream that has already ended ends for its reader: success when
     /// it finished, the error it threw otherwise.
-    private func streamEnd(_ stream: AsyncThrowingStream<Data, Error>) -> Result<Void, Error> {
+    private func streamEnd<S: AsyncSequence & Sendable>(_ stream: S) -> Result<Void, Error> {
         let end = Wait<Void> { cont in
             Task {
                 do {

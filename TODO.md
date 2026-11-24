@@ -18,30 +18,18 @@ None open.
 
 ## P1: important (0.3.0)
 
-### Subscriptions and continuations
+### Scanning
 
-- [ ] **S13. Notification streams buffer without bound.**
-  `BLEManager.swift` (`subscribe`, `AsyncThrowingStream.makeStream()` with the
-  default unbounded policy). A device that notifies faster than a subscriber
-  reads (a terminal paused with Ctrl-S, `sub` piped to a slow reader) grows
-  blew's memory without limit, once per subscriber of the characteristic.
-  Fix: bound each stream (`.bufferingNewest(k)`) and report the drops, as
-  the NUS bridge does for its input.
-- [ ] **S5. A scan's timeout task outlives the scan.**
-  `BLEManager.swift:97-108`. Interrupt a scan, start another, and the old
-  timer stops the new one early. Starting a scan during `watch` replaces the
-  stream without finishing it (`:67-79`).
-
-### Exit codes and README contract
-
-- [ ] **E2. A scan that Bluetooth turning off ends exits 0.**
-  `BLEEventProcessor` finishes the scan stream without an error, so
-  `scan`, `scan -w` and the auto-connect scan (`CommandRouter.swift:273`,
-  `:336`, `:380`) end as if their time ran out: `scan -w` prints its table
-  and exits 0 instead of 3. Make the scan stream an `AsyncThrowingStream`
-  finished with `bluetoothUnavailable`, as the notification stream is, and
-  iterate it with `for try await`; the catch blocks already record the
-  error with `CommandResult.fail`.
+- [ ] **S14. The scan stream buffers without bound.**
+  `BLEEventProcessor.swift` (`beginScan`, `makeStream()` with the default
+  unbounded policy). `scan -w` with duplicates allowed redraws on every
+  result; in a crowded room, if the redraw (or a kv reader on stdout) is
+  slower than the results arrive, the buffer grows for as long as the watch
+  runs, and the event queue's bound (1024 waiting events) no longer limits
+  memory. Fix: bound the stream for watch mode, where a dropped RSSI sample
+  is replaced by the next, and decide whether a timed scan, whose first
+  sighting of a device must not be lost, needs the same bound with counted
+  drops.
 
 ### Output
 

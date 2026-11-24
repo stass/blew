@@ -302,7 +302,7 @@ extension CommandRouter {
             connectedOnce = true
             status("connected", device.label)
 
-            var outcome = runNUSSession(options: options, port: port, deliver: deliver)
+            var outcome = runNUSSession(options: options, port: port, deliver: deliver, status: status)
             var stillConnected = outcome != nil && connectedDevice().id != nil
             // A write error can arrive before the disconnect that caused it:
             // let the connection state settle before deciding to reconnect.
@@ -335,12 +335,18 @@ extension CommandRouter {
     }
 
     /// Run one session on the current connection. Nil when interrupted.
+    /// Notifications the session did not read fast enough to keep
+    /// (`NotificationStream.capacity`) are reported as a "dropped" status:
+    /// at the first loss, as it is seen, and with the total when the
+    /// session ends if more were lost since.
     private func runNUSSession(options: NUSOptions, port: NUSPort,
-                               deliver: @escaping @Sendable (Data) -> Void) -> NUSOutcome? {
+                               deliver: @escaping @Sendable (Data) -> Void,
+                               status: @escaping @Sendable (String, String) -> Void) -> NUSOutcome? {
         let outcome = Locked<NUSOutcome>(.linkLost("session did not start"))
         let manager = self.manager
         // The operation timeout bounds the subscribe and each write.
         let operationTimeout = globals.timeout ?? 5.0
+        let reported = Locked(0)
         let operation: () async -> Void = {
             do {
                 let received = try await Self.withDeadline(operationTimeout) {
@@ -360,10 +366,23 @@ extension CommandRouter {
                     writeTimeout: operationTimeout,
                     received: received,
                     input: port.input(),
-                    deliver: deliver,
+                    deliver: { data in
+                        if reported.value == 0 {
+                            let lost = received.droppedCount
+                            if lost > 0 {
+                                reported.set(lost)
+                                status("dropped", "\(lost) notifications from the device: they came faster than blew delivered them")
+                            }
+                        }
+                        deliver(data)
+                    },
                     expect: options.expect,
                     linger: options.linger)
                 outcome.set(await session.run())
+                let lost = received.droppedCount
+                if lost > reported.value {
+                    status("dropped", "\(lost) notifications from the device in this session")
+                }
             } catch {
                 outcome.set(.linkLost(nil, error))
             }

@@ -38,6 +38,9 @@ final class TextRenderer: OutputRenderer {
             break
         case .notification(let nv):
             write(TextLine(nv.value))
+        case .notificationsDropped(let drops):
+            // stderr, so stdout carries only the values.
+            StandardErrorLog.write("sub ", drops.text)
         case .peripheralSummary(let summary):
             renderPeriphSummary(summary)
         case .peripheralEvent(let record):

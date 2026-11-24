@@ -187,7 +187,7 @@ When a device is already connected (in `exec`, the REPL or the MCP server), a co
 blew scan [-n <name>] [-S <uuid>] [-R <dBm>] [-i <id>] [-m <id>] [-p <strategy>] [-w]
 ```
 
-Scans for advertising BLE peripherals and prints a table of discovered devices. Timeout defaults to 5 seconds. In the REPL and `exec`, `scan` also takes `-t <sec>` for the timeout of that scan (`scan -t 3`); on the command line it is the global `-t`.
+Scans for advertising BLE peripherals and prints a table of discovered devices. Timeout defaults to 5 seconds. In the REPL and `exec`, `scan` also takes `-t <sec>` for the timeout of that scan (`scan -t 3`); on the command line it is the global `-t`. If Bluetooth is turned off or blew loses Bluetooth permission during a scan (also `scan -w` and the scan that finds a device to connect to), the scan fails with exit code 3.
 
 **Flags:**
 
@@ -491,6 +491,8 @@ Several subscriptions to one characteristic (`sub -b X` and a foreground `sub X`
 
 With `--out kv`, each line includes `ts=`, `char=`, and `value=` fields.
 
+Notifications have no flow control, so a device can send them faster than `sub` writes them out (a terminal paused with Ctrl-S, output piped to a slow reader). Each subscription keeps at most 1024 values waiting; when another arrives, the oldest waiting one is dropped. Drops are reported, not hidden: once when `sub` sees the first of them, and with the total when it ends, as `sub 1024 notifications of <char> dropped: they came faster than they were written out` on stderr (`sub=dropped char=<char> total=<n>` on stdout with `--out kv`; the count is the total so far). A background subscription reports them on its own line, and an MCP `ble_subscribe` result has a `dropped` field.
+
 **Background mode** (`-b`) is available in the REPL and `exec` scripts. Multiple characteristics can be subscribed simultaneously. Background notifications are printed to stderr with ANSI cursor control so they appear cleanly over the prompt:
 
 ```
@@ -551,7 +553,7 @@ Each write to the device must complete within the operation timeout (`-t`, defau
 
 blew holds about 64 KiB of local input that the device has not taken yet (64 KiB plus one read of at most 4 KiB); while that much is waiting it stops reading, so a pipe waits and a pty or TCP client's writes block, instead of blew's memory growing. `--file` reads the whole file into memory first.
 
-A pty or TCP bridge runs until `Ctrl-C` (or until the device disconnects, without `--reconnect`). If the local program is not reading, or no TCP client is connected, bytes from the device that do not fit the pty or socket buffer are dropped, as on a serial line: the first loss of each run is reported as `nus dropped: <n> bytes from the device: …`, and when the bridge ends a last `dropped` event gives the total.
+A pty or TCP bridge runs until `Ctrl-C` (or until the device disconnects, without `--reconnect`). If the local program is not reading, or no TCP client is connected, bytes from the device that do not fit the pty or socket buffer are dropped, as on a serial line: the first loss of each run is reported as `nus dropped: <n> bytes from the device: …`, and when the bridge ends a last `dropped` event gives the total. Notifications that arrive faster than blew passes them on (stdout piped to a slow reader) wait in a buffer of 1024; beyond that the oldest are dropped, reported as `nus dropped: <n> notifications from the device: …` at the first loss of a session and with the session's total when it ends.
 
 In the REPL and `exec`, standard input belongs to blew, so `nus` there sends only `--send`/`--file` bytes, or just listens for `--duration` seconds; `--pty` and `--listen` block the prompt until `Ctrl-C`.
 
@@ -993,7 +995,7 @@ Global options given before `mcp` apply to every tool call: `blew -t 30 mcp` giv
 - **Arguments are checked against the tool's input schema** before the call runs. An argument the tool does not declare, a value of the wrong JSON type (`"duration": "5"` instead of `5`), a value outside the listed `enum`, `minimum` or `maximum`, or a missing required argument fails the call with exit code 6 and the reason; nothing is ignored.
 - **Durations.** `ble_subscribe` collects for `duration` seconds, 10 when the call gives none, and stops earlier once `count` notifications (no limit by default) have arrived. `ble_subscribe` and `ble_nus` accept a `duration`, and `ble_scan` a `timeout`, of at most 300 seconds.
 - **Every call has a time budget**: its own duration (the scan `timeout`, the subscribe or NUS `duration`; zero for the other tools) plus 60 seconds for connecting and setup, or plus four times `-t` when that is longer. The budget counts from when the call starts, not while it waits its turn. A call still running when its budget runs out is stopped and fails with exit code 4, with whatever output the command returned (the notifications a subscription received so far; a scan stopped this way returns no devices).
-- **Subscriptions run in the foreground.** `ble_subscribe` always returns its notifications with the call; there is no background subscription over MCP.
+- **Subscriptions run in the foreground.** `ble_subscribe` always returns its notifications with the call; there is no background subscription over MCP. Its result's `dropped` field counts the notifications dropped because more than 1024 came before blew collected them (see `sub`); it is 0 when none were.
 - **Cancellation.** When the client cancels a call (`notifications/cancelled`), the call stops and the server sends no response for it; a cancelled call that was still waiting its turn never starts.
 - **SIGINT** (`kill -INT`) stops the call that is running, which fails with exit code 130; the server keeps serving. A SIGINT while no call runs ends the server with exit code 130, and SIGTERM ends it with 143.
 

@@ -1,5 +1,5 @@
 import XCTest
-import BLEManager
+@testable import BLEManager
 @testable import blew
 
 private func makeRouter(interactive: Bool = false) -> CommandRouter {
@@ -178,7 +178,7 @@ final class NUSSessionTests: XCTestCase {
     private func makeSession(input: [Data], inputEnds: Bool = true,
                              expect: Data? = nil, linger: TimeInterval = 0.05,
                              sendFails: Bool = false)
-        -> (NUSSession, AsyncThrowingStream<Data, Error>.Continuation, Sink, Sink) {
+        -> (NUSSession, NotificationSink, Sink, Sink) {
         let rx = Sink()
         let delivered = Sink()
         let buffer = NUSInputBuffer(capacity: 1024)
@@ -196,8 +196,9 @@ final class NUSSessionTests: XCTestCase {
                              expect: Data? = nil, linger: TimeInterval = 0.05,
                              deliver: @escaping @Sendable (Data) -> Void = { _ in },
                              send: @escaping @Sendable (Data) async throws -> Void)
-        -> (NUSSession, AsyncThrowingStream<Data, Error>.Continuation) {
-        let (received, deviceSends) = AsyncThrowingStream<Data, Error>.makeStream()
+        -> (NUSSession, NotificationSink) {
+        let received = NotificationStream {}
+        let deviceSends = received.sink
         let session = NUSSession(send: send, maxLength: maxLength, writeTimeout: writeTimeout,
                                  received: received, input: input, deliver: deliver,
                                  expect: expect, linger: linger)
@@ -664,7 +665,8 @@ final class NUSStepTests: XCTestCase {
 
 final class SubDeadlineTests: XCTestCase {
     func testDurationEndsASubscriptionThatReceivesNothing() async throws {
-        let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+        let stream = NotificationStream {}
+        let continuation = stream.sink
         let start = Date()
         try await CommandRouter.forEachNotification(stream, maxCount: nil, duration: 0.2) { _ in }
         XCTAssertLessThan(Date().timeIntervalSince(start), 2)
@@ -672,7 +674,8 @@ final class SubDeadlineTests: XCTestCase {
     }
 
     func testCountEndsTheSubscription() async throws {
-        let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+        let stream = NotificationStream {}
+        let continuation = stream.sink
         for byte in 0..<5 { continuation.yield(Data([UInt8(byte)])) }
         let sink = Sink()
         try await CommandRouter.forEachNotification(stream, maxCount: 3, duration: nil) { sink.append($0) }
@@ -682,7 +685,8 @@ final class SubDeadlineTests: XCTestCase {
     /// The connection ending (a disconnect, Bluetooth going off) ends `sub`
     /// with the stream's error, whose exit code the command reports.
     func testTheStreamsErrorEndsTheSubscription() async {
-        let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+        let stream = NotificationStream {}
+        let continuation = stream.sink
         continuation.yield(Data([1]))
         continuation.finish(throwing: BLEError.bluetoothUnavailable("Bluetooth is powered off"))
         let sink = Sink()
@@ -695,6 +699,34 @@ final class SubDeadlineTests: XCTestCase {
             XCTFail("unexpected error \(error)")
         }
         XCTAssertEqual(sink.data, Data([1]))
+    }
+
+    /// Notifications that came faster than `sub` wrote them out are
+    /// reported: once when the first drops are seen, and with the total when
+    /// the subscription ends if more were dropped after that.
+    func testDroppedNotificationsAreReported() async throws {
+        let stream = NotificationStream {}
+        let capacity = NotificationStream.capacity
+        for i in 0..<(capacity + 10) { stream.sink.yield(Data([UInt8(i & 0xFF)])) }
+        let reports = Locked<[Int]>([])
+        let handled = Locked(0)
+        try await CommandRouter.forEachNotification(stream, maxCount: capacity + 1, duration: nil,
+                                                    dropped: { total in reports.withValue { $0.append(total) } }) { _ in
+            // The first value read: more come while the reader is busy.
+            if handled.withValue({ $0 += 1; return $0 }) == 1 {
+                for _ in 0..<5 { stream.sink.yield(Data([0])) }
+            }
+        }
+        XCTAssertEqual(reports.value, [10, 14], "the drops were not reported at the first loss and in total at the end")
+    }
+
+    func testNoDropsNoReport() async throws {
+        let stream = NotificationStream {}
+        for byte in 0..<3 { stream.sink.yield(Data([UInt8(byte)])) }
+        let reports = Locked<[Int]>([])
+        try await CommandRouter.forEachNotification(stream, maxCount: 3, duration: nil,
+                                                    dropped: { total in reports.withValue { $0.append(total) } }) { _ in }
+        XCTAssertEqual(reports.value, [])
     }
 
     func testHugeDurationsAreRejectedBeforeBluetooth() {

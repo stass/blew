@@ -21,6 +21,7 @@ enum CommandOutput {
     case readValue(ReadResult)
     case writeSuccess(char: String, name: String?)
     case notification(NotificationValue)
+    case notificationsDropped(NotificationDrops)
     case peripheralSummary(PeriphSummaryResult)
     case peripheralEvent(PeriphEventRecord)
     case subscriptionList([String])
@@ -118,6 +119,18 @@ struct NotificationValue: Codable {
     let char: String
     let name: String?
     let value: String
+}
+
+/// Notifications of `char` that a subscription dropped because they came
+/// faster than blew wrote them out: `total` so far in that subscription.
+struct NotificationDrops: Codable, Equatable {
+    let char: String
+    let total: Int
+
+    /// The status line, without the command or characteristic in front.
+    var text: String {
+        "\(total) notifications of \(char) dropped: they came faster than they were written out"
+    }
 }
 
 /// Bytes received from a device's Nordic UART Service TX characteristic.

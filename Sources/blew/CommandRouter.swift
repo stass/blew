@@ -310,7 +310,7 @@ final class CommandRouter {
         let operation: () async -> Void = { [self] in
             do {
                 let stream = try await manager.scan(timeout: timeout)
-                for await device in stream {
+                for try await device in stream {
                     results.add(device)
                     spinner?.deviceCount = results.matching(filter).count
                 }
@@ -373,7 +373,7 @@ final class CommandRouter {
         let operation: () async -> Void = { [self] in
             do {
                 let stream = try await manager.scan(timeout: timeout, allowDuplicates: true)
-                for await device in stream {
+                for try await device in stream {
                     results.add(device)
                     display.update(devices: results.matching(filter).byRSSI)
                 }
@@ -417,7 +417,7 @@ final class CommandRouter {
         let operation: () async -> Void = { [self] in
             do {
                 let stream = try await manager.scan(timeout: timeout, allowDuplicates: true)
-                for await device in stream {
+                for try await device in stream {
                     let merged = results.add(device)
                     guard filter.matches(merged) else { continue }
                     renderer.render(.devices(Self.deviceRows([merged])))
@@ -952,7 +952,9 @@ final class CommandRouter {
                     let stream = try await Self.withDeadline(setupTimeout) {
                         try await manager.subscribe(characteristicUUID: charUUID)
                     }
-                    try await Self.forEachNotification(stream, maxCount: maxCount, duration: duration) { data in
+                    try await Self.forEachNotification(stream, maxCount: maxCount, duration: duration, dropped: { total in
+                        capturedRenderer.renderLive("sub \(NotificationDrops(char: charUUID, total: total).text)")
+                    }) { data in
                         capturedRenderer.renderLive("[\(charUUID)] \(DataFormatter.format(data, as: fmt))")
                     }
                 } catch is CancellationError {
@@ -974,7 +976,9 @@ final class CommandRouter {
                     try await manager.subscribe(characteristicUUID: charUUID)
                 }
                 let charName = BLENames.name(for: charUUID, category: .characteristic)
-                try await Self.forEachNotification(stream, maxCount: maxCount, duration: duration) { data in
+                try await Self.forEachNotification(stream, maxCount: maxCount, duration: duration, dropped: { total in
+                    emit(.notificationsDropped(NotificationDrops(char: charUUID, total: total)))
+                }) { data in
                     let ts = ISO8601DateFormatter.shared.string(from: Date())
                     emit(.notification(NotificationValue(timestamp: ts, char: charUUID, name: charName,
                                                          value: DataFormatter.format(data, as: fmt))))
@@ -1038,13 +1042,30 @@ final class CommandRouter {
     /// Pass each notification of `stream` to `handle` until `maxCount` have
     /// arrived, `duration` seconds have passed (whether or not any arrive) or
     /// the stream ends. Ending the iteration ends the subscription. Throws
-    /// the error the stream ends with (the connection ended).
-    static func forEachNotification(_ stream: AsyncThrowingStream<Data, Error>, maxCount: Int?, duration: TimeInterval?,
+    /// the error the stream ends with (the connection ended). `dropped` gets
+    /// the number of notifications the stream dropped so far because
+    /// `handle` did not keep up (`NotificationStream.capacity`): once when
+    /// the first drops are seen, and with the total when the subscription
+    /// ends, however it ends, if more were dropped since.
+    static func forEachNotification(_ stream: NotificationStream, maxCount: Int?, duration: TimeInterval?,
+                                    dropped: @escaping @Sendable (Int) -> Void = { _ in },
                                     _ handle: @escaping @Sendable (Data) -> Void) async throws {
+        let reported = Locked(0)
+        defer {
+            let total = stream.droppedCount
+            if total > reported.value { dropped(total) }
+        }
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
                 var count = 0
                 for try await data in stream {
+                    if reported.value == 0 {
+                        let total = stream.droppedCount
+                        if total > 0 {
+                            reported.set(total)
+                            dropped(total)
+                        }
+                    }
                     handle(data)
                     count += 1
                     if let maxCount, count >= maxCount { return }

@@ -1,4 +1,5 @@
 import Foundation
+import BLEManager
 
 /// Nordic UART Service: a byte pipe over GATT. The central writes to RX and
 /// the peripheral notifies on TX. Everything here is CoreBluetooth-free so
@@ -96,7 +97,7 @@ struct NUSSession: Sendable {
     /// Seconds one `send` may take before the session ends with a timeout.
     let writeTimeout: TimeInterval
     /// TX notifications; the stream throws why when the connection ends.
-    let received: AsyncThrowingStream<Data, Error>
+    let received: NotificationStream
     /// Local input, shared with the sessions before and after this one.
     let input: NUSInputBuffer
     /// Where received bytes go: the local port or the command's output.
