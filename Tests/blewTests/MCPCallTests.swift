@@ -186,6 +186,26 @@ final class ToolCallQueueTests: XCTestCase {
         guard case .cancelled = outcome else { return XCTFail("\(outcome)") }
     }
 
+    /// The outcome is decided on the queue when the work returns: a
+    /// cancellation that arrives after that, here while `settle` runs, does
+    /// not turn a finished call into a cancelled one.
+    func testCancellationAfterTheWorkReturnedDoesNotChangeTheOutcome() async {
+        let queue = ToolCallQueue()
+        let settling = Locked(false)
+        let cancelSent = Locked(false)
+        let call = Task {
+            await queue.run(budget: 60) { _ in "done" } settle: { value, cancelled in
+                settling.set(true)
+                XCTAssertTrue(eventually { cancelSent.value })
+                return cancelled ? "cancelled" : value
+            }
+        }
+        XCTAssertTrue(eventually { settling.value })
+        call.cancel()
+        cancelSent.set(true)
+        guard case .finished("done") = await call.value else { return XCTFail("the late cancellation changed the outcome") }
+    }
+
     /// A client cancellation that arrives after the budget ran out, while
     /// the work is still stopping, cancels the call: the server answers a
     /// cancelled request with nothing.

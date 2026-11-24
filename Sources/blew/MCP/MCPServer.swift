@@ -50,9 +50,8 @@ final class BlewMCPServer {
     private let server: Server
     let router: CommandRouter
     private let calls = ToolCallQueue()
-    /// Device switches made by calls whose result has not been sent: the
-    /// running call's, and a cancelled call's, which go with the next result.
-    private let unreportedSwitches = UnreportedDeviceSwitches()
+    /// The device switches of cancelled calls, which get no response.
+    let unreportedSwitches = UnreportedDeviceSwitches()
 
     /// `globals` are the options given before `mcp` (`blew -t 30 mcp`).
     init(globals: GlobalOptions) {
@@ -115,35 +114,31 @@ final class BlewMCPServer {
     func execute(_ command: ToolCommand, name: String, budget: TimeInterval) async throws -> CallTool.Result {
         let router = self.router
         let unreported = self.unreportedSwitches
-        // This call's switches, kept apart from those of the calls after it,
-        // which may run and reply before this call's reply is built.
-        let own = Locked(CallSwitches(call: 0, switches: []))
         let outcome = await calls.run(budget: budget) { stop in
-            let call = unreported.nextCall()
-            let (result, switches) = router.collectingDeviceSwitches {
+            router.collectingDeviceSwitches {
                 router.run(stoppingOn: stop) { command.run(router) }
             }
-            own.set(CallSwitches(call: call, switches: switches))
-            return result
+        } settle: { ran, cancelled in
+            // On the queue, before the next call runs, so the switches stay
+            // in the order the calls ran however late each reply is built.
+            let (result, own) = ran
+            return (result: result, switches: unreported.settle(own: own, cancelled: cancelled))
         }
         var result: CommandResult
+        let switches: [DeviceSwitch]
         switch outcome {
         case .cancelled:
-            // A cancelled call gets no response; its switches go with a later one.
-            unreported.append(own.value)
             throw CancellationError()
         case .finished(let finished):
-            result = finished
+            (result, switches) = finished
         case .budgetExhausted(let exhausted):
-            result = exhausted
+            (result, switches) = exhausted
             // A command that still succeeded is reported as it finished.
             if result.exitCode != 0 {
                 result.exitCode = BlewExitCode.timeout.code
                 result.errors.append("\(name) did not finish within its \(Int(budget))-second budget")
             }
         }
-        // In the order the calls ran, so the last `to` is the device connected now.
-        let switches = (unreported.take() + [own.value]).sorted { $0.call < $1.call }.flatMap(\.switches)
         return buildMCPResult(result, deviceSwitches: switches)
     }
 
@@ -481,41 +476,30 @@ final class BlewMCPServer {
     }
 }
 
-/// The device switches one MCP call made, and its place in the order the
-/// calls ran.
-struct CallSwitches {
-    let call: Int
-    let switches: [DeviceSwitch]
-}
-
-/// The device switches of cancelled MCP calls, which get no response: the
-/// next call to reply after one was cancelled reports them with its own.
-/// Also numbers the calls as they run. Calls reply from their own tasks,
-/// so it has a lock of its own.
-final class UnreportedDeviceSwitches {
+/// The device switches of cancelled MCP calls, which get no response, in
+/// the order the calls ran. Every call that ran passes its own switches
+/// through `settle`, on the tool-call queue, so the order is the queue's.
+/// It holds switches only: a cancelled call that switched nothing adds
+/// nothing, and each entry is a real disconnect and connect. The lock lets
+/// a test read it from another thread.
+final class UnreportedDeviceSwitches: @unchecked Sendable {
     private let lock = NSLock()
-    private var calls = 0
-    private var unreported: [CallSwitches] = []
+    private var waiting: [DeviceSwitch] = []
 
-    /// The number of the call starting to run on the tool-call queue.
-    func nextCall() -> Int {
+    /// The switches a call reports, given its own, `own`: none for a
+    /// cancelled call, whose switches wait for the next call that finishes;
+    /// for a call that finished, every waiting switch and then its own, so
+    /// the last `to` is the device connected now.
+    func settle(own: [DeviceSwitch], cancelled: Bool) -> [DeviceSwitch] {
         lock.withLock {
-            defer { calls += 1 }
-            return calls
+            waiting += own
+            guard !cancelled else { return [] }
+            defer { waiting = [] }
+            return waiting
         }
     }
 
-    func append(_ cancelled: CallSwitches) {
-        lock.withLock { unreported.append(cancelled) }
-    }
-
-    /// The cancelled calls' switches so far; none are left after.
-    func take() -> [CallSwitches] {
-        lock.withLock {
-            defer { unreported = [] }
-            return unreported
-        }
-    }
+    var isEmpty: Bool { lock.withLock { waiting.isEmpty } }
 }
 
 // MARK: - Structured result wrapper

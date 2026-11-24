@@ -932,6 +932,77 @@ final class MCPToolDispatchTests: XCTestCase {
         XCTAssertEqual(switches(secondReply), .array([.object(["from": .string(b), "to": .string(c)])]))
         XCTAssertEqual(switches(firstReply), .array([.object(["from": .string(a), "to": .string(b)])]))
     }
+
+    /// A call cancelled while it runs switches A to B; the task that would
+    /// resume it is held back while a second call switches B to C and
+    /// replies. The second reply reports both switches, in the order the
+    /// calls ran, and nothing is left for a later reply.
+    func testACancelledCallsSwitchGoesWithTheNextReplyInRunOrder() async throws {
+        guard #available(macOS 15.0, *) else { throw XCTSkip("needs task executors") }
+        let a = "AAAAAAAA-0000-0000-0000-000000000001", b = "BBBBBBBB-0000-0000-0000-000000000002",
+            c = "CCCCCCCC-0000-0000-0000-000000000003"
+        let first = try XCTUnwrap(DeviceSwitch(replacing: ConnectedDevice(id: a, advertisement: nil), with: b))
+        let second = try XCTUnwrap(DeviceSwitch(replacing: ConnectedDevice(id: b, advertisement: nil), with: c))
+        let started = DispatchSemaphore(value: 0), finish = DispatchSemaphore(value: 0)
+        let replies = HeldExecutor()
+        let server: BlewMCPServer = self.server
+        let cancelledCall = Task(executorPreference: replies) {
+            try await server.execute(ToolCommand(duration: 0) { router in
+                router.reportDeviceSwitch(first)
+                started.signal()
+                finish.wait()
+                return CommandResult()
+            }, name: "ble_read", budget: 30)
+        }
+        await withCheckedContinuation { done in DispatchQueue.global().async { started.wait(); done.resume() } }
+        cancelledCall.cancel()
+        replies.hold()
+        let secondCall = Task {
+            try await server.execute(ToolCommand(duration: 0) { router in
+                router.reportDeviceSwitch(second)
+                return CommandResult()
+            }, name: "ble_read", budget: 30)
+        }
+        finish.signal()
+        let secondReply = try await secondCall.value
+        XCTAssertGreaterThan(replies.release(), 0, "the cancelled call's task was not held back")
+        do {
+            _ = try await cancelledCall.value
+            XCTFail("a cancelled call replied")
+        } catch is CancellationError {}
+
+        func switches(_ reply: CallTool.Result) -> Value? { reply.structuredContent?.objectValue?["deviceSwitches"] }
+        XCTAssertEqual(switches(secondReply), .array([
+            .object(["from": .string(a), "to": .string(b)]),
+            .object(["from": .string(b), "to": .string(c)]),
+        ]))
+        let later = try await server.execute(ToolCommand(duration: 0) { _ in CommandResult() }, name: "ble_status", budget: 5)
+        XCTAssertNil(switches(later), "a switch is reported once")
+    }
+
+    /// Cancelled calls that switched nothing leave nothing behind, however
+    /// many a client sends.
+    func testCancelledCallsWithoutSwitchesRetainNothing() async throws {
+        let server: BlewMCPServer = self.server
+        for _ in 0..<3 {
+            let started = DispatchSemaphore(value: 0), finish = DispatchSemaphore(value: 0)
+            let call = Task {
+                try await server.execute(ToolCommand(duration: 0) { _ in
+                    started.signal()
+                    finish.wait()
+                    return CommandResult()
+                }, name: "ble_read", budget: 30)
+            }
+            await withCheckedContinuation { done in DispatchQueue.global().async { started.wait(); done.resume() } }
+            call.cancel()
+            finish.signal()
+            do {
+                _ = try await call.value
+                XCTFail("a cancelled call replied")
+            } catch is CancellationError {}
+        }
+        XCTAssertTrue(server.unreportedSwitches.isEmpty)
+    }
 }
 
 /// Runs a task's jobs on the global queue, except while held: then it keeps

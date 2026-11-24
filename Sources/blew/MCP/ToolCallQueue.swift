@@ -20,7 +20,9 @@ import Foundation
 /// a call that waits its turn when cancelled does not start. Once a call
 /// starts, its budget counts down, and when it runs out the request is set
 /// to `.budgetExhausted`. The work sees the request through
-/// `CommandRouter.run(stoppingOn:_:)`.
+/// `CommandRouter.run(stoppingOn:_:)`. The outcome is decided on the queue
+/// when the work returns, so a cancellation that arrives later neither
+/// changes it nor reorders it against the calls after it.
 final class ToolCallQueue: @unchecked Sendable {
     /// What became of one call.
     enum Outcome<T> {
@@ -36,36 +38,56 @@ final class ToolCallQueue: @unchecked Sendable {
     private let timers = DispatchQueue(label: "blew.mcp.budgets")
 
     /// Run `work` after every call submitted before it has returned. The
-    /// budget, in seconds, counts from when `work` starts.
+    /// budget, in seconds, counts from when `work` starts. The outcome's
+    /// value is what `work` returned: `run(budget:_:settle:)` with a
+    /// `settle` that changes nothing.
     func run<T>(budget: TimeInterval, _ work: @escaping (StopRequest) -> T) async -> Outcome<T> {
+        await run(budget: budget, work) { value, _ in value }
+    }
+
+    /// Run `work` as `run(budget:_:)` does, then `settle`, on the queue,
+    /// before the next call starts: with what `work` returned and whether
+    /// the call has been cancelled. That is where the call's outcome is
+    /// decided: a cancellation that arrives once `work` has returned does
+    /// not change it. What `settle` returns is the outcome's value; a
+    /// cancelled call's is dropped. `settle` does not run for a call
+    /// cancelled before it started.
+    func run<T, R>(
+        budget: TimeInterval,
+        _ work: @escaping (StopRequest) -> T,
+        settle: @escaping (_ value: T, _ cancelled: Bool) -> R
+    ) async -> Outcome<R> {
         let stop = StopRequest()
-        let box = ResultBox<T>()
+        let box = ResultBox<Outcome<R>>()
         await withTaskCancellationHandler {
             await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
                 queue.async { [timers] in
-                    // Declared first, so it runs last: the result is stored
-                    // and the timer cancelled before the caller resumes.
+                    // Declared first, so it runs last: the outcome is stored
+                    // before the caller resumes.
                     defer { done.resume() }
                     guard stop.reason == nil else { return }
                     let budgetTimer = DispatchWorkItem { stop.stop(.budgetExhausted) }
                     timers.asyncAfter(deadline: .now() + budget, execute: budgetTimer)
-                    defer { budgetTimer.cancel() }
-                    box.value = work(stop)
+                    let value = work(stop)
+                    budgetTimer.cancel()
+                    let reason = stop.reason
+                    let settled = settle(value, reason == .cancelled)
+                    switch reason {
+                    case nil: box.value = .finished(settled)
+                    case .budgetExhausted?: box.value = .budgetExhausted(settled)
+                    case .cancelled?: box.value = .cancelled
+                    }
                 }
             }
         } onCancel: {
             stop.stop(.cancelled)
         }
-        switch (box.value, stop.reason) {
-        case (let value?, nil): return .finished(value)
-        case (let value?, .budgetExhausted?): return .budgetExhausted(value)
-        // No value: the call was cancelled before it started.
-        case (_, .cancelled?), (nil, _): return .cancelled
-        }
+        // No outcome: the call was cancelled before it started.
+        return box.value ?? .cancelled
     }
 }
 
-/// Carries a call's result from the queue's thread to the awaiting Task.
+/// Carries a call's outcome from the queue's thread to the awaiting Task.
 /// Written once, before the continuation resumes, and read after it.
 private final class ResultBox<T>: @unchecked Sendable {
     var value: T?
