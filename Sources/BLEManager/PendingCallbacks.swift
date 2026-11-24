@@ -1,8 +1,10 @@
 import Foundation
 
-/// Waiters for CoreBluetooth callbacks that each answer one request
-/// (`add(_:)` answered by `didAdd`, `startAdvertising` by
-/// `didStartAdvertising`).
+/// Waiters for CoreBluetooth callbacks that each answer one request: on the
+/// peripheral side `add(_:)` answered by `didAdd` and `startAdvertising` by
+/// `didStartAdvertising`; on the central side the GATT requests of
+/// `BLEEventProcessor` (`readValue` answered by `didUpdateValueFor`,
+/// `writeValue` with response by `didWriteValueFor`, and so on).
 ///
 /// CoreBluetooth answers the requests for one key in the order they were
 /// made and carries no request identifier, so the waiters for a key form a
@@ -16,8 +18,8 @@ import Foundation
 /// queues it under its key just before the request goes to CoreBluetooth
 /// (or reports that it was cancelled, so it must not go); `complete` takes
 /// the oldest entry for a key when its callback arrives. `cancel` withdraws
-/// the waiter at any step. Pure value type; `BLEPeripheralDelegate` owns
-/// the one instance under its lock.
+/// the waiter at any step. Pure value type; `BLEPeripheralDelegate` and
+/// `BLEEventProcessor` each own one instance under their lock.
 struct PendingCallbacks<Key: Hashable, Waiter> {
     struct Ticket: Hashable {
         fileprivate let id: Int
@@ -97,6 +99,12 @@ struct PendingCallbacks<Key: Hashable, Waiter> {
             }
         }
         return nil
+    }
+
+    /// Whether the ticket's request was issued and its callback has not
+    /// arrived yet, so cancelling it leaves it queued as abandoned.
+    func isIssued(_ ticket: Ticket) -> Bool {
+        issued.values.contains { $0.contains { $0.id == ticket.id } }
     }
 
     /// The callback for `key` arrived: take the oldest request for it.

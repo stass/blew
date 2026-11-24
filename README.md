@@ -374,6 +374,8 @@ blew read [-n <name>] [-i <id>] [-f <format>] <char-uuid>
 
 Reads the value of a characteristic and prints it in the requested format. Connects automatically if no connection is active.
 
+Reading a characteristic that is subscribed at the same time (`sub -b`) is ambiguous: CoreBluetooth reports read results and notifications the same way and does not say which a value is. The read then prints the first value the device sends after the read was issued, which may be a notification, and the subscription also shows the value that answers the read. A characteristic blew has not subscribed to does not normally notify, so its values are read results.
+
 | Flag | Description |
 |------|-------------|
 | `-f, --format <fmt>` | Output format (see table below). Default: `hex`. |

@@ -282,16 +282,9 @@ public final class BLECentral: @unchecked Sendable {
             for char in chars {
                 var descInfos: [DescriptorInfo] = []
                 if includeDescriptors {
-                    let charUUIDStr = char.uuid.uuidString
-                    let descUUIDs = try await withTaskCancellationHandler {
-                        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[String], Error>) in
-                            self.processor.setDiscoverDescContinuation(forChar: charUUIDStr, cont)
-                            self.cbQueue.async {
-                                peripheral.discoverDescriptors(for: char)
-                            }
-                        }
-                    } onCancel: {
-                        self.processor.cancelDiscoverDescContinuation(forChar: charUUIDStr)
+                    let descUUIDs = try await request({ .discoverDescriptors(characteristic: char.uuid.uuidString, $0) },
+                                                      to: peripheral) {
+                        peripheral.discoverDescriptors(for: char)
                     }
                     descInfos = descUUIDs.map { DescriptorInfo(uuid: $0) }
                 }
@@ -341,16 +334,9 @@ public final class BLECentral: @unchecked Sendable {
             throw BLEError.characteristicNotFound(charUUID)
         }
 
-        let canonicalUUID = charUUID.uppercased()
-        let descUUIDs = try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[String], Error>) in
-                processor.setDiscoverDescContinuation(forChar: canonicalUUID, cont)
-                cbQueue.async {
-                    peripheral.discoverDescriptors(for: c)
-                }
-            }
-        } onCancel: {
-            self.processor.cancelDiscoverDescContinuation(forChar: canonicalUUID)
+        let descUUIDs = try await request({ .discoverDescriptors(characteristic: c.uuid.uuidString, $0) },
+                                          to: peripheral) {
+            peripheral.discoverDescriptors(for: c)
         }
 
         return descUUIDs.map { DescriptorInfo(uuid: $0) }
@@ -373,16 +359,8 @@ public final class BLECentral: @unchecked Sendable {
             throw BLEError.characteristicNotFound(charUUID)
         }
 
-        let readUUID = c.uuid.uuidString
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
-                processor.setReadContinuation(forChar: readUUID, cont)
-                cbQueue.async {
-                    peripheral.readValue(for: c)
-                }
-            }
-        } onCancel: {
-            self.processor.cancelReadContinuation(forChar: readUUID)
+        return try await request({ .read(characteristic: c.uuid.uuidString, $0) }, to: peripheral) {
+            peripheral.readValue(for: c)
         }
     }
 
@@ -414,36 +392,31 @@ public final class BLECentral: @unchecked Sendable {
         }
 
         if cbType == .withResponse {
-            let writeUUID = c.uuid.uuidString
-            try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                    processor.setWriteContinuation(forChar: writeUUID, cont)
-                    cbQueue.async {
-                        peripheral.writeValue(data, for: c, type: cbType)
-                    }
-                }
-            } onCancel: {
-                self.processor.cancelWriteContinuation(forChar: writeUUID)
+            try await request({ .write(characteristic: c.uuid.uuidString, $0) }, to: peripheral) {
+                peripheral.writeValue(data, for: c, type: .withResponse)
             }
         } else {
             // CoreBluetooth drops a write without response issued while
-            // canSendWriteWithoutResponse is false, so wait until it is ready.
-            // The check runs on cbQueue after any earlier write, and the
-            // ready event resumes the wait if the peripheral was not ready.
+            // canSendWriteWithoutResponse is false, so the write waits until
+            // it is ready. The check and the write run in one blew.cb block,
+            // so no other write takes the room in between; the poll runs at
+            // once and again on every ready event.
+            let processor = self.processor
+            let cbQueue = self.cbQueue
+            let ticket = processor.makeTicket()
             try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                    processor.setWriteReadyContinuation(cont)
-                    cbQueue.async {
-                        if peripheral.canSendWriteWithoutResponse {
-                            self.processor.resumeWriteReady()
+                    processor.waitToWrite(ticket, cont, to: peripheral.identifier) {
+                        cbQueue.async {
+                            guard peripheral.canSendWriteWithoutResponse else { return }
+                            processor.sendIfWaiting(ticket) {
+                                peripheral.writeValue(data, for: c, type: .withoutResponse)
+                            }
                         }
                     }
                 }
             } onCancel: {
-                self.processor.cancelWriteReadyContinuation()
-            }
-            cbQueue.async {
-                peripheral.writeValue(data, for: c, type: cbType)
+                processor.cancel(ticket)
             }
         }
     }
@@ -481,32 +454,16 @@ public final class BLECentral: @unchecked Sendable {
 
         // Enable notifications and wait for the device to confirm. A wait
         // that is given up (cancelled, or stopped by a caller's deadline)
-        // queues turning notifications off. The processor queues it after
-        // the request to turn them on, and from the cancelling thread, so
-        // before any subscribe started after the cancellation. A device
-        // that confirms late is then not left notifying a connection that
-        // no stream reads, and the acknowledgement of turning them off
-        // settles no later subscribe.
-        let subscribeUUID = c.uuid.uuidString
-        let cbQueue = self.cbQueue
-        let turnOff = {
-            cbQueue.async {
-                if peripheral.state == .connected { peripheral.setNotifyValue(false, for: c) }
-            }
+        // after the request went out queues turning notifications off,
+        // after the request to turn them on and before any subscribe
+        // started after the cancellation. A device that confirms late is
+        // then not left notifying a connection that no stream reads, and its
+        // late confirmation is the abandoned request's, not a later one's.
+        let turnOff: @Sendable () -> Void = {
+            if peripheral.state == .connected { peripheral.setNotifyValue(false, for: c) }
         }
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                processor.setSubscribeContinuation(forChar: subscribeUUID, cont) {
-                    cbQueue.async { peripheral.setNotifyValue(true, for: c) }
-                }
-                // Cancelled before the wait was registered: the
-                // cancellation handler found nothing to cancel.
-                if Task.isCancelled {
-                    processor.cancelSubscribeContinuation(forChar: subscribeUUID, undo: turnOff)
-                }
-            }
-        } onCancel: {
-            self.processor.cancelSubscribeContinuation(forChar: subscribeUUID, undo: turnOff)
+        try await request({ .subscribe(characteristic: c.uuid.uuidString, $0) }, to: peripheral, undo: turnOff) {
+            peripheral.setNotifyValue(true, for: c)
         }
 
         stateLock.withLock { _ = activeSubscriptions.insert(charUUID.uppercased()) }
@@ -542,16 +499,35 @@ public final class BLECentral: @unchecked Sendable {
         return peripheral
     }
 
-    private func discoverAllServices(peripheral: CBPeripheral) async throws {
-        _ = try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[String], Error>) in
-                self.processor.setDiscoverServicesContinuation(cont)
-                self.cbQueue.async {
-                    peripheral.discoverServices(nil)
-                }
+    /// Issue one GATT request to the connected `peripheral` and wait for the
+    /// callback that answers it. `call`, the CoreBluetooth call, runs on
+    /// blew.cb once the processor has queued the request, unless the wait
+    /// was cancelled first or the peripheral is no longer connected. A wait
+    /// cancelled after the request went out ends at once; the request stays
+    /// queued as abandoned until its answer arrives, and `undo`, the
+    /// CoreBluetooth call that reverses it, is queued on blew.cb, after
+    /// `call` (see `BLEEventProcessor.cancel`).
+    private func request<T>(
+        _ makeRequest: (CheckedContinuation<T, Error>) -> CentralRequest,
+        to peripheral: CBPeripheral,
+        undo: (@Sendable () -> Void)? = nil,
+        call: @escaping @Sendable () -> Void
+    ) async throws -> T {
+        let processor = self.processor
+        let ticket = processor.makeTicket()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<T, Error>) in
+                processor.submit(ticket, makeRequest(cont), to: peripheral.identifier, on: cbQueue, call: call)
             }
         } onCancel: {
-            self.processor.cancelDiscoverServicesContinuation()
+            let cbQueue = self.cbQueue
+            processor.cancel(ticket, undo: undo.map { undo in { cbQueue.async(execute: undo) } })
+        }
+    }
+
+    private func discoverAllServices(peripheral: CBPeripheral) async throws {
+        _ = try await request({ .discoverServices($0) }, to: peripheral) {
+            peripheral.discoverServices(nil)
         }
 
         // Wait for services to be available on the peripheral object
@@ -564,16 +540,9 @@ public final class BLECentral: @unchecked Sendable {
         allServices = services
 
         for service in services {
-            let svcUUID = service.uuid.uuidString
-            _ = try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[BLEEvent.DiscoveredCharacteristic], Error>) in
-                    self.processor.setDiscoverCharsContinuation(forService: svcUUID, cont)
-                    self.cbQueue.async {
-                        peripheral.discoverCharacteristics(nil, for: service)
-                    }
-                }
-            } onCancel: {
-                self.processor.cancelDiscoverCharsContinuation(forService: svcUUID)
+            _ = try await request({ .discoverCharacteristics(service: service.uuid.uuidString, $0) },
+                                  to: peripheral) {
+                peripheral.discoverCharacteristics(nil, for: service)
             }
             if let discovered = service.characteristics {
                 allChars.append(contentsOf: discovered)

@@ -1515,6 +1515,11 @@ extension CommandRouter {
         var clonedServices: [ServiceDefinition] = []
         var clonedName: String = "blew-clone"
         var initialValues: [BLEUUID: Data] = [:]
+        // The operation writes only these and the values above. After an
+        // interrupt or a timeout it may still run (waitInterruptible gives up
+        // on it after 2 s), so they are read only once it completed.
+        var snapFailure: (message: String, exitCode: Int32)?
+        var refusedReads: [String] = []
 
         let snapOperation: () async -> Void = { [self] in
             do {
@@ -1535,10 +1540,16 @@ extension CommandRouter {
                         var valueStr: String? = nil
                         var valueFmt: String? = nil
                         if char.properties.contains("read") {
-                            if let data = try? await manager.readCharacteristic(char.uuid) {
+                            // A device that refuses the read gives a clone
+                            // without an initial value; a cancellation, a
+                            // timeout or a lost connection ends the snapshot.
+                            do {
+                                let data = try await manager.readCharacteristic(char.uuid)
                                 valueStr = data.map { String(format: "%02x", $0) }.joined()
                                 valueFmt = "hex"
                                 initialValues[charUUID] = data
+                            } catch BLEError.readFailed(let reason) {
+                                refusedReads.append("\(char.uuid): \(reason)")
                             }
                         }
                         charDefs.append(CharacteristicDefinition(
@@ -1555,16 +1566,13 @@ extension CommandRouter {
                     ))
                 }
             } catch is CancellationError {
-                // handled
+                // waitInterruptible reports the interrupt or the timeout.
             } catch let error as BLEUUID.ParseError {
-                result.errors.append("the device reported an \(error.localizedDescription)")
-                result.exitCode = BlewExitCode.operationFailed.code
+                snapFailure = ("the device reported an \(error.localizedDescription)", BlewExitCode.operationFailed.code)
             } catch let error as BLEError {
-                result.errors.append(error.localizedDescription)
-                result.exitCode = error.exitCode
+                snapFailure = (error.localizedDescription, error.exitCode)
             } catch {
-                result.errors.append("\(error)")
-                result.exitCode = BlewExitCode.operationFailed.code
+                snapFailure = ("\(error)", BlewExitCode.operationFailed.code)
             }
         }
 
@@ -1576,7 +1584,14 @@ extension CommandRouter {
             result.exitCode = BlewExitCode.timeout.code
             return result
         }
-        if result.exitCode != 0 { return result }
+        if let snapFailure {
+            result.errors.append(snapFailure.message)
+            result.exitCode = snapFailure.exitCode
+            return result
+        }
+        for refused in refusedReads {
+            result.infos.append("cloned without an initial value, the device refused the read of \(refused)")
+        }
 
         _ = runDisconnect([])
 

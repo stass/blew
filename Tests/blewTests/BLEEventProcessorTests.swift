@@ -63,23 +63,14 @@ final class BLEEventProcessorTests: XCTestCase {
     /// subscribe: one waiting for its own confirmation keeps waiting.
     func testNotificationsOffAcknowledgementDoesNotSettleASubscribe() {
         let processor = connected(to: deviceB)
-        let registered = DispatchSemaphore(value: 0)
-        let settled = DispatchSemaphore(value: 0)
-        Task {
-            try? await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                processor.setSubscribeContinuation(forChar: "TX", cont)
-                registered.signal()
-            }
-            settled.signal()
-        }
-        XCTAssertEqual(registered.wait(timeout: .now() + 2), .success)
+        let subscribe = start(processor) { .subscribe(characteristic: "TX", $0) }
         let off = BLEEvent.didUpdateNotificationState(peripheralId: deviceB, characteristicUUID: "TX",
                                                       isNotifying: false, error: nil)
         XCTAssertTrue(ignores(processor, off), "notifications turning off settled a subscribe")
         let on = BLEEvent.didUpdateNotificationState(peripheralId: deviceB, characteristicUUID: "TX",
                                                      isNotifying: true, error: nil)
         XCTAssertFalse(ignores(processor, on), "the confirmation did not settle the subscribe")
-        XCTAssertEqual(settled.wait(timeout: .now() + 2), .success)
+        XCTAssertNotNil(subscribe.wait.outcome())
     }
 
     /// A notification stream registered the way BLEManager.subscribe does:
@@ -104,7 +95,7 @@ final class BLEEventProcessorTests: XCTestCase {
         let stream = registerStream(processor, finished: finished)
         let calledBack = DispatchSemaphore(value: 0)
         processor.onDisconnect { _ in
-            processor.setWriteReadyContinuation(nil)
+            _ = processor.makeTicket()
             calledBack.signal()
         }
 
@@ -236,7 +227,7 @@ final class BLEEventProcessorTests: XCTestCase {
     /// so none of its waits or streams is left pending.
     func testBeginConnectEndsTheServedConnection() {
         let processor = connected(to: deviceA)
-        let read = Wait<Data> { processor.setReadContinuation(forChar: "2A19", $0) }
+        let read = startRead(processor, "2A19").wait
         let finished = DispatchSemaphore(value: 0)
         let stream = registerStream(processor, finished: finished)
 
@@ -258,7 +249,7 @@ final class BLEEventProcessorTests: XCTestCase {
     /// ends them.
     func testDisconnectOfAnotherPeripheralLeavesTheConnectionAlone() {
         let processor = connected(to: deviceB)
-        let read = Wait<Data> { processor.setReadContinuation(forChar: "2A19", $0) }
+        let read = startRead(processor, "2A19").wait
         let finished = DispatchSemaphore(value: 0)
         let stream = registerStream(processor, finished: finished)
         let disconnected = DispatchSemaphore(value: 0)
@@ -284,7 +275,7 @@ final class BLEEventProcessorTests: XCTestCase {
     /// operations.
     func testGATTEventsOfAnotherPeripheralAreIgnored() {
         let processor = connected(to: deviceB)
-        let read = Wait<Data> { processor.setReadContinuation(forChar: "2A19", $0) }
+        let read = startRead(processor, "2A19").wait
 
         XCTAssertTrue(ignores(processor, .didUpdateValue(peripheralId: deviceA, characteristicUUID: "2A19",
                                                          value: Data([0x01]), error: nil)))
@@ -318,8 +309,8 @@ final class BLEEventProcessorTests: XCTestCase {
     func testBluetoothBecomingUnavailableEndsTheConnectionAndTheScan() {
         for state in [CBManagerState.poweredOff, .unauthorized, .resetting, .unsupported] {
             let processor = connected(to: deviceB)
-            let read = Wait<Data> { processor.setReadContinuation(forChar: "2A19", $0) }
-            let write = Wait<Void> { processor.setWriteContinuation(forChar: "FFF1", $0) }
+            let read = startRead(processor, "2A19").wait
+            let write = startWrite(processor, "FFF1").wait
             let streamFinished = DispatchSemaphore(value: 0)
             let stream = registerStream(processor, finished: streamFinished)
             let scanFinished = DispatchSemaphore(value: 0)
@@ -380,7 +371,7 @@ final class BLEEventProcessorTests: XCTestCase {
     /// didDisconnect of the cancelled connection is dropped.
     func testEndConnectionEndsTheConnectionItNames() {
         let processor = connected(to: deviceB)
-        let discover = Wait<[String]> { processor.setDiscoverServicesContinuation($0) }
+        let discover = start(processor) { .discoverServices($0) }.wait
         let disconnected = DispatchSemaphore(value: 0)
         processor.onDisconnect { _ in disconnected.signal() }
 
@@ -413,7 +404,7 @@ final class BLEEventProcessorTests: XCTestCase {
     /// see every state.
     func testPoweredOnLeavesTheConnectionAlone() {
         let processor = connected(to: deviceB)
-        let read = Wait<Data> { processor.setReadContinuation(forChar: "2A19", $0) }
+        let read = startRead(processor, "2A19").wait
         let seen = DispatchSemaphore(value: 0)
         processor.onStateChange { state in if state == .poweredOn { seen.signal() } }
 
@@ -422,4 +413,290 @@ final class BLEEventProcessorTests: XCTestCase {
         XCTAssertNil(read.outcome(timeout: 0.1), "poweredOn failed the read")
         XCTAssertEqual(processor.connectedPeripheralId, deviceB)
     }
+
+    // MARK: - Requests answered in issue order
+
+    /// A request registered and issued the way BLECentral issues one, with
+    /// the handle that cancels it.
+    private struct Started<T: Sendable> {
+        let wait: Wait<T>
+        let cancel: () -> Void
+    }
+
+    /// Stands in for blew.cb, where a request is issued.
+    private let gattQueue = DispatchQueue(label: "blew.test.cb")
+
+    /// Submit a request to the connected peripheral (or `peripheral`), let it
+    /// be issued, and return its wait. `call` stands in for the CoreBluetooth
+    /// call; `cancelledFirst` cancels the ticket before the wait registers.
+    private func start<T: Sendable>(
+        _ p: BLEEventProcessor, to peripheral: UUID? = nil, cancelledFirst: Bool = false,
+        undo: (@Sendable () -> Void)? = nil, call: @escaping @Sendable () -> Void = {},
+        _ makeRequest: @escaping @Sendable (CheckedContinuation<T, Error>) -> CentralRequest
+    ) -> Started<T> {
+        let ticket = p.makeTicket()
+        if cancelledFirst { p.cancel(ticket, undo: undo) }
+        let target = peripheral ?? p.connectedPeripheralId ?? UUID()
+        let wait = Wait<T> { p.submit(ticket, makeRequest($0), to: target, on: self.gattQueue, call: call) }
+        gattQueue.sync {}
+        return Started(wait: wait, cancel: { p.cancel(ticket, undo: undo) })
+    }
+
+    private func startRead(_ p: BLEEventProcessor, _ char: String, cancelledFirst: Bool = false) -> Started<Data> {
+        start(p, cancelledFirst: cancelledFirst) { .read(characteristic: char, $0) }
+    }
+
+    private func startWrite(_ p: BLEEventProcessor, _ char: String) -> Started<Void> {
+        start(p) { .write(characteristic: char, $0) }
+    }
+
+    /// A write without response whose poll finds the peripheral ready when
+    /// `ready` says so, and then sends it with `sent`.
+    private func startWriteWithoutResponse(_ p: BLEEventProcessor, ready: @escaping @Sendable () -> Bool,
+                                           sent: @escaping @Sendable () -> Void) -> Started<Void> {
+        let ticket = p.makeTicket()
+        let peripheral = p.connectedPeripheralId ?? UUID()
+        let wait = Wait<Void> { cont in
+            p.waitToWrite(ticket, cont, to: peripheral) {
+                if ready() { p.sendIfWaiting(ticket, send: sent) }
+            }
+        }
+        return Started(wait: wait, cancel: { p.cancel(ticket) })
+    }
+
+    private func value(_ char: String, _ bytes: [UInt8], error: String? = nil) -> BLEEvent {
+        .didUpdateValue(peripheralId: deviceB, characteristicUUID: char, value: Data(bytes), error: error)
+    }
+
+    private func written(_ char: String, error: String? = nil) -> BLEEvent {
+        .didWriteValue(peripheralId: deviceB, characteristicUUID: char, error: error)
+    }
+
+    private func isCancellation<T>(_ outcome: Result<T, Error>?) -> Bool {
+        if case .failure(let error) = outcome { return error is CancellationError }
+        return false
+    }
+
+    /// Two reads of one characteristic in flight: CoreBluetooth answers them
+    /// in the order they were issued, and each gets its own answer.
+    func testConcurrentReadsOfOneCharacteristicEachGetTheirOwnValue() {
+        let processor = connected(to: deviceB)
+        let first = startRead(processor, "2A19")
+        let second = startRead(processor, "2A19")
+        processor.dispatch(value("2A19", [1]))
+        processor.dispatch(value("2A19", [2]))
+        XCTAssertEqual(try first.wait.outcome()?.get(), Data([1]), "the first read lost its answer")
+        XCTAssertEqual(try second.wait.outcome()?.get(), Data([2]))
+    }
+
+    /// A read cancelled after it was issued still gets its answer from the
+    /// device. That late answer is the cancelled read's, not the answer to a
+    /// read issued after it.
+    func testCancelledReadsLateValueDoesNotCompleteTheNextRead() {
+        let processor = connected(to: deviceB)
+        let abandoned = startRead(processor, "2A19")
+        abandoned.cancel()
+        XCTAssertTrue(isCancellation(abandoned.wait.outcome()))
+        let next = startRead(processor, "2A19")
+        processor.dispatch(value("2A19", [0xAA]))
+        XCTAssertNil(next.wait.outcome(timeout: 0.2), "the cancelled read's late value completed the next read")
+        processor.dispatch(value("2A19", [0xBB]))
+        XCTAssertEqual(try next.wait.outcome()?.get(), Data([0xBB]))
+    }
+
+    /// A cancellation that runs before the request is registered ends it at
+    /// once: the wait does not outlive the cancellation.
+    func testRequestCancelledBeforeItIsRegisteredEndsAtOnce() {
+        let processor = connected(to: deviceB)
+        let read = startRead(processor, "2A19", cancelledFirst: true)
+        XCTAssertTrue(isCancellation(read.wait.outcome(timeout: 0.5)), "a cancelled read still waits")
+    }
+
+    /// A notification that arrives while a read is in flight is not taken
+    /// from the stream: CoreBluetooth reports both through one callback, so
+    /// the stream gets every value of the characteristic.
+    func testNotificationWhileAReadIsOutstandingReachesTheStream() {
+        let processor = connected(to: deviceB)
+        let finished = DispatchSemaphore(value: 0)
+        let stream = registerStream(processor, finished: finished)
+        let read = startRead(processor, "TX")
+        processor.dispatch(value("TX", [7]))
+        let received = DispatchSemaphore(value: 0)
+        let first = SharedBox<Data?>(nil)
+        let reader = Task {
+            for try await value in stream {
+                first.set(value)
+                received.signal()
+                break
+            }
+        }
+        XCTAssertEqual(received.wait(timeout: .now() + 1), .success, "the read took the notification from the stream")
+        XCTAssertEqual(first.get(), Data([7]))
+        XCTAssertNotNil(read.wait.outcome(), "the read did not complete")
+        reader.cancel()
+    }
+
+    /// A write with response cancelled after it was issued keeps its place:
+    /// its late acknowledgement does not complete the next write, and an
+    /// error in that acknowledgement does not fail it.
+    func testCancelledWritesLateAcknowledgementDoesNotCompleteTheNextWrite() {
+        let processor = connected(to: deviceB)
+        let abandoned = startWrite(processor, "FFF1")
+        abandoned.cancel()
+        XCTAssertTrue(isCancellation(abandoned.wait.outcome()))
+        let next = startWrite(processor, "FFF1")
+        processor.dispatch(written("FFF1", error: "Write not permitted"))
+        XCTAssertNil(next.wait.outcome(timeout: 0.2), "the cancelled write's late acknowledgement settled the next write")
+        processor.dispatch(written("FFF1"))
+        if case .failure(let error) = next.wait.outcome() { XCTFail("the next write failed: \(error)") }
+        XCTAssertNotNil(next.wait.outcome())
+    }
+
+    /// Two writes without response wait for the peripheral to be ready; one
+    /// ready event wakes both, and each is sent once.
+    func testEveryWriteWithoutResponseWaitingIsWokenWhenReady() {
+        let processor = connected(to: deviceB)
+        let ready = SharedBox(false)
+        let sent = SharedBox(0)
+        let first = startWriteWithoutResponse(processor, ready: { ready.get() }, sent: { sent.update { $0 += 1 } })
+        let second = startWriteWithoutResponse(processor, ready: { ready.get() }, sent: { sent.update { $0 += 1 } })
+        ready.set(true)
+        processor.dispatch(.isReadyToSendWriteWithoutResponse(peripheralId: deviceB))
+        XCTAssertNotNil(first.wait.outcome(), "the first write without response was never woken")
+        XCTAssertNotNil(second.wait.outcome())
+        XCTAssertEqual(sent.get(), 2)
+    }
+
+    /// A write without response cancelled while it waits is never sent.
+    func testCancelledWriteWithoutResponseIsNotSent() {
+        let processor = connected(to: deviceB)
+        let ready = SharedBox(false)
+        let sent = SharedBox(0)
+        let write = startWriteWithoutResponse(processor, ready: { ready.get() }, sent: { sent.update { $0 += 1 } })
+        write.cancel()
+        XCTAssertTrue(isCancellation(write.wait.outcome()))
+        ready.set(true)
+        processor.dispatch(.isReadyToSendWriteWithoutResponse(peripheralId: deviceB))
+        XCTAssertEqual(sent.get(), 0, "a cancelled write without response was sent")
+    }
+
+    /// A request whose peripheral disconnected before it went out fails, and
+    /// its CoreBluetooth call is not made.
+    func testRequestToAPeripheralNoLongerConnectedIsNotIssued() {
+        let processor = connected(to: deviceB)
+        let issued = SharedBox(false)
+        let read = start(processor, to: deviceA, call: { issued.set(true) }) { .read(characteristic: "2A19", $0) }
+        if case .failure(BLEError.notConnected)? = read.wait.outcome() {} else {
+            XCTFail("a request to a peripheral that is not connected did not fail with notConnected")
+        }
+        XCTAssertFalse(issued.get())
+    }
+
+    /// A subscribe given up after its request went out queues the undo
+    /// (turning notifications off); one given up before it went out is
+    /// never issued, so there is nothing to undo.
+    func testCancelledSubscribeUndoesOnlyAnIssuedRequest() {
+        let processor = connected(to: deviceB)
+        let undone = SharedBox(0)
+        let issued = SharedBox(0)
+        let early = start(processor, cancelledFirst: true, undo: { undone.update { $0 += 1 } },
+                          call: { issued.update { $0 += 1 } }) { .subscribe(characteristic: "TX", $0) }
+        XCTAssertTrue(isCancellation(early.wait.outcome()))
+        XCTAssertEqual(issued.get(), 0, "a subscribe cancelled first was issued")
+        XCTAssertEqual(undone.get(), 0)
+
+        let late = start(processor, undo: { undone.update { $0 += 1 } },
+                         call: { issued.update { $0 += 1 } }) { .subscribe(characteristic: "TX", $0) }
+        late.cancel()
+        XCTAssertTrue(isCancellation(late.wait.outcome()))
+        XCTAssertEqual(issued.get(), 1)
+        XCTAssertEqual(undone.get(), 1, "an issued subscribe that was given up was not undone")
+    }
+
+    /// A cancellation that lands after the wait registered but before the
+    /// request went out on blew.cb ends the wait, and the request is never
+    /// made, so there is nothing to undo.
+    func testRequestCancelledBeforeItGoesOutIsNotIssued() {
+        let processor = connected(to: deviceB)
+        let issued = SharedBox(false)
+        let undone = SharedBox(false)
+        let ticket = processor.makeTicket()
+        gattQueue.suspend()
+        let wait = Wait<Void> {
+            processor.submit(ticket, .subscribe(characteristic: "TX", $0), to: self.deviceB,
+                             on: self.gattQueue) { issued.set(true) }
+        }
+        processor.cancel(ticket) { undone.set(true) }
+        gattQueue.resume()
+        gattQueue.sync {}
+        XCTAssertTrue(isCancellation(wait.outcome()))
+        XCTAssertFalse(issued.get(), "a request cancelled before it went out was issued")
+        XCTAssertFalse(undone.get())
+    }
+
+    /// A subscribe given up after its request went out keeps its place: the
+    /// device's late confirmation is its own, not the next subscribe's.
+    func testAbandonedSubscribesLateConfirmationDoesNotSettleTheNextSubscribe() {
+        let processor = connected(to: deviceB)
+        let abandoned = start(processor) { .subscribe(characteristic: "TX", $0) }
+        abandoned.cancel()
+        XCTAssertTrue(isCancellation(abandoned.wait.outcome()))
+        let next = start(processor) { .subscribe(characteristic: "TX", $0) }
+        let on = BLEEvent.didUpdateNotificationState(peripheralId: deviceB, characteristicUUID: "TX",
+                                                     isNotifying: true, error: nil)
+        processor.dispatch(on)
+        XCTAssertNil(next.wait.outcome(timeout: 0.2), "the abandoned subscribe's confirmation settled the next one")
+        processor.dispatch(on)
+        XCTAssertNotNil(next.wait.outcome())
+    }
+
+    /// A write without response waiting for room fails when the connection
+    /// ends, and one for a peripheral that is not connected fails at once.
+    func testWriteWithoutResponseFailsWhenNotConnected() {
+        let processor = connected(to: deviceB)
+        let waiting = startWriteWithoutResponse(processor, ready: { false }, sent: {})
+        processor.dispatch(.didDisconnect(peripheralId: deviceB, error: nil))
+        if case .failure(BLEError.connectionFailed)? = waiting.wait.outcome() {} else {
+            XCTFail("a waiting write without response outlived the connection")
+        }
+        let late = startWriteWithoutResponse(processor, ready: { true }, sent: {})
+        if case .failure(BLEError.notConnected)? = late.wait.outcome() {} else {
+            XCTFail("a write without response with no connection did not fail with notConnected")
+        }
+    }
+
+    /// An error in a value callback answers the read in flight; it is not a
+    /// notification, and the stream does not see it.
+    func testReadErrorGoesToTheReadNotTheStream() {
+        let processor = connected(to: deviceB)
+        let finished = DispatchSemaphore(value: 0)
+        let stream = registerStream(processor, finished: finished)
+        let read = startRead(processor, "TX")
+        processor.dispatch(.didUpdateValue(peripheralId: deviceB, characteristicUUID: "TX", value: nil,
+                                           error: "Read not permitted"))
+        if case .failure(BLEError.readFailed)? = read.wait.outcome() {} else { XCTFail("the read did not fail") }
+        processor.dispatch(value("TX", [9]))
+        let first = SharedBox<Data?>(nil)
+        let received = DispatchSemaphore(value: 0)
+        let reader = Task {
+            for try await value in stream {
+                first.set(value)
+                received.signal()
+                break
+            }
+        }
+        XCTAssertEqual(received.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(first.get(), Data([9]), "the stream saw the read's error answer")
+        reader.cancel()
+    }
+}
+
+/// A value shared between a test and its tasks.
+private final class SharedBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T
+    init(_ value: T) { self.value = value }
+    func get() -> T { lock.withLock { value } }
+    func set(_ newValue: T) { lock.withLock { value = newValue } }
+    func update(_ body: (inout T) -> Void) { lock.withLock { body(&value) } }
 }

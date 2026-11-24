@@ -36,23 +36,6 @@ None open.
   notifications with no stream. Fix: one owner per characteristic that
   refuses a second subscribe while one is pending or active, and matches
   acknowledgements to requests.
-- [ ] **S2. Continuation slots are overwritten without resuming the old
-  waiter.** `BLEEventProcessor.swift:78-130`. A cancel handler then cancels
-  the wrong request. Cancel and register are not atomic
-  (`BLEManager.swift:349` and the similar discover, read, write and
-  write-ready paths; connect and subscribe check `Task.isCancelled` after
-  registering), so a waiter can be installed after its cancel ran and its
-  CoreBluetooth call issued anyway. In `periph clone` the snapshot loop
-  (`CommandRouter.swift`, `runCloneSnapshot`) swallows the cancellation with
-  `try?` and keeps reading after Ctrl-C or the deadline, while the main
-  thread, which gave up after 2 s, reads the same variables. Fix: one helper
-  that registers, checks cancellation and only then issues the call.
-- [ ] **S3. A read can return a notification.**
-  `BLEEventProcessor.swift:281-287`. Any `didUpdateValue` resolves a pending
-  read first.
-- [ ] **S4. A cancelled write's late acknowledgement completes the next
-  write.** `BLEEventProcessor.swift:289-291`, `BLEManager.swift:397-399`.
-  Reads have the same problem.
 - [ ] **S5. A scan's timeout task outlives the scan.**
   `BLEManager.swift:97-108`. Interrupt a scan, start another, and the old
   timer stops the new one early. Starting a scan during `watch` replaces the
@@ -90,6 +73,9 @@ None open.
   (`endConnection`) and queues `cancelPeripheralConnection`; a REPL or MCP
   retry of the same device faster than that disconnect round-trip has its
   connect failed by the old connection's late `didDisconnect` (exit 5).
+  `beginDisconnect` (`BLEEventProcessor.swift`) holds one disconnect wait:
+  a second concurrent `disconnect` replaces the first, which never resumes,
+  and `cancelDisconnectContinuation` cancels whichever wait is held.
 - [ ] **S11. A registration made after Bluetooth left poweredOn is never
   failed.** `BLEManager.swift:110-153`, `BLEEventProcessor.swift` (the
   `centralStateChanged` case). The processor fails what is registered when
@@ -97,8 +83,25 @@ None open.
   during `closeConnection` lets `beginConnect` install a wait that CoreBluetooth
   never answers, so `connect` exits 4 (timeout) instead of 3. Fix: the
   processor owns the central state under its lock (`BLECentral.cbState`
-  reads it) and `beginConnect` and every `set*Continuation` fail at once
-  with `BLEError.unavailable(state)` when it is not poweredOn.
+  reads it) and `beginConnect`, `beginDisconnect` and `submit` fail at
+  once with `BLEError.unavailable(state)` when it is not poweredOn (a GATT
+  request whose link already ended fails with `notConnected`, exit 5).
+- [ ] **S12. A GATT request CoreBluetooth never answers jams its
+  callback's queue** *(plausible)*. `BLEEventProcessor.swift` (`submit`),
+  `BLEManager.swift` (`readCharacteristic`, `writeCharacteristic`,
+  `subscribe`). Requests are matched to answers in issue order, and a
+  cancelled one stays queued until its answer arrives. If CoreBluetooth
+  drops a request without a callback (candidates: a read or write the
+  characteristic's properties do not allow, a value longer than 512 bytes,
+  `setNotifyValue(true)` while already notifying), every later answer on
+  that characteristic is taken by the request before it until the
+  disconnect: sequential requests each time out, and concurrent ones get
+  each other's answers, so a write the device never acknowledged can
+  report success. Fix: refuse before issuing any request the
+  characteristic's properties do not allow and any write longer than the
+  ATT maximum, after the TESTS.md check shows what CoreBluetooth does.
+  Waiting writes without response are also woken in hash order
+  (`Array(writePolls.values)`), so one can be overtaken repeatedly.
 
 ### Exit codes and README contract
 
@@ -124,16 +127,6 @@ None open.
 ### NUS bridge
 
 None open.
-
-### Writes
-
-- [ ] **W1. A timed-out write with response can complete a later write.**
-  `Sources/BLEManager/BLEEventProcessor.swift:366`. Cancelling the wait
-  (`cancelWriteContinuation`) leaves the CoreBluetooth write outstanding,
-  and its late `didWriteValue` resumes whatever write continuation is then
-  registered for that characteristic. After `nus` exits 4 on a write
-  timeout in the REPL, `exec -k` or MCP, the next `write` to RX can report
-  success (or the old error) before the device acknowledged it.
 
 ### MCP
 
