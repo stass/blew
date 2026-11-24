@@ -665,7 +665,7 @@ The `exec` subcommand runs a semicolon-separated sequence of commands in a singl
 
 | Flag | Description |
 |------|-------------|
-| `-k, --keep-going` | Continue after a command error; exit with the first non-zero code seen. Ctrl-C still stops the script, with exit code 130. |
+| `-k, --keep-going` | Continue after a command error; exit with the first non-zero code seen. Ctrl-C still stops the script, with exit code 130, or the code of the command it lands on if that command fails. |
 | `--dry-run` | Print parsed steps without executing them. |
 
 **Additional commands available in exec and REPL:**
@@ -769,7 +769,7 @@ A characteristic whose decoded value has several fields (`gatt tree -r`, `gatt c
 
 `--help` and `--version` exit with code 0. A usage error exits with code 6: on the command line it prints the error and the command's usage to stderr, in `exec` and the REPL the error alone. The code follows the kind of failure, whatever the command: Bluetooth that is off, not permitted or not supported when a command starts gives 3, also from `scan` and from the scan that connects a command automatically, at once rather than after `-t`.
 
-Ctrl-C stops the running command: it stops scanning, subscribing or advertising, prints what it has (`scan -w` prints its final table, `periph` prints "Stopped advertising."), and blew exits with code 130. In the REPL, Ctrl-C stops the running command and returns to the prompt. SIGTERM ends blew in any mode with code 143. Before exiting on either signal, blew stops advertising, disconnects, saves the REPL history and gives the terminal back in its normal mode. When standard output is not a terminal, each line is written as soon as it is printed, so `blew -o kv sub ... >> log` delivers each record at once.
+Ctrl-C stops the running command: it stops scanning, subscribing or advertising, prints what it has (`scan -w` prints its final table, `periph` prints "Stopped advertising."), and blew exits with code 130. A Ctrl-C that lands just as a command's last operation completes gives 130 too, for a single command (`blew write ...`) as for a script (`exec`, a piped REPL): the completed operation's output is printed, and no later command starts. A command that fails keeps its own exit code. In the REPL, Ctrl-C stops the running command and returns to the prompt. SIGTERM ends blew in any mode with code 143, and stops the running command, so a script runs nothing after it. A signal that arrives once blew has finished its command and is disconnecting on its way out ends it at once with the command's exit code. Before exiting on either signal, blew stops advertising, disconnects, saves the REPL history and gives the terminal back in its normal mode. When standard output is not a terminal, each line is written as soon as it is printed, so `blew -o kv sub ... >> log` delivers each record at once.
 
 ---
 

@@ -75,15 +75,12 @@ final class REPL {
                 // Ctrl-C from here to the next read stops the command.
                 // While `getLine` waits no span is open, so a Ctrl-C there
                 // ends blew with 130: at the prompt, and in a piped script
-                // whose next line has not arrived.
-                ProcessSignals.shared.commandStarted()
-                let result = router.dispatch(trimmed)
-                let interrupted = ProcessSignals.shared.commandFinished()
-                if !isInteractive {
-                    if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
-                    // A Ctrl-C the line's operations did not see (it arrived
-                    // as the last one finished) still ends the script.
-                    if interrupted { throw BlewExitCode.interrupted }
+                // whose next line has not arrived. A script ends on the
+                // first nonzero code, 130 also for a Ctrl-C the line's
+                // operations did not see (it arrived as the last finished).
+                let outcome = router.runScriptCommand(trimmed)
+                if !isInteractive && outcome.endsScript(keepGoing: false) {
+                    throw BlewExitCode(outcome.code)
                 }
 
             } catch LinenoiseError.CTRL_C {

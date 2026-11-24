@@ -1,10 +1,24 @@
 import Foundation
+import os
 @preconcurrency import CoreBluetooth
 
 /// Public facade for BLE central operations.
 /// Owns the CBCentralManager, delegate, event queue, and processor.
 public final class BLECentral: @unchecked Sendable {
-    public static let shared = BLECentral()
+    public static let shared: BLECentral = {
+        let instance = BLECentral()
+        sharedCreated.withLock { $0 = true }
+        return instance
+    }()
+
+    private static let sharedCreated = OSAllocatedUnfairLock(initialState: false)
+
+    /// `shared` once something has used it, and nil before: for blew's exit
+    /// cleanup, which must not create a `CBCentralManager` (and ask for
+    /// Bluetooth access) only to find nothing to clean up.
+    public static var sharedIfCreated: BLECentral? {
+        sharedCreated.withLock { $0 } ? shared : nil
+    }
 
     private let cbQueue = DispatchQueue(label: "blew.cb", qos: .userInitiated)
     private let eventQueue = BLEEventQueue()

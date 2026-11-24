@@ -30,7 +30,6 @@ struct ExecCommand: ParsableCommand {
         let globals = GlobalOptions.current!
         let router = CommandRouter(globals: globals, isInteractiveMode: true)
         let code = router.executeScript(script, keepGoing: keepGoing, dryRun: dryRun)
-        cleanupBeforeExit()
         if code != 0 { throw BlewExitCode(code) }
     }
 }

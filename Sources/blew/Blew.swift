@@ -38,35 +38,63 @@ struct Blew: AsyncParsableCommand {
 
     @OptionGroup var globals: GlobalOptions
 
-    /// ArgumentParser's own main reports any thrown error with exit code 1
-    /// and prints "Error: exit code N". Commands have already reported their
-    /// errors when they throw BlewExitCode, so exit with its code quietly.
+    /// Every mode leaves through here: the command's code, then the one
+    /// ordinary exit (`exitOrdinarily`), which a signal that began the exit
+    /// first overrides with its own code.
     static func main() async {
         StandardOutput.lineBufferUnlessTerminal()
         ProcessSignals.shared.install()
+        exitOrdinarily(await runCommandLine())
+    }
+
+    /// Parse the command line, run its command and return the exit code,
+    /// with any error already reported.
+    static func runCommandLine() async -> Int32 {
+        var command: ParsableCommand
         do {
-            var command = try parseAsRoot()
-            // Every command runs inside one span, so a Ctrl-C seen by any of
-            // its waits stops the rest of it. The REPL and the MCP server
-            // open a span per command or tool call instead.
-            let outerSpan = Self.opensOuterSpan(for: command)
-            if outerSpan { ProcessSignals.shared.commandStarted() }
-            defer { if outerSpan { ProcessSignals.shared.commandFinished() } }
+            command = try parseAsRoot()
+        } catch {
+            return report(error)
+        }
+        // Every command runs inside one span, so a Ctrl-C seen by any of
+        // its waits stops the rest of it. The REPL and the MCP server open a
+        // span per command or tool call instead.
+        let outerSpan = Self.opensOuterSpan(for: command)
+        if outerSpan { ProcessSignals.shared.commandStarted() }
+        var code = BlewExitCode.success.code
+        do {
             if var asyncCommand = command as? AsyncParsableCommand {
                 try await asyncCommand.run()
             } else {
                 try command.run()
             }
-        } catch let code as BlewExitCode {
-            Foundation.exit(code.code)
         } catch {
-            let code = processExitCode(for: error)
-            // `--help` and `--version` print their text and exit 0.
-            if code == BlewExitCode.success.code { exit(withError: error) }
-            // The message quotes the command line, which is untrusted.
-            StandardErrorLog.write(lines: fullMessage(for: error))
-            Foundation.exit(code)
+            code = report(error)
         }
+        guard outerSpan else { return code }
+        let stopRequested = ProcessSignals.shared.commandFinished()
+        return SignalPolicy.exitCode(after: code, stopRequested: stopRequested)
+    }
+
+    /// Report an error that reached `main` and return its exit code.
+    /// ArgumentParser's own main reports any thrown error with exit code 1
+    /// and prints "Error: exit code N". Commands have already reported their
+    /// errors when they throw BlewExitCode, so its code is returned quietly.
+    static func report(_ error: Error) -> Int32 {
+        if let code = error as? BlewExitCode { return code.code }
+        let code = processExitCode(for: error)
+        let message = fullMessage(for: error)
+        if code == BlewExitCode.success.code {
+            // `--help` and `--version` print their text and exit 0.
+            guard !message.isEmpty else { return code }
+            for line in message.split(separator: "\n", omittingEmptySubsequences: false) {
+                StandardOutput.write(TextLine(String(line)), styled: false)
+            }
+        } else {
+            // The message quotes the command line, which is untrusted.
+            StandardErrorLog.write(lines: message)
+        }
+        return code
     }
 
     /// The exit code for an error that reaches `main`: 0 for a request for
@@ -86,32 +114,36 @@ struct Blew: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
-        let repl = REPL(globals: globals)
-        defer { cleanupBeforeExit() }
-        try repl.run()
+        try REPL(globals: globals).run()
     }
 }
 
-/// The main thread's cleanup on its way out: stop advertising and
-/// disconnect, once. When a signal is already ending the process, it waits
-/// for that exit instead (`ProcessSignals.beginOrdinaryExit`).
-func cleanupBeforeExit() {
-    guard ProcessSignals.shared.beginOrdinaryExit() else { return }
+/// The main thread's one way out, in every mode: claim the exit with
+/// `code`, stop advertising and disconnect, and exit. When a signal has
+/// already begun the exit, this waits for the signal's exit instead, so the
+/// process ends with the signal's code (`ProcessSignals.beginOrdinaryExit`).
+func exitOrdinarily(_ code: Int32) -> Never {
+    ProcessSignals.shared.beginOrdinaryExit(with: code)
     exitCleanup()
+    Foundation.exit(code)
 }
 
 /// Best-effort disconnect and stop advertising on process exit. Run once,
 /// by whichever of the main thread and the signal queue owns the exit.
+/// A CoreBluetooth manager nothing has created (no `CommandRouter` for
+/// `--help` or a usage error; no peripheral for a central command) has
+/// nothing to clean up, and is not created for it.
 func exitCleanup() {
-    if BLEPeripheral.shared.isAdvertising() {
-        BLEPeripheral.shared.stopAdvertising()
+    if let peripheral = BLEPeripheral.sharedIfCreated, peripheral.isAdvertising() {
+        peripheral.stopAdvertising()
     }
 
+    guard let central = BLECentral.sharedIfCreated else { return }
     let semaphore = DispatchSemaphore(value: 0)
     Task {
-        let status = await BLECentral.shared.status()
+        let status = await central.status()
         if status.isConnected {
-            try? await BLECentral.shared.disconnect()
+            try? await central.disconnect()
         }
         semaphore.signal()
     }

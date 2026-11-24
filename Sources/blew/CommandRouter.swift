@@ -20,10 +20,13 @@ final class CommandRouter {
     private var stopRequest: StopRequest?
     private var backgroundPeriphTask: Task<Void, Never>?
     private let backgroundSubscriptions = BackgroundSubscriptions()
+    /// The process's signal state; tests pass an instance of their own.
+    let signals: ProcessSignals
 
     init(globals: GlobalOptions, manager: BLECentral? = nil, isInteractiveMode: Bool = false,
-         renderer: OutputRenderer? = nil) {
+         renderer: OutputRenderer? = nil, signals: ProcessSignals = .shared) {
         self.globals = globals
+        self.signals = signals
         self.manager = manager ?? BLECentral.shared
         self.output = OutputFormatter(format: globals.out, verbosity: globals.verbose)
         self.renderer = renderer ?? makeRenderer(format: globals.out, verbosity: globals.verbose)
@@ -51,20 +54,51 @@ final class CommandRouter {
 
         var firstError: Int32 = 0
         for cmd in commands {
-            let result = dispatch(cmd)
-            if result.exitCode != 0 {
-                if firstError == 0 { firstError = result.exitCode }
-                // Ctrl-C stops the script, also with --keep-going.
-                if !keepGoing || result.exitCode == BlewExitCode.interrupted.code {
-                    return result.exitCode
-                }
-            }
-            // A stop that arrived as the command finished: its result
-            // stands, and the next command, which may have no wait to see
-            // the stop, does not start.
-            if isStopRequested { return BlewExitCode.interrupted.code }
+            let outcome = runScriptCommand(cmd)
+            if outcome.endsScript(keepGoing: keepGoing) { return outcome.code }
+            if firstError == 0 { firstError = outcome.code }
         }
         return firstError
+    }
+
+    /// How one script command ended (`runScriptCommand`).
+    struct ScriptCommandOutcome: Equatable {
+        /// Its exit code, `SignalPolicy.exitCode(after:stopRequested:)`.
+        let code: Int32
+        /// Whether a stop was requested by the time it finished.
+        let stopRequested: Bool
+
+        /// Whether the script ends here, with `code`: on a stop, also with
+        /// `--keep-going` and when the command failed, since the next
+        /// command may have no wait to see the stop; and on a failure
+        /// without `--keep-going`.
+        func endsScript(keepGoing: Bool) -> Bool {
+            stopRequested || (code != BlewExitCode.success.code && !keepGoing)
+        }
+    }
+
+    /// Run one command of a script (`exec`, or a REPL session, typed or
+    /// piped) as a signal span of its own. A stop requested before it
+    /// starts (a Ctrl-C between two `exec` commands, which the outer span
+    /// keeps) keeps it from running, with 130. A stop requested while it
+    /// runs makes a success 130, even if its last operation finished as the
+    /// stop arrived; a failure keeps its own code. Once a signal has begun
+    /// the exit, the command does not start: `commandStarted` waits for the
+    /// signal's exit instead.
+    func runScriptCommand(_ line: String) -> ScriptCommandOutcome {
+        signals.commandStarted()
+        if isStopRequested {
+            signals.commandFinished()
+            return ScriptCommandOutcome(code: BlewExitCode.interrupted.code, stopRequested: true)
+        }
+        let result = dispatch(line)
+        // Read under the lock that closes the span (the flag of an
+        // outermost span clears as it closes), plus the StopRequest of an
+        // enclosing `run(stoppingOn:_:)`.
+        let stopRequested = signals.commandFinished() || stopRequest?.reason != nil
+        return ScriptCommandOutcome(
+            code: SignalPolicy.exitCode(after: result.exitCode, stopRequested: stopRequested),
+            stopRequested: stopRequested)
     }
 
     /// Parse and dispatch a single command line. Returns CommandResult.
@@ -1124,7 +1158,6 @@ final class CommandRouter {
     func run<T>(stoppingOn request: StopRequest, _ body: () -> T) -> T {
         let outer = stopRequest
         stopRequest = request
-        let signals = ProcessSignals.shared
         signals.commandStarted()
         defer {
             signals.commandFinished()
@@ -1133,17 +1166,18 @@ final class CommandRouter {
         return body()
     }
 
-    /// Whether the running command was asked to stop, by a SIGINT or by
+    /// Whether the running command was asked to stop: by a SIGINT, by a
+    /// signal that began the exit (`ProcessSignals.stopRequested`), or by
     /// the `StopRequest` attached with `run(stoppingOn:_:)`.
     private var isStopRequested: Bool {
-        ProcessSignals.shared.interruptRequested || stopRequest?.reason != nil
+        signals.stopRequested || stopRequest?.reason != nil
     }
 
     enum CommandOutcome { case completed, interrupted, timedOut }
 
     /// Run `operation` in a Task and block the calling thread until it
-    /// finishes, polling every 50 ms. A stop (a Ctrl-C interrupt, or the
-    /// attached `StopRequest` set):
+    /// finishes, polling every 50 ms. A stop (`isStopRequested`: a Ctrl-C
+    /// interrupt, a signal exit begun, or the attached `StopRequest` set):
     ///   - requested before `waitInterruptible` is called keeps the
     ///     operation from starting, and gives `.interrupted`;
     ///   - seen by the poll while the operation runs cancels the task, waits
@@ -1160,7 +1194,6 @@ final class CommandRouter {
         timeout: TimeInterval? = nil
     ) -> CommandOutcome {
         let deadline = timeout.map { Date().addingTimeInterval($0) }
-        let signals = ProcessSignals.shared
         signals.commandStarted()
         defer { signals.commandFinished() }
         if isStopRequested { return .interrupted }

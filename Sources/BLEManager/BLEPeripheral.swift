@@ -1,4 +1,5 @@
 import Foundation
+import os
 @preconcurrency import CoreBluetooth
 
 /// Public facade for BLE peripheral (GATT server) operations.
@@ -14,7 +15,20 @@ import Foundation
 /// advertising, removes the services), so a callback that arrives after the
 /// caller gave up cannot leave the Mac advertising.
 public final class BLEPeripheral: @unchecked Sendable {
-    public static let shared = BLEPeripheral()
+    public static let shared: BLEPeripheral = {
+        let instance = BLEPeripheral()
+        sharedCreated.withLock { $0 = true }
+        return instance
+    }()
+
+    private static let sharedCreated = OSAllocatedUnfairLock(initialState: false)
+
+    /// `shared` once something has used it, and nil before: for blew's exit
+    /// cleanup, which must not create a `CBPeripheralManager` (and ask for
+    /// Bluetooth access) only to find nothing to clean up.
+    public static var sharedIfCreated: BLEPeripheral? {
+        sharedCreated.withLock { $0 } ? shared : nil
+    }
 
     private let pmQueue = DispatchQueue(label: "blew.pm", qos: .userInitiated)
     private let store: GATTStore

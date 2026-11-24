@@ -19,8 +19,10 @@ enum HandledSignal: CaseIterable {
 
 /// Whether a command is running that a SIGINT can stop. A command runs
 /// inside a span: a whole one-shot CLI command or `exec` script (opened by
-/// `Blew.main`), a REPL command from the line read to the next read, an
-/// MCP tool call, and each `CommandRouter.waitInterruptible` within them.
+/// `Blew.main`), each command of a script or REPL session
+/// (`CommandRouter.runScriptCommand`, so a REPL command is a span from the
+/// line read to the next read), an MCP tool call, and each
+/// `CommandRouter.waitInterruptible` within them.
 enum CommandPhase: Equatable {
     /// No span is open: at the interactive REPL prompt, while a piped REPL
     /// script waits for its next line, between MCP tool calls, or parsing a
@@ -61,6 +63,16 @@ enum SignalPolicy {
             return (.exit(BlewExitCode.interrupted.code), phase)
         }
     }
+
+    /// The exit code of a command (a one-shot CLI command, or one command
+    /// of a script) that returned `code`, given whether a stop was requested
+    /// while it ran. A failure keeps its own code. A success becomes 130
+    /// when a stop was requested: its last operation finished as the stop
+    /// arrived, so its output stands, but the stop ends the script and
+    /// nothing after it starts.
+    static func exitCode(after code: Int32, stopRequested: Bool) -> Int32 {
+        code == BlewExitCode.success.code && stopRequested ? BlewExitCode.interrupted.code : code
+    }
 }
 
 /// Receives SIGINT and SIGTERM for the whole process and acts on them.
@@ -85,12 +97,22 @@ final class ProcessSignals: @unchecked Sendable {
     }
     private var exitHook: (() -> Void)?
     private var sources: [DispatchSourceSignal] = []
-    /// Who is ending the process. The first to claim the exit owns it: the
-    /// main thread returning from its command (`beginOrdinaryExit`) or the
-    /// signal queue (`exitProcess`).
+    /// Who is ending the process, and so with which code. The first to
+    /// claim the exit owns it: the main thread returning from its command
+    /// (`beginOrdinaryExit`), with the command's code, or the signal queue
+    /// (`beginSignalExit`), with the signal's.
     private var exitOwner = ExitOwner.none
 
-    private enum ExitOwner { case none, ordinary, signal }
+    private enum ExitOwner: Equatable { case none, ordinary(code: Int32), signal }
+
+    /// How the signal queue ends the process (`beginSignalExit`).
+    struct SignalExit: Equatable {
+        /// The code the process exits with.
+        let code: Int32
+        /// Whether the signal queue runs the exit cleanup: not when the
+        /// main thread's ordinary exit is already running it.
+        let runsCleanup: Bool
+    }
 
     /// Internal so tests can use an instance of their own; blew uses `shared`.
     init() {}
@@ -118,76 +140,92 @@ final class ProcessSignals: @unchecked Sendable {
     // MARK: - Interruptible waits
 
     /// A command span opens. A SIGINT while any span is open stops the
-    /// command instead of ending the process. Once a signal has begun the
-    /// exit, no command starts: the caller waits for the exit instead.
+    /// command instead of ending the process. Once the exit has begun (a
+    /// signal's, or the main thread's while a `blew mcp` tool call is still
+    /// in flight), no command starts: the caller waits for the exit instead.
     func commandStarted() {
         let exitBegun: Bool = lock.withLock {
-            if exitOwner == .signal { return true }
+            if exitOwner != .none { return true }
             if openSpans == 0 { interrupted = false }
             openSpans += 1
             return false
         }
-        if exitBegun { waitForSignalExit() }
+        if exitBegun { waitForExit() }
     }
 
     /// The span that `commandStarted` opened has closed. Returns whether a
-    /// stop is requested as it closes; for the outermost span, whether a
-    /// SIGINT asked the command to stop while it was open. The answer is
-    /// read under the same lock as the close, so a SIGINT that arrives after
-    /// it finds the span closed and is not lost between the two.
+    /// stop was requested (`stopRequested`) as it closes; for the outermost
+    /// span, whether one was requested while it was open. The answer is read
+    /// under the same lock as the close, so a SIGINT that arrives after it
+    /// finds the span closed and is not lost between the two.
     @discardableResult
     func commandFinished() -> Bool {
         lock.withLock {
-            let wasInterrupted = interrupted
+            let stop = stopRequestedLocked
             openSpans -= 1
             if openSpans == 0 { interrupted = false }
-            return wasInterrupted
+            return stop
         }
     }
 
-    /// Whether a SIGINT has asked the running command to stop. It stays
-    /// set until the outermost span closes, so a REPL command interrupted
-    /// between two waits stops at the next one.
-    var interruptRequested: Bool {
-        lock.withLock { interrupted }
+    /// Whether the running command is asked to stop: a SIGINT interrupted
+    /// it, or the exit has begun (a signal's: SIGTERM, or a SIGINT outside
+    /// a command; or the main thread's), whose cleanup the command must not
+    /// run beside. A SIGINT's
+    /// stop stays set until the outermost span closes, so a REPL command
+    /// interrupted between two waits stops at the next one; an exit's stays
+    /// set for good.
+    var stopRequested: Bool {
+        lock.withLock { stopRequestedLocked }
+    }
+
+    /// `stopRequested`, read with the lock held.
+    private var stopRequestedLocked: Bool {
+        interrupted || exitOwner != .none
     }
 
     // MARK: - Exit
 
-    /// The main thread is about to end the process the ordinary way.
-    /// Returns true to the first caller, which then runs the exit cleanup,
-    /// and false to later ones. When a signal has already begun the exit,
-    /// it never returns, so the signal's cleanup finishes and its exit code
-    /// is the one the process ends with.
-    func beginOrdinaryExit() -> Bool {
-        let before: ExitOwner = lock.withLock {
-            let before = exitOwner
-            if before == .none { exitOwner = .ordinary }
-            return before
+    /// The main thread begins the process's ordinary exit with `code`, and
+    /// then runs the exit cleanup (`exitOrdinarily` is the caller). From here
+    /// on `code` is the process's exit code: a signal that arrives during
+    /// the cleanup ends the process at once, with this code. When a signal
+    /// has already begun the exit, this never returns, so the signal's
+    /// cleanup finishes and its code is the one the process ends with.
+    func beginOrdinaryExit(with code: Int32) {
+        let signalOwnsTheExit: Bool = lock.withLock {
+            if exitOwner == .signal { return true }
+            exitOwner = .ordinary(code: code)
+            return false
         }
-        switch before {
-        case .none: return true
-        case .ordinary: return false
-        case .signal: waitForSignalExit()
-        }
+        if signalOwnsTheExit { waitForExit() }
     }
 
-    /// The signal queue begins the exit. From here on no command starts
-    /// and the main thread does not exit on its own. Returns whether the
-    /// signal queue runs the exit cleanup: not when the main thread already
-    /// began its ordinary exit, which runs it. Internal for tests;
+    /// The signal queue begins the exit on a signal whose code is `code`.
+    /// When it is the first to claim the exit, from here on no command
+    /// starts, running commands are asked to stop, and the main thread does
+    /// not exit on its own; the signal queue runs the cleanup and exits with
+    /// `code`. When the main thread's ordinary exit began first, its code
+    /// stands and its cleanup is not run twice. Internal for tests;
     /// `exitProcess` is the caller.
-    func beginSignalExit() -> Bool {
+    func beginSignalExit(_ code: Int32) -> SignalExit {
         lock.withLock {
-            let ownsCleanup = exitOwner == .none
-            exitOwner = .signal
-            return ownsCleanup
+            switch exitOwner {
+            case .none:
+                exitOwner = .signal
+                return SignalExit(code: code, runsCleanup: true)
+            case .ordinary(let ordinaryCode):
+                return SignalExit(code: ordinaryCode, runsCleanup: false)
+            case .signal:
+                // Only a test gets here: `exitProcess` never returns, and
+                // the signal queue is serial.
+                return SignalExit(code: code, runsCleanup: false)
+            }
         }
     }
 
-    /// Block the calling thread until the signal queue's `_exit` ends the
-    /// process.
-    private func waitForSignalExit() -> Never {
+    /// Block the calling thread until the exit's owner ends the process.
+    private func waitForExit() -> Never {
         while true { sleep(60) }
     }
 
@@ -213,9 +251,10 @@ final class ProcessSignals: @unchecked Sendable {
 
     /// Claim the exit, give the terminal back, run the exit hook, stop
     /// advertising and disconnect (unless the main thread's ordinary exit
-    /// is already doing that), flush standard output and exit. Restoring the terminal
-    /// keeps its lock, so from then on the REPL cannot enter raw mode again
-    /// and reads no more input.
+    /// is already doing that), flush standard output and exit, with the
+    /// code of whoever claimed the exit first. Restoring the terminal keeps
+    /// its lock, so from then on the REPL cannot enter raw mode again and
+    /// reads no more input.
     ///
     /// The flush is skipped when another thread holds standard output (it
     /// may be blocked writing to a pipe nobody reads), and `_exit` ends the
@@ -223,12 +262,12 @@ final class ProcessSignals: @unchecked Sendable {
     /// blew from exiting. Output is line-buffered, so at most a partial
     /// line is lost.
     private func exitProcess(_ code: Int32) -> Never {
-        let ownsCleanup = beginSignalExit()
+        let exit = beginSignalExit(code)
         LineNoise.restoreTerminalForExit()
         let hook = lock.withLock { exitHook }
         hook?()
-        if ownsCleanup { exitCleanup() }
+        if exit.runsCleanup { exitCleanup() }
         StandardOutput.flushUnlessLocked()
-        _exit(code)
+        _exit(exit.code)
     }
 }
