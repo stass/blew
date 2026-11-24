@@ -431,7 +431,7 @@ final class MCPStructuredResultTests: XCTestCase {
     }
 
     func testReadValueRoundTrip() throws {
-        let rv = ReadResult(char: "2A19", name: "Battery Level", value: "64", format: "uint8")
+        let rv = ReadResult(char: "2A19", name: "Battery Level", value: "64", format: .uint8)
         let original = StructuredResult.readValue(rv)
         let json = try jsonString(original)
         XCTAssertTrue(json.contains("\"type\":\"readValue\""))
@@ -439,7 +439,7 @@ final class MCPStructuredResultTests: XCTestCase {
         if case .readValue(let r) = decoded {
             XCTAssertEqual(r.char, "2A19")
             XCTAssertEqual(r.value, "64")
-            XCTAssertEqual(r.format, "uint8")
+            XCTAssertEqual(r.format, .uint8)
         } else {
             XCTFail("Expected .readValue")
         }

@@ -36,7 +36,7 @@ final class KVRenderer: OutputRenderer {
             var pairs: [(String, String)] = [("char", result.char)]
             if let name = result.name { pairs.append(("name", name)) }
             pairs.append(("value", result.value))
-            pairs.append(("fmt", result.format))
+            pairs.append(("fmt", result.format.rawValue))
             printKV(pairs)
         case .writeSuccess:
             break
@@ -57,7 +57,7 @@ final class KVRenderer: OutputRenderer {
                 printKV([("subscription", uuid)])
             }
         case .nusData(let record):
-            printKV([("ts", record.timestamp), ("rx", DataFormatter.format(record.data, as: "hex"))])
+            printKV([("ts", record.timestamp), ("rx", DataFormatter.format(record.data, as: .hex))])
         case .nusStatus(let status):
             printKV([("nus", status.event), ("detail", status.detail)])
         case .message(let msg):
@@ -236,7 +236,7 @@ final class KVRenderer: OutputRenderer {
         case .readRequest(let id, let uuid):
             printKV([("event", "read"), ("ts", ts), ("central", id), ("char", uuid)])
         case .writeRequest(let id, let uuid, let value):
-            printKV([("event", "write"), ("ts", ts), ("central", id), ("char", uuid), ("value", DataFormatter.format(value, as: "hex"))])
+            printKV([("event", "write"), ("ts", ts), ("central", id), ("char", uuid), ("value", DataFormatter.format(value, as: .hex))])
         case .subscribed(let id, let uuid):
             printKV([("event", "subscribe"), ("ts", ts), ("central", id), ("char", uuid)])
         case .unsubscribed(let id, let uuid):

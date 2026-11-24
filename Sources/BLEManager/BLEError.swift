@@ -1,7 +1,7 @@
 import Foundation
 import CoreBluetooth
 
-public enum BLEError: Error, Sendable {
+public enum BLEError: Error, LocalizedError, Sendable {
     // Central errors
     case bluetoothUnavailable(String)
     case notConnected
@@ -32,7 +32,7 @@ public enum BLEError: Error, Sendable {
         }
     }
 
-    public var localizedDescription: String {
+    public var errorDescription: String? {
         switch self {
         case .bluetoothUnavailable(let msg): return "Bluetooth unavailable: \(msg)"
         case .notConnected: return "Not connected to any device"
@@ -60,6 +60,18 @@ public enum BLEError: Error, Sendable {
         case .unsupported: return .bluetoothUnavailable("Bluetooth is not supported")
         case .resetting: return .bluetoothUnavailable("Bluetooth is resetting")
         default: return .bluetoothUnavailable("Bluetooth state: \(state.rawValue)")
+        }
+    }
+
+    /// The error for a state that waiting does not end: powered off,
+    /// unauthorized or unsupported, which change only when the user acts.
+    /// Nil for poweredOn and for the states CoreBluetooth leaves by itself
+    /// (unknown, resetting), so a wait for poweredOn fails at once on the
+    /// first kind and keeps waiting only on the second.
+    public static func persistentlyUnavailable(_ state: CBManagerState) -> BLEError? {
+        switch state {
+        case .poweredOff, .unauthorized, .unsupported: return unavailable(state)
+        default: return nil
         }
     }
 }

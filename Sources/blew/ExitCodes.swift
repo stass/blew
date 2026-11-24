@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import BLEManager
 
 struct BlewExitCode: Error, CustomStringConvertible {
     let code: Int32
@@ -27,5 +28,28 @@ extension BlewExitCode: CustomNSError {
     static var errorDomain: String { "blew" }
     var errorUserInfo: [String: Any] {
         [NSLocalizedDescriptionKey: description]
+    }
+}
+
+extension BlewExitCode {
+    /// The documented exit code for a command that failed with `error`, by
+    /// the error's type: a BLEError's own code, 6 for an argument blew cannot
+    /// use, and 5 (operation failed) for any other error.
+    init(for error: Error) {
+        switch error {
+        case let code as BlewExitCode: self = code
+        case let error as BLEError: self.init(error.exitCode)
+        case is InvalidArgument: self = .invalidArguments
+        default: self = .operationFailed
+        }
+    }
+}
+
+extension CommandResult {
+    /// Record that the command failed with `error`: its message, and the
+    /// exit code `BlewExitCode(for:)` gives it.
+    mutating func fail(_ error: Error) {
+        errors.append(error.localizedDescription)
+        exitCode = BlewExitCode(for: error).code
     }
 }

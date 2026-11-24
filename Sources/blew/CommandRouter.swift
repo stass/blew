@@ -29,8 +29,15 @@ final class CommandRouter {
 
     /// Execute a semicolon-separated script string. Returns exit code.
     func executeScript(_ script: String, keepGoing: Bool = false, dryRun: Bool = false) -> Int32 {
-        let segments = script.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }
-        let commands = segments.filter { !$0.isEmpty }
+        let commands: [String]
+        do {
+            commands = try splitScript(script)
+        } catch {
+            var result = CommandResult()
+            result.fail(error)
+            renderer.renderResult(result)
+            return result.exitCode
+        }
 
         if dryRun {
             for (i, cmd) in commands.enumerated() {
@@ -55,7 +62,15 @@ final class CommandRouter {
 
     /// Parse and dispatch a single command line. Returns CommandResult.
     func dispatch(_ line: String) -> CommandResult {
-        let tokens = tokenize(line)
+        let tokens: [String]
+        do {
+            tokens = try tokenize(line)
+        } catch {
+            var result = CommandResult()
+            result.fail(error)
+            renderer.renderResult(result)
+            return result
+        }
         guard let first = tokens.first else { return CommandResult() }
 
         let result: CommandResult
@@ -129,28 +144,76 @@ final class CommandRouter {
         print(lines.joined(separator: "\n"))
     }
 
-    func tokenize(_ line: String) -> [String] {
-        var tokens: [String] = []
-        var current = ""
-        var inQuote = false
-        var quoteChar: Character = "\""
+    /// One character of command text as the quoting rule reads it.
+    enum QuotedCharacter {
+        /// A `"` or `'` that opens or closes a quoted string.
+        case quote(Character)
+        /// Any other character; `quoted` when it is inside a quoted string.
+        case text(Character, quoted: Bool)
+    }
 
-        for ch in line {
-            if inQuote {
-                if ch == quoteChar {
-                    inQuote = false
+    /// The one quoting rule of scripts and command lines: `"` or `'` opens a
+    /// quoted string that runs to the next of the same character, without
+    /// escapes. Throws for a quote that is never closed, so it cannot
+    /// swallow the rest of a script.
+    static func readQuoting(_ text: String) throws -> [QuotedCharacter] {
+        var characters: [QuotedCharacter] = []
+        var open: Character?
+        for ch in text {
+            if let quote = open {
+                if ch == quote {
+                    open = nil
+                    characters.append(.quote(ch))
                 } else {
-                    current.append(ch)
+                    characters.append(.text(ch, quoted: true))
                 }
             } else if ch == "\"" || ch == "'" {
-                inQuote = true
-                quoteChar = ch
-            } else if ch == " " || ch == "\t" {
+                open = ch
+                characters.append(.quote(ch))
+            } else {
+                characters.append(.text(ch, quoted: false))
+            }
+        }
+        if let quote = open {
+            throw InvalidArgument("unclosed \(quote) quote")
+        }
+        return characters
+    }
+
+    /// The commands of a script: its text split at each `;` outside quotes,
+    /// trimmed, without empty ones. Quotes stay in the command for
+    /// `tokenize`.
+    func splitScript(_ script: String) throws -> [String] {
+        var commands: [String] = []
+        var current = ""
+        for character in try Self.readQuoting(script) {
+            switch character {
+            case .text(";", quoted: false):
+                commands.append(current)
+                current = ""
+            case .text(let ch, _), .quote(let ch):
+                current.append(ch)
+            }
+        }
+        commands.append(current)
+        return commands.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// The tokens of a command line: split at spaces and tabs outside
+    /// quotes, with the quotes removed.
+    func tokenize(_ line: String) throws -> [String] {
+        var tokens: [String] = []
+        var current = ""
+        for character in try Self.readQuoting(line) {
+            switch character {
+            case .quote:
+                break
+            case .text(let ch, quoted: false) where ch == " " || ch == "\t":
                 if !current.isEmpty {
                     tokens.append(current)
                     current = ""
                 }
-            } else {
+            case .text(let ch, _):
                 current.append(ch)
             }
         }
@@ -198,7 +261,7 @@ final class CommandRouter {
     /// `isValidDuration` accepts, since a scan stop is scheduled with a
     /// nanosecond sleep.
     private func scanDuration(_ args: [String]) throws -> TimeInterval? {
-        let local = parseStringOption(args, short: "-t", long: "--timeout", optionsWithValue: Self.scanOptionsWithValue)
+        let local = try optionValue(args, short: "-t", long: "--timeout", optionsWithValue: Self.scanOptionsWithValue)
         guard let text = local ?? globals.timeout.map({ "\($0)" }) else { return nil }
         guard let seconds = Double(text), Self.isValidDuration(seconds) else {
             throw InvalidArgument("invalid timeout '\(text)' (use 0 to \(Int(Self.maxDuration)) seconds)")
@@ -251,8 +314,7 @@ final class CommandRouter {
             } catch is CancellationError {
                 // interrupted; reported below
             } catch {
-                result.errors.append("\(error)")
-                result.exitCode = BlewExitCode.operationFailed.code
+                result.fail(error)
             }
         }
 
@@ -302,7 +364,7 @@ final class CommandRouter {
         let display = ScanWatchDisplay(formatter: output)
         display.start()
 
-        var scanError: Int32 = 0
+        var scanFailure: Error?
         var results = ScanResults()
 
         let operation: () async -> Void = { [self] in
@@ -315,8 +377,7 @@ final class CommandRouter {
             } catch is CancellationError {
                 // normal exit path
             } catch {
-                scanError = BlewExitCode.operationFailed.code
-                renderer.renderError("\(error)")
+                scanFailure = error
             }
         }
 
@@ -335,7 +396,7 @@ final class CommandRouter {
             return result
         }
 
-        if scanError != 0 { result.exitCode = scanError; return result }
+        if let scanFailure { result.fail(scanFailure); return result }
 
         if devices.isEmpty {
             result.errors.append("no devices found")
@@ -347,7 +408,7 @@ final class CommandRouter {
     }
 
     private func runScanWatchKV(filter: DeviceFilter, timeout: TimeInterval?) -> CommandResult {
-        var scanError: Int32 = 0
+        var scanFailure: Error?
         var results = ScanResults()
 
         let operation: () async -> Void = { [self] in
@@ -361,8 +422,7 @@ final class CommandRouter {
             } catch is CancellationError {
                 // normal exit
             } catch {
-                renderer.renderError("\(error)")
-                scanError = BlewExitCode.operationFailed.code
+                scanFailure = error
             }
         }
 
@@ -373,7 +433,7 @@ final class CommandRouter {
             result.exitCode = BlewExitCode.interrupted.code
             return result
         }
-        if scanError != 0 { result.exitCode = scanError; return result }
+        if let scanFailure { result.fail(scanFailure); return result }
         return result
     }
 
@@ -405,12 +465,8 @@ final class CommandRouter {
                 result.infos.append("connected to \(targetId)")
             } catch is CancellationError {
                 // handled by waitInterruptible
-            } catch let error as BLEError {
-                result.errors.append(error.localizedDescription)
-                result.exitCode = error.exitCode
             } catch {
-                result.errors.append("\(error)")
-                result.exitCode = BlewExitCode.operationFailed.code
+                result.fail(error)
             }
         }
 
@@ -444,12 +500,8 @@ final class CommandRouter {
                 result.infos.append("disconnected")
             } catch is CancellationError {
                 // handled by waitInterruptible
-            } catch let error as BLEError {
-                result.errors.append(error.localizedDescription)
-                result.exitCode = error.exitCode
             } catch {
-                result.errors.append("\(error)")
-                result.exitCode = BlewExitCode.operationFailed.code
+                result.fail(error)
             }
         }
 
@@ -571,7 +623,7 @@ final class CommandRouter {
                                 do {
                                     let data = try await manager.readCharacteristic(char.uuid)
                                     let decoded = GATTDecoder.decode(data, uuid: char.uuid)
-                                        ?? DataFormatter.format(data, as: "hex")
+                                        ?? DataFormatter.format(data, as: .hex)
                                     let parts = decoded.components(separatedBy: " | ")
                                     if parts.count > 1 {
                                         valueFields = parts.map { Self.splitFieldPart($0) }
@@ -631,7 +683,7 @@ final class CommandRouter {
                             do {
                                 let data = try await manager.readCharacteristic(char.uuid)
                                 let decoded = GATTDecoder.decode(data, uuid: char.uuid)
-                                    ?? DataFormatter.format(data, as: "hex")
+                                    ?? DataFormatter.format(data, as: .hex)
                                 let parts = decoded.components(separatedBy: " | ")
                                 if parts.count > 1 {
                                     valueFields = parts.map { Self.splitFieldPart($0) }
@@ -680,12 +732,8 @@ final class CommandRouter {
                 }
             } catch is CancellationError {
                 // handled by waitInterruptible
-            } catch let error as BLEError {
-                result.errors.append(error.localizedDescription)
-                result.exitCode = error.exitCode
             } catch {
-                result.errors.append("\(error)")
-                result.exitCode = BlewExitCode.operationFailed.code
+                result.fail(error)
             }
         }
 
@@ -720,6 +768,12 @@ final class CommandRouter {
         guard let charInput = positionalArgs(args, optionsWithValue: readOpts).first else {
             return Self.invalidArguments("missing characteristic UUID")
         }
+        let fmt: ValueFormat
+        do {
+            fmt = try valueFormat(args, optionsWithValue: readOpts)
+        } catch {
+            return Self.invalidArguments("\(error)")
+        }
         let connectResult = ensureConnected(args: args, optionsWithValue: readOpts)
         guard connectResult.exitCode == 0 else { return connectResult }
 
@@ -733,7 +787,6 @@ final class CommandRouter {
             return result
         case .notFound: charUUID = charInput
         }
-        let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: readOpts) ?? "hex"
 
         let operation: () async -> Void = { [self] in
             do {
@@ -743,12 +796,8 @@ final class CommandRouter {
                 result.output.append(.readValue(ReadResult(char: charUUID, name: name, value: formatted, format: fmt)))
             } catch is CancellationError {
                 // handled by waitInterruptible
-            } catch let error as BLEError {
-                result.errors.append(error.localizedDescription)
-                result.exitCode = error.exitCode
             } catch {
-                result.errors.append("\(error)")
-                result.exitCode = BlewExitCode.operationFailed.code
+                result.fail(error)
             }
         }
 
@@ -772,9 +821,14 @@ final class CommandRouter {
         }
         let charInput = positional[0]
         let dataStr = positional[1]
-        let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: writeOpts) ?? "hex"
+        let fmt: ValueFormat
+        do {
+            fmt = try valueFormat(args, optionsWithValue: writeOpts)
+        } catch {
+            return Self.invalidArguments("\(error)")
+        }
         guard let data = DataFormatter.parse(dataStr, as: fmt) else {
-            return Self.invalidArguments("invalid data '\(dataStr)' for format '\(fmt)'")
+            return Self.invalidArguments("invalid data '\(dataStr)' for format '\(fmt.rawValue)'")
         }
         let connectResult = ensureConnected(args: args, optionsWithValue: writeOpts)
         guard connectResult.exitCode == 0 else { return connectResult }
@@ -808,12 +862,8 @@ final class CommandRouter {
                 result.output.append(.writeSuccess(char: charUUID, name: BLENames.name(for: charUUID, category: .characteristic)))
             } catch is CancellationError {
                 // handled by waitInterruptible
-            } catch let error as BLEError {
-                result.errors.append(error.localizedDescription)
-                result.exitCode = error.exitCode
             } catch {
-                result.errors.append("\(error)")
-                result.exitCode = BlewExitCode.operationFailed.code
+                result.fail(error)
             }
         }
 
@@ -843,7 +893,12 @@ final class CommandRouter {
         }
 
         var result = CommandResult()
-        let durationText = parseStringOption(args, short: "-d", long: "--duration", optionsWithValue: subOpts)
+        let durationText: String?
+        do {
+            durationText = try optionValue(args, short: "-d", long: "--duration", optionsWithValue: subOpts)
+        } catch {
+            return Self.invalidArguments("\(error)")
+        }
         let duration = durationText.flatMap(Double.init)
         if let durationText, !(duration.map(Self.isValidDuration) ?? false) {
             result.errors.append("invalid duration '\(durationText)' (use 0 to \(Int(Self.maxDuration)) seconds)")
@@ -858,6 +913,14 @@ final class CommandRouter {
         guard let charInput = positionals.first else {
             return Self.invalidArguments("missing characteristic UUID")
         }
+        let fmt: ValueFormat
+        let maxCount: Int?
+        do {
+            fmt = try valueFormat(args, optionsWithValue: subOpts)
+            maxCount = try notificationCount(args, optionsWithValue: subOpts)
+        } catch {
+            return Self.invalidArguments("\(error)")
+        }
         let connectResult = ensureConnected(args: args, optionsWithValue: subOpts)
         guard connectResult.exitCode == 0 else { return connectResult }
         let charUUID: String
@@ -869,8 +932,6 @@ final class CommandRouter {
             return result
         case .notFound: charUUID = charInput
         }
-        let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: subOpts) ?? "hex"
-        let maxCount = parseIntOption(args, short: "-c", long: "--count", optionsWithValue: subOpts)
         // Enabling notifications waits for the device to confirm; that wait
         // has the operation timeout, like a read.
         let setupTimeout = globals.timeout ?? 5.0
@@ -894,10 +955,8 @@ final class CommandRouter {
                     }
                 } catch is CancellationError {
                     // stopped
-                } catch let error as BLEError {
-                    capturedRenderer.renderLive("sub error [\(charUUID)]: \(error.localizedDescription)")
                 } catch {
-                    capturedRenderer.renderLive("sub error [\(charUUID)]: \(error)")
+                    capturedRenderer.renderLive("sub error [\(charUUID)]: \(error.localizedDescription)")
                 }
                 backgroundSubTasks.removeValue(forKey: charUUID)
             }
@@ -921,12 +980,8 @@ final class CommandRouter {
                 }
             } catch is CancellationError {
                 // interrupted
-            } catch let error as BLEError {
-                result.errors.append(error.localizedDescription)
-                result.exitCode = error.exitCode
             } catch {
-                result.errors.append("\(error)")
-                result.exitCode = BlewExitCode.operationFailed.code
+                result.fail(error)
             }
         }
 
@@ -1191,16 +1246,21 @@ final class CommandRouter {
     /// Expand combined single-dash short flags into individual flags.
     /// For example, `["-dr"]` becomes `["-d", "-r"]`. Long flags (`--foo`)
     /// and single-char flags (`-d`) are passed through unchanged.
+    /// Tokens after `--`, and numbers (`-12`), are values and stay as they are.
     func expandArgs(_ args: [String], optionsWithValue: Set<String> = []) -> [String] {
         var result: [String] = []
         var skipNext = false
-        for arg in args {
+        for (index, arg) in args.enumerated() {
             if skipNext {
                 result.append(arg)
                 skipNext = false
                 continue
             }
-            if arg.hasPrefix("-") && !arg.hasPrefix("--") && arg.count > 2 {
+            if arg == Self.endOfOptions {
+                result += args[index...]
+                break
+            }
+            if Self.isOption(arg) && !arg.hasPrefix("--") && arg.count > 2 {
                 for ch in arg.dropFirst() {
                     result.append("-\(ch)")
                 }
@@ -1214,15 +1274,30 @@ final class CommandRouter {
         return result
     }
 
+    /// `--` ends the options: every token after it is positional, whatever
+    /// it looks like (`write fff1 -- -x`).
+    static let endOfOptions = "--"
+
+    /// Whether `arg`, at an option position, is an option: it starts with
+    /// `-` and is not a number, so `write -f float32le fff1 -1.5` writes
+    /// -1.5. No option of blew is a number.
+    static func isOption(_ arg: String) -> Bool {
+        arg.hasPrefix("-") && Double(arg) == nil
+    }
+
     /// Collect non-flag positional tokens from args. Options listed in
-    /// `optionsWithValue` consume their following token and are skipped.
+    /// `optionsWithValue` consume their following token and are skipped;
+    /// every token after `--` is positional.
     func positionalArgs(_ args: [String], optionsWithValue: Set<String>) -> [String] {
         var result: [String] = []
-        var skipNext = false
-        for arg in args {
-            if skipNext { skipNext = false; continue }
-            if arg.hasPrefix("-") {
-                if optionsWithValue.contains(arg) { skipNext = true }
+        var tokens = args[...]
+        while let arg = tokens.popFirst() {
+            if arg == Self.endOfOptions {
+                result += tokens
+                break
+            }
+            if Self.isOption(arg) {
+                if optionsWithValue.contains(arg) { _ = tokens.popFirst() }
             } else {
                 result.append(arg)
             }
@@ -1233,14 +1308,15 @@ final class CommandRouter {
     /// The options at option positions of `args`, in order, each with its
     /// value. An option in `optionsWithValue` takes the next token whatever it
     /// looks like (nil when there is none), `--long=value` carries its own,
-    /// and any other option is a flag. Positional tokens are skipped. Every
-    /// option lookup goes through this one walk, so a value is never read as
-    /// an option.
+    /// and any other option is a flag. Positional tokens are skipped, and the
+    /// walk ends at `--`. Every option lookup goes through this one walk, so
+    /// a value is never read as an option.
     static func scanOptions(_ args: [String], optionsWithValue: Set<String>) -> [(name: String, value: String?)] {
         var options: [(name: String, value: String?)] = []
         var tokens = args[...]
         while let arg = tokens.popFirst() {
-            guard arg.hasPrefix("-") else { continue }
+            if arg == endOfOptions { break }
+            guard isOption(arg) else { continue }
             if optionsWithValue.contains(arg) {
                 options.append((arg, tokens.popFirst()))
             } else if arg.hasPrefix("--"), let equals = arg.firstIndex(of: "=") {
@@ -1264,6 +1340,38 @@ final class CommandRouter {
 
     func parseIntOption(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) -> Int? {
         parseStringOption(args, short: short, long: long, optionsWithValue: optionsWithValue).flatMap { Int($0) }
+    }
+
+    /// The value of the option `short`/`long`, which takes one value, in
+    /// `args`; nil when it is absent. Throws when it ends `args` without its
+    /// value or is given more than once, so a missing value never reads as
+    /// a missing option.
+    func optionValue(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) throws -> String? {
+        let given = Self.scanOptions(args, optionsWithValue: optionsWithValue.union([short, long]))
+            .filter { $0.name == short || $0.name == long }
+        guard given.count <= 1 else { throw InvalidArgument("\(long) is given more than once") }
+        guard let option = given.first else { return nil }
+        guard let value = option.value else { throw InvalidArgument("\(option.name) needs a value") }
+        return value
+    }
+
+    /// The `-f`/`--format` of `args`, hex when it is absent. Throws for a
+    /// name that is not a `ValueFormat`.
+    func valueFormat(_ args: [String], optionsWithValue: Set<String>) throws -> ValueFormat {
+        try ValueFormat(parsing: optionValue(args, short: "-f", long: "--format",
+                                             optionsWithValue: optionsWithValue) ?? "hex")
+    }
+
+    /// The `sub -c`/`--count` of `args`, nil (no limit) when it is absent.
+    /// Throws for anything but a whole number of at least 1.
+    func notificationCount(_ args: [String], optionsWithValue: Set<String>) throws -> Int? {
+        guard let text = try optionValue(args, short: "-c", long: "--count", optionsWithValue: optionsWithValue) else {
+            return nil
+        }
+        guard let count = Int(text), count >= 1 else {
+            throw InvalidArgument("invalid count '\(text)' (use a whole number of at least 1)")
+        }
+        return count
     }
 
     /// Collect all values for a repeatable option (e.g. `-S uuid1 -S uuid2`).
@@ -1417,9 +1525,15 @@ extension CommandRouter {
     func runPeriphAdv(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
         var result = CommandResult()
         let advOpts: Set<String> = ["-c", "--config", "-n", "--name", "-S", "--service"]
-        let configPath = parseStringOption(args, short: "-c", long: "--config", optionsWithValue: advOpts)
+        let configPath: String?
+        let nameArg: String?
+        do {
+            configPath = try optionValue(args, short: "-c", long: "--config", optionsWithValue: advOpts)
+            nameArg = try optionValue(args, short: "-n", long: "--name", optionsWithValue: advOpts)
+        } catch {
+            return Self.invalidArguments("\(error)")
+        }
         let serviceArgs = parseAllStringOptions(args, short: "-S", long: "--service", optionsWithValue: advOpts)
-        let nameArg = parseStringOption(args, short: "-n", long: "--name", optionsWithValue: advOpts)
 
         var serviceUUIDs: [BLEUUID]
         var services: [ServiceDefinition] = []
@@ -1475,12 +1589,8 @@ extension CommandRouter {
                 )))
             } catch is CancellationError {
                 // handled below
-            } catch let error as BLEError {
-                result.errors.append(error.localizedDescription)
-                result.exitCode = error.exitCode
             } catch {
-                result.errors.append("\(error)")
-                result.exitCode = BlewExitCode.operationFailed.code
+                result.fail(error)
             }
         }
 
@@ -1502,10 +1612,44 @@ extension CommandRouter {
         return streamPeripheralEvents(result, emit: emit)
     }
 
+    /// Why `save(_:to:)` cannot write `path`, or nil when it can: the path is
+    /// not a directory, and its directory exists and is writable (`save`
+    /// replaces the file by a rename in that directory).
+    static func unwritableReason(_ path: String) -> String? {
+        let files = FileManager.default
+        let url = URL(fileURLWithPath: path)
+        var isDirectory: ObjCBool = false
+        if files.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return "it is a directory"
+        }
+        let directory = url.deletingLastPathComponent().path
+        guard files.fileExists(atPath: directory, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return "there is no directory \(directory)"
+        }
+        return files.isWritableFile(atPath: directory) ? nil : "the directory \(directory) is not writable"
+    }
+
+    /// Write `config` to `path` as pretty-printed JSON, replacing the file
+    /// whole or not at all.
+    static func save(_ config: PeripheralConfig, to path: String) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+        try encoder.encode(config).write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
+
     func runPeriphClone(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
         var result = CommandResult()
         let cloneOpts = Self.targetingOptionsWithValue.union(["-o", "--save"])
-        let savePath = parseStringOption(args, short: "-o", long: "--save", optionsWithValue: cloneOpts)
+        // Checked before connecting, which may replace the connected device.
+        let savePath: String?
+        do {
+            savePath = try optionValue(args, short: "-o", long: "--save", optionsWithValue: cloneOpts)
+        } catch {
+            return Self.invalidArguments("\(error)")
+        }
+        if let savePath, let problem = Self.unwritableReason(savePath) {
+            return Self.invalidArguments("cannot save to '\(savePath)': \(problem)")
+        }
 
         let connectResult = ensureConnected(args: args, optionsWithValue: cloneOpts)
         guard connectResult.exitCode == 0 else { return connectResult }
@@ -1569,10 +1713,8 @@ extension CommandRouter {
                 // waitInterruptible reports the interrupt or the timeout.
             } catch let error as BLEUUID.ParseError {
                 snapFailure = ("the device reported an \(error.localizedDescription)", BlewExitCode.operationFailed.code)
-            } catch let error as BLEError {
-                snapFailure = (error.localizedDescription, error.exitCode)
             } catch {
-                snapFailure = ("\(error)", BlewExitCode.operationFailed.code)
+                snapFailure = (error.localizedDescription, BlewExitCode(for: error).code)
             }
         }
 
@@ -1596,14 +1738,13 @@ extension CommandRouter {
         _ = runDisconnect([])
 
         if let path = savePath {
-            let config = PeripheralConfig(name: clonedName, services: clonedServices)
-            if let data = try? JSONEncoder().encode(config) {
-                let pretty = (try? JSONSerialization.jsonObject(with: data)).flatMap {
-                    try? JSONSerialization.data(withJSONObject: $0, options: .prettyPrinted)
-                }
-                let url = URL(fileURLWithPath: path)
-                try? (pretty ?? data).write(to: url)
+            do {
+                try Self.save(PeripheralConfig(name: clonedName, services: clonedServices), to: path)
                 result.infos.append("saved config to \(path)")
+            } catch {
+                result.errors.append("cannot save to '\(path)': \(error.localizedDescription)")
+                result.exitCode = BlewExitCode.operationFailed.code
+                return result
             }
         }
 
@@ -1627,12 +1768,8 @@ extension CommandRouter {
                 )))
             } catch is CancellationError {
                 // handled below
-            } catch let error as BLEError {
-                result.errors.append(error.localizedDescription)
-                result.exitCode = error.exitCode
             } catch {
-                result.errors.append("\(error)")
-                result.exitCode = BlewExitCode.operationFailed.code
+                result.fail(error)
             }
         }
 
@@ -1741,7 +1878,12 @@ extension CommandRouter {
         }
         let charInput = positional[0]
         let valueStr = positional[1]
-        let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: ["-f", "--format"]) ?? "hex"
+        let fmt: ValueFormat
+        do {
+            fmt = try valueFormat(args, optionsWithValue: ["-f", "--format"])
+        } catch {
+            return Self.invalidArguments("\(error)")
+        }
 
         let charUUID: BLEUUID
         do {
@@ -1753,7 +1895,7 @@ extension CommandRouter {
         }
 
         guard let data = DataFormatter.parse(valueStr, as: fmt) else {
-            result.errors.append("invalid value '\(valueStr)' for format '\(fmt)'")
+            result.errors.append("invalid value '\(valueStr)' for format '\(fmt.rawValue)'")
             result.exitCode = BlewExitCode.invalidArguments.code
             return result
         }
@@ -1761,12 +1903,8 @@ extension CommandRouter {
         do {
             try BLEPeripheral.shared.updateValue(data, forCharacteristic: charUUID)
             result.infos.append("set \(BLENames.displayUUID(charUUID.string, category: .characteristic)) = \(DataFormatter.format(data, as: fmt))")
-        } catch let error as BLEError {
-            result.errors.append(error.localizedDescription)
-            result.exitCode = error.exitCode
         } catch {
-            result.errors.append("\(error)")
-            result.exitCode = BlewExitCode.operationFailed.code
+            result.fail(error)
         }
         return result
     }
@@ -1783,7 +1921,12 @@ extension CommandRouter {
         }
         let charInput = positional[0]
         let valueStr = positional[1]
-        let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: ["-f", "--format"]) ?? "hex"
+        let fmt: ValueFormat
+        do {
+            fmt = try valueFormat(args, optionsWithValue: ["-f", "--format"])
+        } catch {
+            return Self.invalidArguments("\(error)")
+        }
 
         let charUUID: BLEUUID
         do {
@@ -1795,7 +1938,7 @@ extension CommandRouter {
         }
 
         guard let data = DataFormatter.parse(valueStr, as: fmt) else {
-            result.errors.append("invalid value '\(valueStr)' for format '\(fmt)'")
+            result.errors.append("invalid value '\(valueStr)' for format '\(fmt.rawValue)'")
             result.exitCode = BlewExitCode.invalidArguments.code
             return result
         }
@@ -1810,12 +1953,8 @@ extension CommandRouter {
             case .stored:
                 result.infos.append("set \(name); no central is subscribed, so nothing was notified")
             }
-        } catch let error as BLEError {
-            result.errors.append(error.localizedDescription)
-            result.exitCode = error.exitCode
         } catch {
-            result.errors.append("\(error)")
-            result.exitCode = BlewExitCode.operationFailed.code
+            result.fail(error)
         }
         return result
     }

@@ -14,6 +14,39 @@ final class CLIParsingTests: XCTestCase {
         XCTAssertNoThrow(try Blew.parseAsRoot(["--help"]))
     }
 
+    private func exitCode(_ args: [String]) -> Int32 {
+        do {
+            _ = try Blew.parseAsRoot(args)
+            return 0
+        } catch {
+            return Blew.processExitCode(for: error)
+        }
+    }
+
+    /// ArgumentParser's usage errors exit 6, as README documents; help and
+    /// the version exit 0.
+    func testParseErrorExitCodes() {
+        for args in [["--bogus"], ["write", "fff1"], ["sub", "-c", "abc", "2a19"], ["-t", "abc", "scan"]] {
+            XCTAssertEqual(exitCode(args), BlewExitCode.invalidArguments.code, "\(args)")
+        }
+        for args in [["--help"], ["--version"], ["read", "--help"]] {
+            XCTAssertEqual(exitCode(args), 0, "\(args)")
+        }
+    }
+
+    func testWriteTakesValueAfterDoubleDash() throws {
+        let command = try Blew.parseAsRoot(["write", "-f", "float32le", "fff1", "--", "-1.5"]) as? WriteCommand
+        XCTAssertEqual(command?.data, "-1.5")
+    }
+
+    /// An unknown `-f` is a parse error, not hex.
+    func testUnknownFormatIsAParseError() {
+        XCTAssertThrowsError(try Blew.parseAsRoot(["read", "-f", "bogus", "2a19"]))
+        XCTAssertThrowsError(try Blew.parseAsRoot(["write", "-f", "bogus", "fff1", "00"]))
+        XCTAssertThrowsError(try Blew.parseAsRoot(["sub", "-f", "bogus", "2a19"]))
+        XCTAssertNoThrow(try Blew.parseAsRoot(["read", "-f", "UTF8", "2a19"]))
+    }
+
     func testVersionFlagThrows() {
         // --version throws a CommandError (not a usage error)
         XCTAssertThrowsError(try Blew.parseAsRoot(["--version"])) { error in

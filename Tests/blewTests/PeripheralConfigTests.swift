@@ -313,6 +313,25 @@ final class PeripheralConfigTests: XCTestCase {
         let config = try PeripheralConfig.load(from: path)
         XCTAssertFalse(config.services.isEmpty)
     }
+
+    /// An unknown `format` is an error, with or without a `value`, never hex.
+    func testUnknownFormatIsRejected() throws {
+        for value in [#""value": "00", "#, ""] {
+            let json = """
+            {
+              "services": [{
+                "uuid": "FFF0",
+                "primary": true,
+                "characteristics": [{ "uuid": "FFF1", "properties": ["read"], \(value)"format": "bogus" }]
+              }]
+            }
+            """
+            let config = try decodeConfig(json)
+            XCTAssertThrowsError(try config.resolvedInitialValues(), json) { error in
+                XCTAssertTrue(error.localizedDescription.contains("unknown format 'bogus'"), error.localizedDescription)
+            }
+        }
+    }
 }
 
 // MARK: - Helpers

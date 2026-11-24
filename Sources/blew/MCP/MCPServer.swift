@@ -311,7 +311,7 @@ final class BlewMCPServer {
                     if case .nusData(let record) = item { all.append(record.data) }
                 }
                 return .nus(NUSTranscript(received: String(decoding: bytes, as: UTF8.self),
-                                          receivedHex: DataFormatter.format(bytes, as: "hex")))
+                                          receivedHex: DataFormatter.format(bytes, as: .hex)))
             case .message(let msg):
                 return .message(msg)
             case .empty:

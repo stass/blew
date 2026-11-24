@@ -61,7 +61,23 @@ struct Blew: AsyncParsableCommand {
         } catch let code as BlewExitCode {
             Foundation.exit(code.code)
         } catch {
-            exit(withError: error)
+            let code = processExitCode(for: error)
+            // `--help` and `--version` print their text and exit 0.
+            if code == BlewExitCode.success.code { exit(withError: error) }
+            FileHandle.standardError.write(Data((fullMessage(for: error) + "\n").utf8))
+            Foundation.exit(code)
+        }
+    }
+
+    /// The exit code for an error that reaches `main`: 0 for a request for
+    /// help or the version, 6 (invalid arguments) for any usage or
+    /// validation error ArgumentParser reports, which it would exit with 64,
+    /// and otherwise the code `BlewExitCode(for:)` gives the error.
+    static func processExitCode(for error: Error) -> Int32 {
+        switch exitCode(for: error) {
+        case .success: return BlewExitCode.success.code
+        case .validationFailure: return BlewExitCode.invalidArguments.code
+        default: return BlewExitCode(for: error).code
         }
     }
 

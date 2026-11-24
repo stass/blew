@@ -123,9 +123,10 @@ struct ConnectedDevice {
 }
 
 /// A command argument that cannot be used, with the message for the user.
-struct InvalidArgument: Error, CustomStringConvertible {
+struct InvalidArgument: Error, LocalizedError, CustomStringConvertible {
     let description: String
     init(_ description: String) { self.description = description }
+    var errorDescription: String? { description }
 }
 
 /// What auto-connect does for a command's target. Every step but

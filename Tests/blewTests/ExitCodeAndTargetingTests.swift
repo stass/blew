@@ -1,4 +1,6 @@
 import XCTest
+import CoreBluetooth
+import BLEManager
 @testable import blew
 
 final class ExitCodeTests: XCTestCase {
@@ -197,6 +199,40 @@ final class DeviceTargetingOptionsTests: XCTestCase {
     func testOutputFormatRawValues() {
         XCTAssertEqual(OutputFormat.text.rawValue, "text")
         XCTAssertEqual(OutputFormat.kv.rawValue, "kv")
+    }
+
+    /// Every command maps a failure to its exit code by the error's type.
+    func testErrorExitCodeFollowsItsType() {
+        XCTAssertEqual(BlewExitCode(for: BLEError.bluetoothUnavailable("off")).code, 3)
+        XCTAssertEqual(BlewExitCode(for: BLEError.deviceNotFound("x")).code, 2)
+        XCTAssertEqual(BlewExitCode(for: BLEError.timeout).code, 4)
+        XCTAssertEqual(BlewExitCode(for: BLEError.readFailed("x")).code, 5)
+        XCTAssertEqual(BlewExitCode(for: InvalidArgument("x")).code, 6)
+        XCTAssertEqual(BlewExitCode(for: BlewExitCode.interrupted).code, 130)
+        XCTAssertEqual(BlewExitCode(for: CocoaError(.fileWriteNoPermission)).code, 5)
+    }
+
+    func testFailRecordsTheMessageAndCode() {
+        var result = CommandResult()
+        result.fail(BLEError.unavailable(.poweredOff))
+        XCTAssertEqual(result.errors, ["Bluetooth unavailable: Bluetooth is powered off"])
+        XCTAssertEqual(result.exitCode, BlewExitCode.bluetoothUnavailable.code)
+    }
+
+    /// A wait for poweredOn fails at once on a state only the user changes.
+    func testPersistentlyUnavailableStates() {
+        for state in [CBManagerState.poweredOff, .unauthorized, .unsupported] {
+            XCTAssertEqual(BLEError.persistentlyUnavailable(state)?.exitCode, 3, "\(state.rawValue)")
+        }
+        for state in [CBManagerState.poweredOn, .unknown, .resetting] {
+            XCTAssertNil(BLEError.persistentlyUnavailable(state), "\(state.rawValue)")
+        }
+    }
+
+    /// A BLEError seen as any Error still gives its message, not the enum case.
+    func testBLEErrorDescribesItselfAsError() {
+        let error: Error = BLEError.bluetoothUnavailable("Bluetooth is powered off")
+        XCTAssertEqual(error.localizedDescription, "Bluetooth unavailable: Bluetooth is powered off")
     }
 
     func testOutputFormatFromRawValue() {

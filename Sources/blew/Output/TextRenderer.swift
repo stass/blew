@@ -288,7 +288,7 @@ final class TextRenderer: OutputRenderer {
         case .readRequest(let id, let uuid):
             Swift.print(esc("[\(ts)] read \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))"))
         case .writeRequest(let id, let uuid, let value):
-            let hex = DataFormatter.format(value, as: "hex")
+            let hex = DataFormatter.format(value, as: .hex)
             Swift.print(esc("[\(ts)] write \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id)) <- \(hex)"))
         case .subscribed(let id, let uuid):
             Swift.print(esc("[\(ts)] subscribe \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))"))

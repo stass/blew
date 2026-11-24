@@ -337,14 +337,9 @@ public final class BLEPeripheral: @unchecked Sendable {
         while true {
             let state: CBManagerState = pmQueue.sync { peripheralManager.state }
             if state == .poweredOn { return }
+            if let error = BLEError.persistentlyUnavailable(state) { throw error }
             if Date() > deadline {
                 throw BLEError.peripheralUnavailable("Timed out waiting for Bluetooth to power on")
-            }
-            switch state {
-            case .poweredOff, .unauthorized, .unsupported:
-                throw BLEError.unavailable(state)
-            default:
-                break
             }
             try await Task.sleep(nanoseconds: 200_000_000) // 200ms
         }

@@ -10,8 +10,8 @@ struct SubCommand: ParsableCommand {
 
     @OptionGroup var targeting: DeviceTargetingOptions
 
-    @Option(name: [.customShort("f"), .long], help: "Output format: hex, utf8, base64, uint8, uint16le, uint32le, float32le.")
-    var format: String = "hex"
+    @Option(name: [.customShort("f"), .long], help: "Value format.")
+    var format: ValueFormat = .hex
 
     @Option(name: [.customShort("d"), .long], help: "Stop after this many seconds.")
     var duration: Double?
@@ -25,9 +25,10 @@ struct SubCommand: ParsableCommand {
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
         var args = targeting.toArgs()
-        args += ["-f", format, char]
+        args += ["-f", format.rawValue]
         if let d = duration { args += ["-d", "\(d)"] }
         if let c = count { args += ["-c", "\(c)"] }
+        args += ["--", char]
         let result = router.runSub(args, emit: { router.renderer.render($0) })
         router.renderer.renderResult(result)
         if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }

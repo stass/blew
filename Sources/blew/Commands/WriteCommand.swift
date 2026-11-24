@@ -10,8 +10,8 @@ struct WriteCommand: ParsableCommand {
 
     @OptionGroup var targeting: DeviceTargetingOptions
 
-    @Option(name: [.customShort("f"), .long], help: "Data format: hex, utf8, base64, uint8, uint16le, uint32le, float32le.")
-    var format: String = "hex"
+    @Option(name: [.customShort("f"), .long], help: "Value format.")
+    var format: ValueFormat = .hex
 
     @Flag(name: [.customShort("r"), .customLong("with-response")], help: "Write with response.")
     var withResponse: Bool = false
@@ -28,9 +28,11 @@ struct WriteCommand: ParsableCommand {
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
         var args = targeting.toArgs()
-        args += ["-f", format, char, data]
+        args += ["-f", format.rawValue]
         if withResponse { args.append("-r") }
         if withoutResponse { args.append("-w") }
+        // `--` keeps a value that starts with `-` (`-- -1.5`) a value.
+        args += ["--", char, data]
         let result = router.runWrite(args)
         router.renderer.renderResult(result)
         if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }

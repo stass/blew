@@ -131,12 +131,12 @@ final class OutputEscapingTests: XCTestCase {
     }
 
     func testTextReadValueEscapesNewlineAndESC() {
-        let out = text(.readValue(ReadResult(char: "2A00", name: nil, value: "a\nb\u{1B}[2J", format: "utf8")))
+        let out = text(.readValue(ReadResult(char: "2A00", name: nil, value: "a\nb\u{1B}[2J", format: .utf8)))
         XCTAssertEqual(out, "a\\nb\\x1b[2J\n")
     }
 
     func testTextLeavesBackslashAlone() {
-        let out = text(.readValue(ReadResult(char: "2A00", name: nil, value: #"C:\dir\"#, format: "utf8")))
+        let out = text(.readValue(ReadResult(char: "2A00", name: nil, value: #"C:\dir\"#, format: .utf8)))
         XCTAssertEqual(out, "C:\\dir\\\n")
     }
 
@@ -175,8 +175,8 @@ final class OutputEscapingTests: XCTestCase {
     }
 
     func testInvalidUTF8ValueIsShownAsHex() {
-        let value = DataFormatter.format(Data([0x41, 0xFF, 0x1B]), as: "utf8")
-        let out = text(.readValue(ReadResult(char: "2A00", name: nil, value: value, format: "utf8")))
+        let value = DataFormatter.format(Data([0x41, 0xFF, 0x1B]), as: .utf8)
+        let out = text(.readValue(ReadResult(char: "2A00", name: nil, value: value, format: .utf8)))
         XCTAssertEqual(out, "41ff1b\n")
     }
 

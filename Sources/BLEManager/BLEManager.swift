@@ -49,11 +49,14 @@ public final class BLECentral: @unchecked Sendable {
         guard state == .poweredOn else { throw BLEError.unavailable(state) }
     }
 
+    /// Poll the state until poweredOn. A state that will not change by
+    /// itself fails at once; the wait is cancellable and has a deadline.
     private func waitForPoweredOn(timeout: TimeInterval) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
             let state = stateLock.withLock { cbState }
             if state == .poweredOn { return }
+            if let error = BLEError.persistentlyUnavailable(state) { throw error }
             if Date() > deadline {
                 throw BLEError.bluetoothUnavailable("Timed out waiting for Bluetooth to power on")
             }

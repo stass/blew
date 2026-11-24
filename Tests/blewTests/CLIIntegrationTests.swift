@@ -160,6 +160,48 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertNotEqual(result.exitCode, 0)
     }
 
+    /// A usage error exits 6, the documented code, not ArgumentParser's 64,
+    /// and still prints ArgumentParser's message and usage.
+    func testUsageErrorExitsWithInvalidArguments() throws {
+        guard blewAvailable() else { throw XCTSkip("blew binary not built") }
+        for args in [["--not-a-real-flag"], ["write", "fff1"], ["sub", "-c", "abc", "2a19"],
+                     ["read", "-f", "bogus", "2a19"]] {
+            let result = try runBlew(args)
+            XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code, "\(args): \(result.stderr)")
+            XCTAssertTrue(result.stderr.contains("Usage:"), "\(args): \(result.stderr)")
+        }
+    }
+
+    /// `exec` parses with the router: a bad option value is an error before
+    /// any connection is tried.
+    func testExecRejectsBadOptionValues() throws {
+        guard blewAvailable() else { throw XCTSkip("blew binary not built") }
+        let count = try runBlew(["exec", "sub -c abc 2a19"])
+        XCTAssertEqual(count.exitCode, BlewExitCode.invalidArguments.code)
+        XCTAssertTrue(count.stderr.contains("invalid count 'abc'"), count.stderr)
+        let format = try runBlew(["exec", "read -f bogus 2a19"])
+        XCTAssertEqual(format.exitCode, BlewExitCode.invalidArguments.code)
+        XCTAssertTrue(format.stderr.contains("unknown format 'bogus'"), format.stderr)
+    }
+
+    /// A `;` inside quotes is part of the command, as the tokenizer reads it.
+    func testExecKeepsQuotedSemicolon() throws {
+        guard blewAvailable() else { throw XCTSkip("blew binary not built") }
+        let result = try runBlew(["exec", "--dry-run", "write -f utf8 fff1 'a;b'; write fff1 \"c;d\"; help"])
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(result.stdout.split(separator: "\n"),
+                       ["[1] write -f utf8 fff1 'a;b'", "[2] write fff1 \"c;d\"", "[3] help"])
+    }
+
+    /// After `--`, a value that starts with `-` reaches the write, which then
+    /// fails only for want of a device.
+    func testWriteTakesNegativeValueAfterDoubleDash() throws {
+        guard blewAvailable() else { throw XCTSkip("blew binary not built") }
+        let result = try runBlew(["write", "-f", "float32le", "fff1", "--", "-1.5"])
+        XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code)
+        XCTAssertTrue(result.stderr.contains("not connected"), result.stderr)
+    }
+
     // MARK: - Subcommand help
 
     func testScanHelpExitsZero() throws {

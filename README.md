@@ -378,7 +378,7 @@ Reading a characteristic that is subscribed at the same time (`sub -b`) is ambig
 
 | Flag | Description |
 |------|-------------|
-| `-f, --format <fmt>` | Output format (see table below). Default: `hex`. |
+| `-f, --format <fmt>` | Output format (see table below; any other is an error, exit code 6). Default: `hex`. |
 
 **Formats:**
 
@@ -412,7 +412,7 @@ Writes data to a characteristic. Connects automatically if no connection is acti
 
 | Flag | Description |
 |------|-------------|
-| `-f, --format <fmt>` | Data format (same values as `read`). Default: `hex`. |
+| `-f, --format <fmt>` | Data format (same values as `read`; any other is an error, exit code 6). Default: `hex`. |
 | `-r, --with-response` | Force write-with-response. |
 | `-w, --without-response` | Force write-without-response. |
 
@@ -421,7 +421,10 @@ Writes data to a characteristic. Connects automatically if no connection is acti
 % blew write -n "Thingy" fff1 "deadbeef"           # Write hex bytes
 % blew write -n "Thingy" -f uint8 -r 2A06 1        # Write uint8 with response
 % blew write -n "Thingy" -f utf8 fff2 "hello"      # Write a UTF-8 string
+% blew write -n "Thingy" -f float32le fff1 -- -1.5 # A value that starts with -
 ```
+
+`--` ends the options: every argument after it is a value, even one that starts with `-`. On the command line a negative number needs it; in `exec` and the REPL a number such as `-1.5` is always a value, and `--` is needed only for other text that starts with `-`.
 
 ---
 
@@ -437,7 +440,7 @@ Subscribes to a characteristic and streams received values to stdout, one event 
 |------|-------------|
 | `-f, --format <fmt>` | Value format (same values as `read`). Default: `hex`. |
 | `-d, --duration <sec>` | Stop after this many seconds, whether or not notifications arrive (at most a year). |
-| `-c, --count <n>` | Stop after receiving this many notifications. |
+| `-c, --count <n>` | Stop after receiving this many notifications (a whole number, at least 1). |
 | `-b, --bg` | Run in background (REPL and `exec` mode only). Returns the prompt immediately; notifications are printed as they arrive. Use `sub stop` to cancel. |
 
 With `--out kv`, each line includes `ts=`, `char=`, and `value=` fields.
@@ -597,7 +600,7 @@ blew> quit
 
 ## Script execution (`exec`)
 
-The `exec` subcommand runs a semicolon-separated sequence of commands in a single process, sharing one connection lifecycle. Commands are parsed identically to the REPL. The first command that requires a connection triggers an automatic connect; subsequent commands reuse it.
+The `exec` subcommand runs a semicolon-separated sequence of commands in a single process, sharing one connection lifecycle. Commands are parsed identically to the REPL: an argument in single or double quotes may hold spaces and `;` (`write -f utf8 fff1 'a;b'` writes `a;b`); a quote runs to the next quote of the same kind, without escapes. A quote that is never closed is an error (exit code 6), and nothing in the script runs. An option that takes a value but has none, or is given twice, is an error too (exit code 6). The first command that requires a connection triggers an automatic connect; subsequent commands reuse it.
 
 ```sh
 % blew exec "connect -n Thingy; gatt tree; read -f uint8 2A19"
@@ -705,9 +708,11 @@ A characteristic whose decoded value has several fields (`gatt tree -r`, `gatt c
 | `3` | Bluetooth unavailable or permission denied |
 | `4` | Timeout |
 | `5` | Operation failed (connect / GATT / read / write / subscribe, or the REPL cannot read or write its terminal or standard input) |
-| `6` | Invalid arguments |
+| `6` | Invalid arguments: an unknown option or subcommand, a missing argument, or an option value blew cannot use (an unknown `-f` format, a `-c` that is not a whole number of at least 1, an invalid `-t`) |
 | `130` | Interrupted by Ctrl-C (SIGINT) |
 | `143` | Terminated by SIGTERM |
+
+`--help` and `--version` exit with code 0. A usage error exits with code 6: on the command line it prints the error and the command's usage to stderr, in `exec` and the REPL the error alone. The code follows the kind of failure, whatever the command: Bluetooth that is off, not permitted or not supported when a command starts gives 3, also from `scan` and from the scan that connects a command automatically, at once rather than after `-t`.
 
 Ctrl-C stops the running command: it stops scanning, subscribing or advertising, prints what it has (`scan -w` prints its final table, `periph` prints "Stopped advertising."), and blew exits with code 130. In the REPL, Ctrl-C stops the running command and returns to the prompt. SIGTERM ends blew in any mode with code 143. Before exiting on either signal, blew stops advertising, disconnects, saves the REPL history and gives the terminal back in its normal mode. When standard output is not a terminal, each line is written as soon as it is printed, so `blew -o kv sub ... >> log` delivers each record at once.
 
@@ -762,7 +767,7 @@ The GATT server answers a remote central the way ATT specifies. A read at an off
 ```
 
 `properties` may contain: `read`, `write`, `writeWithoutResponse`, `notify`, `indicate`.
-`format` accepts the same values as `--format` in `read`/`write`: `hex` (default), `utf8`, `uint8`, `uint16le`, `uint32le`, `float32le`, `base64`, `raw`.
+`format` accepts the same values as `--format` in `read`/`write`: `hex` (default), `utf8`, `uint8`, `uint16le`, `uint32le`, `float32le`, `base64`, `raw`. Any other `format` is an error (exit code 6), with or without a `value`.
 
 A UUID, in the config file, in `-S` and in `periph set`/`periph notify`, is 4 hex digits (`180F`), 8 hex digits (`0000180F`) or a 128-bit UUID written 8-4-4-4-12 (`6E400001-B5A3-F393-E0A9-E50E24DCCA9E`), in either case. Spellings of one UUID are interchangeable: a characteristic configured as `00002A19-0000-1000-8000-00805F9B34FB` is set with `periph set 2A19 ...`. Anything else, such as `0x180F` or `180G`, is an error naming the offending value (exit code 6):
 
@@ -833,7 +838,7 @@ Connects to a target device, discovers its full GATT tree, reads all readable ch
 |------|-------------|
 | `-n, --name` | Target device name filter. |
 | `-i, --id` | Target device identifier. |
-| `-o, --save <file>` | Save the cloned GATT structure to a JSON config file for later reuse. |
+| `-o, --save <file>` | Save the cloned GATT structure to a JSON config file for later reuse. The path is checked before blew connects: a directory, or a path whose directory is missing or read-only, fails with exit code 6. The file is replaced whole. If writing the file then fails, clone stops with exit code 5 and does not advertise. |
 
 **Clone scope:**
 - Cloned: advertised name, service UUIDs, full GATT structure, initial characteristic values (for readable characteristics).

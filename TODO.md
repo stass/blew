@@ -105,33 +105,37 @@ None open.
 
 ### Exit codes and README contract
 
-- [ ] **E1. ArgumentParser usage errors exit 64, not the documented 6.**
-  `Blew.swift:55-56`.
-- [ ] **E2. Scan and auto-connect map every error to 5.**
-  `CommandRouter.swift:217-219`, `:306-308`, `:389-391`. With Bluetooth off
-  they should exit 3. They also print the raw enum instead of
-  `localizedDescription`. A scan that Bluetooth turning off ends
-  (`BLEEventProcessor` finishes the scan stream; `scan -w`, `watch`) prints
-  its table and exits 0; it should exit 3. Make the scan stream an
-  `AsyncThrowingStream` finished with `bluetoothUnavailable`, as the
-  notification stream is, and iterate it with `for try await`.
-- [ ] **E4. A short global `-t` with Bluetooth off exits 4 instead of 3.**
-  `waitForPoweredOn(5s)` runs inside `waitInterruptible(globals.timeout)`.
-  `BLEManager.swift:61-71` also polls the full 5 s instead of failing fast;
-  `ensurePoweredOn` (`:43`) is unused.
-- [ ] **E7. Invalid option values are silently accepted.**
-  `CommandRouter.swift:886`; `Sources/blew/DataFormatter.swift:29-30,59-60`.
-  `-c abc` means unlimited. An unknown `-f` means hex. An unknown config
-  `format` means hex.
+- [ ] **E2. A scan that Bluetooth turning off ends exits 0.**
+  `BLEEventProcessor` finishes the scan stream without an error, so
+  `scan`, `scan -w` and the auto-connect scan (`CommandRouter.swift:273`,
+  `:336`, `:380`) end as if their time ran out: `scan -w` prints its table
+  and exits 0 instead of 3. Make the scan stream an `AsyncThrowingStream`
+  finished with `bluetoothUnavailable`, as the notification stream is, and
+  iterate it with `for try await`; the catch blocks already record the
+  error with `CommandResult.fail`. `ensurePoweredOn` (`BLEManager.swift:45`)
+  is unused; delete it.
 
 ### NUS bridge
 
-None open.
+- [ ] **N6. NUS keeps its own option and error rules.**
+  `CommandRouter+NUS.swift:144-148` maps errors to exit codes itself
+  (`(error as? BLEError)?.exitCode ?? 5`) instead of `BlewExitCode(for:)`,
+  so an `InvalidArgument` there exits 5, not 6. `:161` reads options with
+  `parseStringOption`, so `nus -s` without its value is taken as no `-s`;
+  use `optionValue`, which rejects a missing or repeated value.
 
 ### MCP
 
 - [ ] **M3. Deprecated `.text(_:)`.** `MCPServer.swift:250`, `:260`. Use
   `.text(text:annotations:_meta:)`. These are the only build warnings.
+- [ ] **M7. MCP command lines put values where options go.**
+  `MCPServer.swift:393-418`, `:452-458` (`buildReadArgs`, `buildWriteArgs`,
+  `buildSubArgs`, `buildPeriphSetArgs`) append positionals without `--`, so
+  `ble_write {format: utf8, data: "-abc"}` fails with "missing data to
+  write" (it fails safely, before connecting). The `format` enums at `:689`,
+  `:703`, `:717` are hand-written lists; build them from
+  `ValueFormat.allCases`. Building the calls from typed fields (C8) closes
+  both.
 
 ### Output
 
@@ -151,19 +155,12 @@ None open.
 
 ### Commands
 
-- [ ] **C1. `exec` splits scripts on `;` inside quotes.**
-  `CommandRouter.swift:25`.
-- [ ] **C2. `periph clone --save` reports success when the write fails.**
-  `CommandRouter.swift:1606-1613` (`try?`).
 - [ ] **C8. Option values can become `sub -b`.** `CommandRouter.swift`
   (`runSub`, `backgroundFlags`) tests every argument for `-b` and `--bg`,
-  option values included, so in the REPL `sub -n -b 2A19` starts a
-  background subscription. MCP calls are immune (`foregroundOnly`), but the
-  other MCP builders still pass free text through a command line; build them
-  from typed fields, as `ble_nus` does.
-- [ ] **C4. Values starting with `-` cannot be written.**
-  `CommandRouter.swift:799`, `:804`. `write -f float32le fff1 -1.5` fails,
-  even after `--`.
+  option values and arguments after `--` included, so in the REPL
+  `sub -n -b 2A19` starts a background subscription. MCP calls are immune
+  (`foregroundOnly`), but the other MCP builders still pass free text
+  through a command line; build them from typed fields, as `ble_nus` does.
 - [ ] **C5. An advertised name can capture `-i` and MCP `device_id`.**
   `CommandRouter.swift:1249` (`resolveDevice`), called for `-i` at `:1083`.
   Resolution tries an exact identifier, then a name substring, then an

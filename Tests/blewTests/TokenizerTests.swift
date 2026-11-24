@@ -7,105 +7,126 @@ final class TokenizerTests: XCTestCase {
         CommandRouter(globals: makeGlobals())
     }
 
+    // MARK: - Script splitting
+
+    /// `;` splits commands only outside quotes, by the tokenizer's quoting.
+    func testSplitScriptKeepsQuotedSemicolons() throws {
+        XCTAssertEqual(try router.splitScript(#"write fff1 'a;b'; write "c;d" "e'f";help;;"#),
+                       ["write fff1 'a;b'", #"write "c;d" "e'f""#, "help"])
+    }
+
+    /// An unclosed quote is an error, not the rest of the script as one value.
+    func testUnclosedQuoteIsAnError() throws {
+        XCTAssertThrowsError(try router.splitScript("write -f utf8 fff1 don't; read 2A19"))
+        XCTAssertThrowsError(try router.tokenize("write fff1 \"abc"))
+        let result = router.dispatch("write -f utf8 fff1 'abc")
+        XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code)
+        XCTAssertEqual(result.errors, ["unclosed ' quote"])
+        XCTAssertEqual(router.executeScript("write -f utf8 fff1 don't; read 2A19", dryRun: true),
+                       BlewExitCode.invalidArguments.code)
+        XCTAssertEqual(try router.tokenize(try router.splitScript("write -f utf8 fff1 'a;b'; help")[0]),
+                       ["write", "-f", "utf8", "fff1", "a;b"])
+    }
+
     // MARK: - Basic tokenization
 
-    func testEmptyStringReturnsEmptyArray() {
-        XCTAssertEqual(router.tokenize(""), [])
+    func testEmptyStringReturnsEmptyArray() throws {
+        XCTAssertEqual(try router.tokenize(""), [])
     }
 
-    func testWhitespaceOnlyReturnsEmpty() {
-        XCTAssertEqual(router.tokenize("   "), [])
-        XCTAssertEqual(router.tokenize("\t\t"), [])
+    func testWhitespaceOnlyReturnsEmpty() throws {
+        XCTAssertEqual(try router.tokenize("   "), [])
+        XCTAssertEqual(try router.tokenize("\t\t"), [])
     }
 
-    func testSingleToken() {
-        XCTAssertEqual(router.tokenize("help"), ["help"])
+    func testSingleToken() throws {
+        XCTAssertEqual(try router.tokenize("help"), ["help"])
     }
 
-    func testMultipleTokens() {
-        XCTAssertEqual(router.tokenize("read -f hex 2A19"), ["read", "-f", "hex", "2A19"])
+    func testMultipleTokens() throws {
+        XCTAssertEqual(try router.tokenize("read -f hex 2A19"), ["read", "-f", "hex", "2A19"])
     }
 
-    func testMultipleSpacesBetweenTokens() {
-        XCTAssertEqual(router.tokenize("connect   -n   Thingy"), ["connect", "-n", "Thingy"])
+    func testMultipleSpacesBetweenTokens() throws {
+        XCTAssertEqual(try router.tokenize("connect   -n   Thingy"), ["connect", "-n", "Thingy"])
     }
 
-    func testTabSeparation() {
-        XCTAssertEqual(router.tokenize("read\t-f\thex"), ["read", "-f", "hex"])
+    func testTabSeparation() throws {
+        XCTAssertEqual(try router.tokenize("read\t-f\thex"), ["read", "-f", "hex"])
     }
 
-    func testLeadingAndTrailingWhitespace() {
-        XCTAssertEqual(router.tokenize("  help  "), ["help"])
+    func testLeadingAndTrailingWhitespace() throws {
+        XCTAssertEqual(try router.tokenize("  help  "), ["help"])
     }
 
     // MARK: - Double-quoted strings
 
-    func testDoubleQuotedString() {
-        XCTAssertEqual(router.tokenize("connect -n \"My Device\""), ["connect", "-n", "My Device"])
+    func testDoubleQuotedString() throws {
+        XCTAssertEqual(try router.tokenize("connect -n \"My Device\""), ["connect", "-n", "My Device"])
     }
 
-    func testDoubleQuotedStringWithMultipleWords() {
-        XCTAssertEqual(router.tokenize("write fff1 \"hello world\""), ["write", "fff1", "hello world"])
+    func testDoubleQuotedStringWithMultipleWords() throws {
+        XCTAssertEqual(try router.tokenize("write fff1 \"hello world\""), ["write", "fff1", "hello world"])
     }
 
-    func testDoubleQuotedEmptyStringDropped() {
+    func testDoubleQuotedEmptyStringDropped() throws {
         // The tokenizer drops empty-string tokens from quoted strings
-        XCTAssertEqual(router.tokenize("periph adv -n \"\""), ["periph", "adv", "-n"])
+        XCTAssertEqual(try router.tokenize("periph adv -n \"\""), ["periph", "adv", "-n"])
     }
 
-    func testDoubleQuotedStringAdjacentToToken() {
+    func testDoubleQuotedStringAdjacentToToken() throws {
         // Quotes start immediately after another token separator
-        XCTAssertEqual(router.tokenize("-f \"uint8\""), ["-f", "uint8"])
+        XCTAssertEqual(try router.tokenize("-f \"uint8\""), ["-f", "uint8"])
     }
 
     // MARK: - Single-quoted strings
 
-    func testSingleQuotedString() {
-        XCTAssertEqual(router.tokenize("connect -n 'My Device'"), ["connect", "-n", "My Device"])
+    func testSingleQuotedString() throws {
+        XCTAssertEqual(try router.tokenize("connect -n 'My Device'"), ["connect", "-n", "My Device"])
     }
 
-    func testSingleQuotedStringWithMultipleWords() {
-        XCTAssertEqual(router.tokenize("exec 'gatt tree; read 2A19'"), ["exec", "gatt tree; read 2A19"])
+    func testSingleQuotedStringWithMultipleWords() throws {
+        XCTAssertEqual(try router.tokenize("exec 'gatt tree; read 2A19'"), ["exec", "gatt tree; read 2A19"])
     }
 
-    func testSingleQuotedEmptyStringDropped() {
+    func testSingleQuotedEmptyStringDropped() throws {
         // The tokenizer drops empty-string tokens from quoted strings
-        XCTAssertEqual(router.tokenize("-n ''"), ["-n"])
+        XCTAssertEqual(try router.tokenize("-n ''"), ["-n"])
     }
 
     // MARK: - Mixed quotes
 
-    func testMixedDoubleAndSingleQuotes() {
+    func testMixedDoubleAndSingleQuotes() throws {
         // Double-quoted token, then single-quoted token
-        let tokens = router.tokenize("write -f \"uint8\" fff1 'hello'")
+        let tokens = try router.tokenize("write -f \"uint8\" fff1 'hello'")
         XCTAssertEqual(tokens, ["write", "-f", "uint8", "fff1", "hello"])
     }
 
-    func testSingleQuoteInsideDoubleQuotedString() {
+    func testSingleQuoteInsideDoubleQuotedString() throws {
         // Single quote is NOT special inside double-quoted string
-        XCTAssertEqual(router.tokenize("connect -n \"O'Brien\""), ["connect", "-n", "O'Brien"])
+        XCTAssertEqual(try router.tokenize("connect -n \"O'Brien\""), ["connect", "-n", "O'Brien"])
     }
 
-    func testDoubleQuoteInsideSingleQuotedString() {
+    func testDoubleQuoteInsideSingleQuotedString() throws {
         // Double quote is NOT special inside single-quoted string
-        XCTAssertEqual(router.tokenize("write fff1 'say \"hi\"'"), ["write", "fff1", "say \"hi\""])
+        XCTAssertEqual(try router.tokenize("write fff1 'say \"hi\"'"), ["write", "fff1", "say \"hi\""])
     }
 
     // MARK: - UUID-like tokens
 
-    func testUUIDToken() {
+    func testUUIDToken() throws {
         let uuid = "F3C2A1B0-1234-5678-ABCD-000000000001"
-        XCTAssertEqual(router.tokenize("connect \(uuid)"), ["connect", uuid])
+        XCTAssertEqual(try router.tokenize("connect \(uuid)"), ["connect", uuid])
     }
 
     // MARK: - Flag tokens
 
-    func testFlagTokens() {
-        XCTAssertEqual(router.tokenize("scan -w -R -65"), ["scan", "-w", "-R", "-65"])
+    func testFlagTokens() throws {
+        XCTAssertEqual(try router.tokenize("scan -w -R -65"), ["scan", "-w", "-R", "-65"])
     }
 
-    func testLongFlagTokens() {
-        XCTAssertEqual(router.tokenize("scan --watch --rssi-min -65"), ["scan", "--watch", "--rssi-min", "-65"])
+    func testLongFlagTokens() throws {
+        XCTAssertEqual(try router.tokenize("scan --watch --rssi-min -65"), ["scan", "--watch", "--rssi-min", "-65"])
     }
 }
 

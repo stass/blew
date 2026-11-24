@@ -80,10 +80,15 @@ struct PeripheralConfig: Codable {
         var result: [BLEUUID: Data] = [:]
         for svc in services {
             for char in svc.characteristics {
+                let fmt: ValueFormat
+                do {
+                    fmt = try ValueFormat(parsing: char.format ?? "hex")
+                } catch {
+                    throw ConfigError.invalidConfig("characteristic \(char.uuid.string): \(error)")
+                }
                 guard let valueStr = char.value else { continue }
-                let fmt = char.format ?? "hex"
                 guard let data = DataFormatter.parse(valueStr, as: fmt) else {
-                    throw ConfigError.invalidValue(uuid: char.uuid.string, value: valueStr, format: fmt)
+                    throw ConfigError.invalidValue(uuid: char.uuid.string, value: valueStr, format: fmt.rawValue)
                 }
                 result[char.uuid] = data
             }

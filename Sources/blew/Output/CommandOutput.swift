@@ -110,7 +110,7 @@ struct ReadResult: Codable {
     let char: String
     let name: String?
     let value: String
-    let format: String
+    let format: ValueFormat
 }
 
 struct NotificationValue: Codable {

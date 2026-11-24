@@ -244,6 +244,93 @@ func testOptionValuesAreNeverReadAsOptions() {
         XCTAssertTrue(expanded.contains("-d"))
         XCTAssertFalse(expanded.contains("-r"))
     }
+
+    // MARK: - `--` and negative numbers
+
+    func testNegativeNumberIsPositional() {
+        XCTAssertEqual(router.positionalArgs(["-f", "float32le", "fff1", "-1.5"], optionsWithValue: ["-f"]),
+                       ["fff1", "-1.5"])
+        XCTAssertEqual(router.expandArgs(["-12"]), ["-12"])
+        XCTAssertTrue(CommandRouter.scanOptions(["fff1", "-1.5"], optionsWithValue: []).isEmpty)
+    }
+
+    func testDoubleDashEndsOptions() {
+        let args = ["-r", "--", "fff1", "-w", "-ab"]
+        XCTAssertEqual(router.positionalArgs(args, optionsWithValue: []), ["fff1", "-w", "-ab"])
+        XCTAssertEqual(CommandRouter.scanOptions(args, optionsWithValue: []).map(\.name), ["-r"])
+        XCTAssertEqual(router.expandArgs(["-dr", "--", "-ab"]), ["-d", "-r", "--", "-ab"])
+        XCTAssertFalse(router.hasFlag(args, short: "-w", long: "--without-response", optionsWithValue: []))
+    }
+
+    /// The value reaches the write; it fails only for want of a device.
+    func testWriteTakesNegativeValue() {
+        for args in [["-f", "float32le", "fff1", "-1.5"], ["-f", "float32le", "--", "fff1", "-1.5"]] {
+            let result = router.runWrite(args)
+            XCTAssertFalse(result.errors.contains { $0.contains("missing data") }, "\(args): \(result.errors)")
+            XCTAssertTrue(result.errors.contains { $0.contains("not connected") }, "\(args): \(result.errors)")
+        }
+    }
+
+    // MARK: - Option values are checked before connecting
+
+    func testUnknownFormatIsRejected() {
+        let results = [
+            router.runRead(["-f", "bogus", "2a19"]),
+            router.runWrite(["-f", "bogus", "fff1", "00"]),
+            router.runSub(["-f", "bogus", "2a19"]),
+            router.runPeriphSet(["-f", "bogus", "fff1", "00"]),
+        ]
+        for result in results {
+            XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code)
+            XCTAssertTrue(result.errors.contains { $0.contains("unknown format 'bogus'") }, "\(result.errors)")
+        }
+    }
+
+    func testInvalidCountIsRejected() {
+        for count in ["abc", "0", "-2"] {
+            let result = router.runSub(["-c", count, "2a19"])
+            XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code)
+            XCTAssertTrue(result.errors.contains { $0.contains("invalid count '\(count)'") }, "\(result.errors)")
+        }
+    }
+
+    /// An option without its value, or given twice, is an error before any
+    /// connection, not an absent option (`periph clone -n X -o` must not
+    /// clone without saving).
+    func testOptionWithoutValueIsAnError() {
+        let results = [
+            router.runPeriphClone(["-n", "X", "-o"]),
+            router.runRead(["2a19", "-f"]),
+            router.runSub(["2a19", "-c"]),
+            router.runSub(["2a19", "-d"]),
+            router.runPeriphAdv(["-n"]),
+        ]
+        for result in results {
+            XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code)
+            XCTAssertTrue(result.errors.contains { $0.hasSuffix("needs a value") }, "\(result.errors)")
+        }
+        let twice = router.runSub(["2a19", "-c", "5", "-c", "abc"])
+        XCTAssertEqual(twice.exitCode, BlewExitCode.invalidArguments.code)
+        XCTAssertEqual(twice.errors, ["--count is given more than once"])
+    }
+
+    func testSaveReportsAFailedWrite() throws {
+        let config = PeripheralConfig(name: "x", services: [])
+        XCTAssertThrowsError(try CommandRouter.save(config, to: "/nonexistent-blew-dir/clone.json"))
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("blew-save-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertNil(CommandRouter.unwritableReason(url.path))
+        try CommandRouter.save(config, to: url.path)
+        XCTAssertEqual(try PeripheralConfig.load(from: url.path).name, "x")
+        XCTAssertEqual(CommandRouter.unwritableReason(FileManager.default.temporaryDirectory.path), "it is a directory")
+    }
+
+    /// An unusable `--save` path fails before clone connects to anything.
+    func testCloneChecksSavePathFirst() {
+        let result = router.runPeriphClone(["--save", "/nonexistent-blew-dir/clone.json"])
+        XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code)
+        XCTAssertTrue(result.errors.contains { $0.contains("cannot save to") }, "\(result.errors)")
+    }
 }
 
 // MARK: - Helpers

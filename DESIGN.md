@@ -239,7 +239,7 @@ WriteType          — withResponse | withoutResponse | auto
 
 ### 3.8 BLEError
 
-A `Sendable` enum that maps each failure kind to both a human-readable description and an exit code integer. This makes error-to-exit-code mapping explicit and centralised, rather than scattered across command implementations.
+A `Sendable` enum that maps each failure kind to both a human-readable description (it is a `LocalizedError`, so `localizedDescription` gives the message also when it is seen as any `Error`) and an exit code integer (`exitCode`). `BLEError.unavailable(_:)` names a CoreBluetooth state that is not poweredOn; `persistentlyUnavailable(_:)` returns that error only for the states waiting does not end (powered off, unauthorized, unsupported), so both `waitForPoweredOn` loops fail at once on them and wait out only unknown and resetting.
 
 Central errors: `bluetoothUnavailable`, `notConnected`, `deviceNotFound`, `connectionFailed`, `timeout`, `serviceNotFound`, `characteristicNotFound`, `readFailed`, `writeFailed`, `subscribeFailed`, `operationFailed`.
 
@@ -408,10 +408,10 @@ The central command dispatcher. It is the shared implementation used by all thre
 
 **`dispatch(_:)`** — tokenizes a single command-line string (with basic single/double-quote handling) and routes to the appropriate `run*()` method. Returns a `CommandResult`. After each `run*()` call, `dispatch()` renders the result via its `renderer` (which writes output to stdout/stderr). This means REPL callers get automatic rendering, while CLI subcommands render explicitly.
 
-**`executeScript(_:keepGoing:dryRun:)`** — splits the script string on `;`, strips whitespace and empty segments, calls `dispatch` on each. Returns `Int32` exit code. With `dryRun: true`, prints numbered steps instead. With `keepGoing: true`, records first error but continues.
+**`executeScript(_:keepGoing:dryRun:)`** — splits the script string on `;` outside quotes (`splitScript`, by the quoting rule `tokenize` uses: `CommandRouter.quoteCharacters`, a quote runs to the next of the same character), strips whitespace and empty segments, calls `dispatch` on each. Returns `Int32` exit code. With `dryRun: true`, prints numbered steps instead. With `keepGoing: true`, records first error but continues.
 
 **`run*()` methods** — each is a synchronous function that returns a `CommandResult` containing structured output. The method:
-1. Parses its args from the token array via private helpers: `parseStringOption`, `parseIntOption`, `parseDoubleOption`, `parseAllStringOptions`
+1. Parses its args from the token array via helpers: `parseStringOption`, `parseIntOption`, `parseDoubleOption`, `parseAllStringOptions`, `valueFormat`, `notificationCount`. Every option value is checked here, before auto-connect, and a bad one is an invalid-arguments result. The option walks (`scanOptions`, `positionalArgs`, `expandArgs`) share one rule: `--` ends the options, and a token that is a number (`-1.5`) is a value, never an option (`isOption`). A failure of the operation is recorded with `CommandResult.fail(_:)`, which takes the message from `localizedDescription` and the exit code from `BlewExitCode(for:)`.
 2. Builds an async operation closure calling the appropriate `BLECentral.shared` async method, which appends structured `CommandOutput` items to the result (instead of printing directly)
 3. Hands the operation to `waitInterruptible`, which starts it in a `Task` and blocks on a `DispatchSemaphore` until it finishes, is stopped or times out. A stop already requested when `waitInterruptible` is called keeps the operation from starting, so no operation starts once a stop has been seen. An operation that finished before the poll saw the stop keeps its result (`.completed`), so a write known to have completed is not reported as failed. A stop seen while the operation is still running cancels it and gives `.interrupted`, even if the device already acted on it. The stop stays set until the command's outermost span closes: `main` opens one span around every one-shot command and `exec` script, and the REPL and the MCP server open one per command or tool call, so the next wait of the same command does not start its operation.
 4. Returns the `CommandResult`
@@ -499,7 +499,7 @@ The `ScanWatchDisplay` still uses `OutputFormatter.formatTable` directly to comp
 
 ### 4.7 DataFormatter
 
-A static enum with `format(_:as:)` and `parse(_:as:)` methods covering: `hex`, `utf8`, `base64`, `uint8`, `uint16le`, `uint32le`, `float32le`, `raw`. Shared by `read`, `write`, and `sub`.
+A static enum with `format(_:as:)` and `parse(_:as:)` methods taking a `ValueFormat`: `hex`, `utf8`, `base64`, `uint8`, `uint16le`, `uint32le`, `float32le`, `raw`. Shared by `read`, `write`, `sub`, `periph set|notify` and the peripheral config. `ValueFormat(parsing:)` is the one place a format name is read (any letter case); an unknown name throws, so no caller can fall back to hex. The ArgumentParser subcommands take `-f` as a `ValueFormat` (`ExpressibleByArgument`), and the REPL completes its names from `allCases`.
 
 The `hex` and `raw` formats both produce hex output but differ: `hex` is a compact lowercase string (`deadbeef`); `raw` is space-separated bytes (`de ad be ef`). Both `raw` and `hex` inputs strip spaces before parsing.
 
@@ -606,7 +606,7 @@ Custom vendor UUIDs that do not follow the Bluetooth Base pattern return `nil`.
 
 ### 4.11 ExitCodes
 
-`BlewExitCode` is a thin `Error` wrapper around `Int32`. It implements `CustomNSError` so ArgumentParser can extract and propagate the exit code correctly.
+`BlewExitCode` is a thin `Error` wrapper around `Int32`. It implements `CustomNSError` so ArgumentParser can extract and propagate the exit code correctly. `BlewExitCode(for:)` is the one mapping from an error to its code: a `BlewExitCode` as it is, a `BLEError` by its `exitCode`, an `InvalidArgument` 6, anything else 5. `Blew.main` exits quietly with a thrown `BlewExitCode`; for any other error `Blew.processExitCode(for:)` gives 0 for `--help` and `--version`, 6 for ArgumentParser's usage and validation errors (which ArgumentParser itself would exit with 64), and `BlewExitCode(for:)` otherwise, after printing ArgumentParser's message.
 
 ```
 0   success

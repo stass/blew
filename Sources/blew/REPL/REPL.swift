@@ -124,7 +124,7 @@ final class REPL {
         let gattSubs = ["svcs", "tree", "chars", "desc", "info"]
         let periphSubs = ["adv", "clone", "stop", "set", "notify", "status"]
         let subSubs = ["stop", "status"]
-        let formats = ["hex", "utf8", "base64", "uint8", "uint16le", "uint32le", "float32le", "raw"]
+        let formats = ValueFormat.allCases.map(\.rawValue)
 
         ln.setCompletionCallback { [weak self] buffer in
             guard let self else { return [] }
