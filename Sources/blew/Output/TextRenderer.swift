@@ -37,7 +37,7 @@ final class TextRenderer: OutputRenderer {
         case .writeSuccess:
             break
         case .notification(let nv):
-            write(TextLine(nv.value))
+            write(TextLine(Self.notificationText(nv)))
         case .notificationsDropped(let drops):
             // stderr, so stdout carries only the values.
             StandardErrorLog.write("sub ", drops.text)
@@ -295,7 +295,7 @@ final class TextRenderer: OutputRenderer {
         case .readRequest(let id, let uuid):
             write(TextLine("[\(ts)] read \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))"))
         case .writeRequest(let id, let uuid, let value):
-            let hex = DataFormatter.format(value, as: .hex)
+            let hex = DataFormatter.hex(value)
             write(TextLine("[\(ts)] write \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id)) <- \(hex)"))
         case .subscribed(let id, let uuid):
             write(TextLine("[\(ts)] subscribe \(BLENames.displayUUID(uuid, category: .characteristic)) by \(shortId(id))"))
@@ -341,7 +341,19 @@ final class TextRenderer: OutputRenderer {
     /// The cell of a listed value that has none (`ListedValue.failed`):
     /// `(error: <why>)`, so it never reads as a value.
     private func valueErrorMarker(_ message: String) -> TextLine {
-        TextLine("(error: \(message))")
+        TextLine(Self.errorMarker(message))
+    }
+
+    /// The text that stands for a value that has none: `(error: <why>)`.
+    static func errorMarker(_ message: String) -> String {
+        "(error: \(message))"
+    }
+
+    /// A notification's line, in the foreground and in the background: its
+    /// value, or the marker for the error in its place.
+    static func notificationText(_ nv: NotificationValue) -> String {
+        if let error = nv.valueError { return errorMarker(error) }
+        return nv.value ?? ""
     }
 
     private func shortId(_ uuidString: String) -> String {

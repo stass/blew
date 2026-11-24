@@ -441,6 +441,8 @@ Reading a characteristic that is subscribed at the same time (`sub -b`) is ambig
 
 A characteristic whose properties do not include `read` is not read: `read` fails with exit code 5 and names its properties (shown by `char`).
 
+A value is shown in a format only when its bytes are exactly one value of it: `uint8` takes 1 byte, `uint16le` 2, `uint32le` and `float32le` 4, and `utf8` valid UTF-8; `hex`, `base64` and `raw` take any bytes. A value that does not fit is not shown: `read` prints why (`uint16le takes 2 bytes, got 5`, `not valid UTF-8`) and fails with exit code 5.
+
 | Flag | Description |
 |------|-------------|
 | `-f, --format <fmt>` | Output format (see table below; any other is an error, exit code 6). Default: `hex`. |
@@ -514,7 +516,9 @@ Several subscriptions to one characteristic (`sub -b X` and a foreground `sub X`
 | `-c, --count <n>` | Stop after receiving this many notifications (a whole number, at least 1). |
 | `-b, --bg` | Run in background (REPL and `exec` mode only; the `blew sub` command line does not take it). Returns the prompt immediately; notifications are printed as they arrive. Use `sub stop` to cancel. |
 
-With `--out kv`, each line includes `ts=`, `char=`, and `value=` fields.
+With `--out kv`, each line includes `ts=`, `char=`, and `value=` fields (`error=` in place of `value=` for a notification that does not fit the format, below).
+
+A notification whose bytes do not fit the `-f` format (the same rule as `read`) is shown as an error in its place, `(error: uint8 takes 1 byte, got 2)` (`error=` in place of `value=` with `--out kv`, `valueError` in place of `value` in an MCP `ble_subscribe` result), and the subscription goes on. When it ends, `sub` prints how many did not fit (`2 notifications of 2A19 did not fit uint8`) and exits with code 5, also when it ends on `Ctrl-C`, so a run that showed errors in place of values does not end as a success. A background subscription shows the error line; it has no exit code.
 
 Notifications have no flow control, so a device can send them faster than `sub` writes them out (a terminal paused with Ctrl-S, output piped to a slow reader). Each subscription keeps at most 1024 values waiting; when another arrives, the oldest waiting one is dropped. Drops are reported, not hidden: once when `sub` sees the first of them, and with the total when it ends, as `sub 1024 notifications of <char> dropped: they came faster than they were written out` on stderr (`sub=dropped char=<char> total=<n>` on stdout with `--out kv`; the count is the total so far). A background subscription reports them on its own line, and an MCP `ble_subscribe` result has a `dropped` field.
 
@@ -782,7 +786,7 @@ A characteristic whose decoded value has several fields (`gatt tree -r`, `gatt c
 | `2` | Not found / no matching device |
 | `3` | Bluetooth unavailable or permission denied |
 | `4` | Timeout |
-| `5` | Operation failed (connect / GATT / read / write / subscribe, or the REPL cannot read or write its terminal or standard input) |
+| `5` | Operation failed (connect / GATT / read / write / subscribe, a value read or notified that does not fit the `-f` format, or the REPL cannot read or write its terminal or standard input) |
 | `6` | Invalid arguments: an unknown option or subcommand, a missing argument, an extra argument (`write fff1 01 02`, `scan Thingy`; the error shows the command's usage), or an option value blew cannot use (an unknown `-f` format, a `-c` that is not a whole number of at least 1, an invalid `-t`) |
 | `130` | Interrupted by Ctrl-C (SIGINT) |
 | `143` | Terminated by SIGTERM |
@@ -933,7 +937,7 @@ In REPL and `exec` mode, `periph adv` and `periph clone` run in two phases. The 
 | Command | Description |
 |---------|-------------|
 | `periph stop` | Stop advertising and cancel the background event task. |
-| `periph set [-f <fmt>] <char> <val>` | Update a characteristic's stored value. |
+| `periph set [-f <fmt>] <char> <val>` | Update a characteristic's stored value. A `<val>` that is not one value of the format (`-f uint8 300`, `-f hex abc`) is an error (exit 6) and changes nothing; the same holds for `periph notify`. |
 | `periph notify [-f <fmt>] <char> <val>` | Update value and push a notification to all subscribers. When the Bluetooth transmit queue is full, the notification waits and is sent in order once there is room; at most 64 wait, and a notification past that is an error (exit 5) that leaves the value unchanged. With no central subscribed, only the value is updated, and the message says so. |
 | `periph status` | Show advertising state, service/characteristic counts, subscriber count. |
 

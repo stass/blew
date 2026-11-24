@@ -49,9 +49,11 @@ enum ValueFormat: String, CaseIterable, Codable, Sendable {
 }
 
 /// Why a value cannot be shown in a format: its bytes are not a value of
-/// that format (5 bytes as `uint16le`, invalid UTF-8 as `utf8`).
-struct ValueFormatMismatch: Error, Equatable {
+/// that format (5 bytes as `uint16le`, invalid UTF-8 as `utf8`). A command
+/// that fails with it exits with code 5 (operation failed).
+struct ValueFormatMismatch: Error, LocalizedError, Equatable {
     let message: String
+    var errorDescription: String? { message }
 }
 
 extension ValueFormat: ExpressibleByArgument {
@@ -59,52 +61,47 @@ extension ValueFormat: ExpressibleByArgument {
 }
 
 enum DataFormatter {
-    static func format(_ data: Data, as fmt: ValueFormat) -> String {
+    /// `data` in `fmt` when its bytes are exactly one value of that format:
+    /// `uint8` takes 1 byte, `uint16le` 2, `uint32le` and `float32le` 4,
+    /// `utf8` valid UTF-8; `hex`, `base64` and `raw` take any bytes. Throws
+    /// otherwise, so no command shows a number read from part of the bytes,
+    /// a placeholder, or hex in place of text as the value.
+    static func format(_ data: Data, as fmt: ValueFormat) throws(ValueFormatMismatch) -> String {
+        if let width = fmt.byteWidth, data.count != width {
+            let unit = width == 1 ? "byte" : "bytes"
+            throw ValueFormatMismatch(message: "\(fmt.rawValue) takes \(width) \(unit), got \(data.count)")
+        }
         switch fmt {
         case .hex:
-            return data.map { String(format: "%02x", $0) }.joined()
+            return hex(data)
         case .utf8:
-            return String(data: data, encoding: .utf8) ?? format(data, as: .hex)
+            // Decoding repairs invalid UTF-8, so a text whose UTF-8 is not
+            // the bytes was not valid. (`String(data:encoding:)` would also
+            // drop a leading byte-order mark.)
+            let text = String(decoding: data, as: UTF8.self)
+            guard text.utf8.elementsEqual(data) else {
+                throw ValueFormatMismatch(message: "not valid UTF-8")
+            }
+            return text
         case .base64:
             return data.base64EncodedString()
         case .uint8:
-            guard data.count >= 1 else { return "(empty)" }
             return "\(data[data.startIndex])"
         case .uint16le:
-            guard data.count >= ValueFormat.uint16le.byteWidth! else { return "(insufficient data)" }
-            let value = data.withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) }
-            return "\(value)"
+            return "\(data.withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) })"
         case .uint32le:
-            guard data.count >= ValueFormat.uint32le.byteWidth! else { return "(insufficient data)" }
-            let value = data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
-            return "\(value)"
+            return "\(data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) })"
         case .float32le:
-            guard data.count >= ValueFormat.float32le.byteWidth! else { return "(insufficient data)" }
-            let value = data.withUnsafeBytes { $0.loadUnaligned(as: Float32.self) }
-            return "\(value)"
+            return "\(data.withUnsafeBytes { $0.loadUnaligned(as: Float32.self) })"
         case .raw:
             return data.map { String(format: "%02x", $0) }.joined(separator: " ")
         }
     }
 
-    /// `data` in `fmt` when its bytes are exactly one value of that format:
-    /// `uint8` takes 1 byte, `uint16le` 2, `uint32le` and `float32le` 4,
-    /// `utf8` valid UTF-8; `hex`, `base64` and `raw` take any bytes. Throws
-    /// otherwise, so a listing shows the mismatch, never a number read from
-    /// part of the bytes or hex in place of text.
-    static func formatExactly(_ data: Data, as fmt: ValueFormat) throws(ValueFormatMismatch) -> String {
-        if fmt == .utf8 {
-            guard let text = String(data: data, encoding: .utf8) else {
-                throw ValueFormatMismatch(message: "not valid UTF-8")
-            }
-            return text
-        }
-        guard let width = fmt.byteWidth else { return format(data, as: fmt) }
-        guard data.count == width else {
-            let unit = width == 1 ? "byte" : "bytes"
-            throw ValueFormatMismatch(message: "\(fmt.rawValue) takes \(width) \(unit), got \(data.count)")
-        }
-        return format(data, as: fmt)
+    /// `data` as lowercase hex, two digits a byte: the format that fits any
+    /// bytes, so it cannot fail.
+    static func hex(_ data: Data) -> String {
+        data.map { String(format: "%02x", $0) }.joined()
     }
 
     static func parse(_ string: String, as fmt: ValueFormat) -> Data? {

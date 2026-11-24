@@ -833,9 +833,8 @@ final class CommandRouter {
         let operation: () async -> Void = { [self] in
             do {
                 let data = try await manager.readCharacteristic(charUUID)
-                let formatted = DataFormatter.format(data, as: fmt)
                 let name = BLENames.name(for: charUUID, category: .characteristic)
-                result.output.append(.readValue(ReadResult(char: charUUID, name: name, value: formatted, format: fmt)))
+                result.output.append(.readValue(try Self.readResult(data, char: charUUID, name: name, format: fmt)))
             } catch is CancellationError {
                 // handled by waitInterruptible
             } catch {
@@ -851,6 +850,15 @@ final class CommandRouter {
             result.exitCode = BlewExitCode.timeout.code
         }
         return result
+    }
+
+    /// What `read` shows for `data` read from `char`: the value in `format`.
+    /// Throws when the bytes are not one value of `format` (5 bytes as
+    /// `uint16le`), so the read fails with exit code 5 and its value is
+    /// never shown.
+    static func readResult(_ data: Data, char: String, name: String?, format: ValueFormat)
+        throws(ValueFormatMismatch) -> ReadResult {
+        ReadResult(char: char, name: name, value: try DataFormatter.format(data, as: format), format: format)
     }
 
     func runWrite(_ args: [String]) -> CommandResult {
@@ -979,7 +987,8 @@ final class CommandRouter {
                     try await Self.forEachNotification(stream, maxCount: maxCount, duration: duration, dropped: { total in
                         capturedRenderer.renderLive("sub \(NotificationDrops(char: charUUID, total: total).text)")
                     }) { data in
-                        capturedRenderer.renderLive("[\(charUUID)] \(DataFormatter.format(data, as: fmt))")
+                        let nv = NotificationValue(timestamp: "", char: charUUID, name: nil, formatting: data, as: fmt)
+                        capturedRenderer.renderLive("[\(charUUID)] \(TextRenderer.notificationText(nv))")
                     }
                 } catch is CancellationError {
                     // stopped
@@ -994,6 +1003,7 @@ final class CommandRouter {
 
         // Foreground subscription: streaming command, emits each notification to caller
 
+        let mismatches = Locked(0)
         let operation: () async -> Void = {
             do {
                 let stream = try await Self.withDeadline(setupTimeout) {
@@ -1003,9 +1013,8 @@ final class CommandRouter {
                 try await Self.forEachNotification(stream, maxCount: maxCount, duration: duration, dropped: { total in
                     emit(.notificationsDropped(NotificationDrops(char: charUUID, total: total)))
                 }) { data in
-                    let ts = ISO8601DateFormatter.shared.string(from: Date())
-                    emit(.notification(NotificationValue(timestamp: ts, char: charUUID, name: charName,
-                                                         value: DataFormatter.format(data, as: fmt))))
+                    emit(.notification(Self.notificationValue(data, char: charUUID, name: charName,
+                                                              format: fmt, mismatches: mismatches)))
                 }
             } catch is CancellationError {
                 // interrupted
@@ -1014,10 +1023,42 @@ final class CommandRouter {
             }
         }
 
-        if case .interrupted = waitInterruptible(operation) {
+        let outcome = waitInterruptible(operation)
+        Self.finishSubscription(outcome, mismatches: mismatches.value, char: charUUID, format: fmt, in: &result)
+        return result
+    }
+
+    /// The notification `sub` shows for `data` from `char`: its value in
+    /// `format`, or, when the bytes are not one value of `format`, an error
+    /// in its place, counted in `mismatches`. Either way the subscription
+    /// goes on.
+    static func notificationValue(_ data: Data, char: String, name: String?, format: ValueFormat,
+                                  mismatches: Locked<Int>) -> NotificationValue {
+        let nv = NotificationValue(timestamp: ISO8601DateFormatter.shared.string(from: Date()),
+                                   char: char, name: name, formatting: data, as: format)
+        if nv.valueError != nil { mismatches.withValue { $0 += 1 } }
+        return nv
+    }
+
+    /// The end of a foreground subscription to `char` that ended with
+    /// `outcome` after `mismatches` notifications did not fit `format`.
+    /// Each of those was shown as an error when it arrived; here they add an
+    /// error naming how many and exit code 5, so the command does not end as
+    /// a success. A failure keeps its own code (a lost link, values that did
+    /// not fit, also when Ctrl-C ended the subscription); a Ctrl-C with no
+    /// failure gives 130.
+    static func finishSubscription(_ outcome: CommandOutcome, mismatches: Int, char: String,
+                                   format: ValueFormat, in result: inout CommandResult) {
+        if mismatches > 0 {
+            let noun = mismatches == 1 ? "notification" : "notifications"
+            result.errors.append("\(mismatches) \(noun) of \(char) did not fit \(format.rawValue)")
+            if result.exitCode == BlewExitCode.success.code {
+                result.exitCode = BlewExitCode.operationFailed.code
+            }
+        }
+        if case .interrupted = outcome, result.exitCode == BlewExitCode.success.code {
             result.exitCode = BlewExitCode.interrupted.code
         }
-        return result
     }
 
     func runSubStop(_ args: [String]) -> CommandResult {
@@ -1431,12 +1472,12 @@ extension CommandRouter {
     static func listedValue(_ data: Data, uuid: String, format: ValueFormat?) -> ListedValue {
         if let format {
             do {
-                return .value(try DataFormatter.formatExactly(data, as: format))
+                return .value(try DataFormatter.format(data, as: format))
             } catch {
                 return .failed(error.message)
             }
         }
-        let decoded = GATTDecoder.decode(data, uuid: uuid) ?? DataFormatter.format(data, as: .hex)
+        let decoded = GATTDecoder.decode(data, uuid: uuid) ?? DataFormatter.hex(data)
         let parts = decoded.components(separatedBy: " | ")
         return parts.count > 1 ? .fields(parts.map { splitFieldPart($0) }) : .value(decoded)
     }
@@ -1866,8 +1907,10 @@ extension CommandRouter {
         }
 
         do {
+            // The bytes were parsed from `fmt`, so they are one value of it.
+            let shown = try DataFormatter.format(data, as: fmt)
             try BLEPeripheral.shared.updateValue(data, forCharacteristic: charUUID)
-            result.infos.append("set \(BLENames.displayUUID(charUUID.string, category: .characteristic)) = \(DataFormatter.format(data, as: fmt))")
+            result.infos.append("set \(BLENames.displayUUID(charUUID.string, category: .characteristic)) = \(shown)")
         } catch {
             result.fail(error)
         }

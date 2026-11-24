@@ -3,61 +3,65 @@ import XCTest
 
 final class DataFormatterTests: XCTestCase {
 
+    private func assertMismatch(_ data: Data, _ format: ValueFormat, _ message: String,
+                                file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertThrowsError(try DataFormatter.format(data, as: format), file: file, line: line) { error in
+            XCTAssertEqual((error as? ValueFormatMismatch)?.message, message, file: file, line: line)
+        }
+    }
+
     // MARK: - format: hex
 
     func testFormatHex() {
         let data = Data([0xDE, 0xAD, 0xBE, 0xEF])
-        XCTAssertEqual(DataFormatter.format(data, as: .hex), "deadbeef")
+        XCTAssertEqual(try DataFormatter.format(data, as: .hex), "deadbeef")
     }
 
     func testFormatHexEmpty() {
-        XCTAssertEqual(DataFormatter.format(Data(), as: .hex), "")
+        XCTAssertEqual(try DataFormatter.format(Data(), as: .hex), "")
     }
 
     func testFormatHexSingleByte() {
-        XCTAssertEqual(DataFormatter.format(Data([0x0A]), as: .hex), "0a")
+        XCTAssertEqual(try DataFormatter.format(Data([0x0A]), as: .hex), "0a")
     }
 
     // MARK: - format: raw
 
     func testFormatRaw() {
         let data = Data([0xDE, 0xAD, 0xBE, 0xEF])
-        XCTAssertEqual(DataFormatter.format(data, as: .raw), "de ad be ef")
+        XCTAssertEqual(try DataFormatter.format(data, as: .raw), "de ad be ef")
     }
 
     func testFormatRawSingleByte() {
-        XCTAssertEqual(DataFormatter.format(Data([0xFF]), as: .raw), "ff")
+        XCTAssertEqual(try DataFormatter.format(Data([0xFF]), as: .raw), "ff")
     }
 
     func testFormatRawEmpty() {
-        XCTAssertEqual(DataFormatter.format(Data(), as: .raw), "")
+        XCTAssertEqual(try DataFormatter.format(Data(), as: .raw), "")
     }
 
     // MARK: - format: utf8
 
     func testFormatUTF8() {
         let data = "hello".data(using: .utf8)!
-        XCTAssertEqual(DataFormatter.format(data, as: .utf8), "hello")
+        XCTAssertEqual(try DataFormatter.format(data, as: .utf8), "hello")
     }
 
-    func testFormatUTF8FallsBackToHexOnInvalidData() {
-        // 0xFF is not valid UTF-8
-        let data = Data([0xFF, 0xFE])
-        let result = DataFormatter.format(data, as: .utf8)
-        // Falls back to hex
-        XCTAssertEqual(result, "fffe")
+    func testFormatUTF8RejectsInvalidData() {
+        // 0xFF is not valid UTF-8: the value is not text, and hex never stands in for it.
+        assertMismatch(Data([0xFF, 0xFE]), .utf8, "not valid UTF-8")
     }
 
     // MARK: - format: base64
 
     func testFormatBase64() {
         let data = Data([0x00, 0x01, 0x02])
-        XCTAssertEqual(DataFormatter.format(data, as: .base64), "AAEC")
+        XCTAssertEqual(try DataFormatter.format(data, as: .base64), "AAEC")
     }
 
-    func testFormatBase64RoundTrip() {
+    func testFormatBase64RoundTrip() throws {
         let data = Data([0xCA, 0xFE, 0xBA, 0xBE])
-        let encoded = DataFormatter.format(data, as: .base64)
+        let encoded = try DataFormatter.format(data, as: .base64)
         let decoded = DataFormatter.parse(encoded, as: .base64)
         XCTAssertEqual(decoded, data)
     }
@@ -65,19 +69,20 @@ final class DataFormatterTests: XCTestCase {
     // MARK: - format: uint8
 
     func testFormatUint8() {
-        XCTAssertEqual(DataFormatter.format(Data([42]), as: .uint8), "42")
+        XCTAssertEqual(try DataFormatter.format(Data([42]), as: .uint8), "42")
     }
 
     func testFormatUint8Max() {
-        XCTAssertEqual(DataFormatter.format(Data([255]), as: .uint8), "255")
+        XCTAssertEqual(try DataFormatter.format(Data([255]), as: .uint8), "255")
     }
 
     func testFormatUint8Zero() {
-        XCTAssertEqual(DataFormatter.format(Data([0]), as: .uint8), "0")
+        XCTAssertEqual(try DataFormatter.format(Data([0]), as: .uint8), "0")
     }
 
-    func testFormatUint8EmptyData() {
-        XCTAssertEqual(DataFormatter.format(Data(), as: .uint8), "(empty)")
+    func testFormatUint8DoesNotFit() {
+        assertMismatch(Data(), .uint8, "uint8 takes 1 byte, got 0")
+        assertMismatch(Data([1, 2]), .uint8, "uint8 takes 1 byte, got 2")
     }
 
     // MARK: - format: uint16le
@@ -85,16 +90,17 @@ final class DataFormatterTests: XCTestCase {
     func testFormatUint16LE() {
         // 0x0100 little-endian = 256
         let data = Data([0x00, 0x01])
-        XCTAssertEqual(DataFormatter.format(data, as: .uint16le), "256")
+        XCTAssertEqual(try DataFormatter.format(data, as: .uint16le), "256")
     }
 
-    func testFormatUint16LEInsufficientData() {
-        XCTAssertEqual(DataFormatter.format(Data([0x01]), as: .uint16le), "(insufficient data)")
+    func testFormatUint16LEDoesNotFit() {
+        assertMismatch(Data([0x01]), .uint16le, "uint16le takes 2 bytes, got 1")
+        assertMismatch(Data([1, 2, 3, 4, 5]), .uint16le, "uint16le takes 2 bytes, got 5")
     }
 
     func testFormatUint16LEMax() {
         let data = Data([0xFF, 0xFF])
-        XCTAssertEqual(DataFormatter.format(data, as: .uint16le), "65535")
+        XCTAssertEqual(try DataFormatter.format(data, as: .uint16le), "65535")
     }
 
     // MARK: - format: uint32le
@@ -102,11 +108,12 @@ final class DataFormatterTests: XCTestCase {
     func testFormatUint32LE() {
         // 0x00000001 little-endian = 1
         let data = Data([0x01, 0x00, 0x00, 0x00])
-        XCTAssertEqual(DataFormatter.format(data, as: .uint32le), "1")
+        XCTAssertEqual(try DataFormatter.format(data, as: .uint32le), "1")
     }
 
-    func testFormatUint32LEInsufficientData() {
-        XCTAssertEqual(DataFormatter.format(Data([0x01, 0x02]), as: .uint32le), "(insufficient data)")
+    func testFormatUint32LEDoesNotFit() {
+        assertMismatch(Data([0x01, 0x02]), .uint32le, "uint32le takes 4 bytes, got 2")
+        assertMismatch(Data([1, 2, 3, 4, 5]), .uint32le, "uint32le takes 4 bytes, got 5")
     }
 
     // MARK: - format: float32le
@@ -114,11 +121,12 @@ final class DataFormatterTests: XCTestCase {
     func testFormatFloat32LE() {
         var value: Float32 = 1.0
         let data = Data(bytes: &value, count: 4)
-        XCTAssertEqual(DataFormatter.format(data, as: .float32le), "1.0")
+        XCTAssertEqual(try DataFormatter.format(data, as: .float32le), "1.0")
     }
 
-    func testFormatFloat32LEInsufficientData() {
-        XCTAssertEqual(DataFormatter.format(Data([0x01, 0x02]), as: .float32le), "(insufficient data)")
+    func testFormatFloat32LEDoesNotFit() {
+        assertMismatch(Data([0x01, 0x02]), .float32le, "float32le takes 4 bytes, got 2")
+        assertMismatch(Data([1, 2, 3, 4, 5]), .float32le, "float32le takes 4 bytes, got 5")
     }
 
     // MARK: - format names
@@ -260,44 +268,44 @@ final class DataFormatterTests: XCTestCase {
 
     // MARK: - Round-trip tests
 
-    func testRoundTripHex() {
+    func testRoundTripHex() throws {
         let original = Data([0xCA, 0xFE, 0xBA, 0xBE])
-        let formatted = DataFormatter.format(original, as: .hex)
+        let formatted = try DataFormatter.format(original, as: .hex)
         let parsed = DataFormatter.parse(formatted, as: .hex)
         XCTAssertEqual(parsed, original)
     }
 
-    func testRoundTripUTF8() {
+    func testRoundTripUTF8() throws {
         let original = "Hello, world!".data(using: .utf8)!
-        let formatted = DataFormatter.format(original, as: .utf8)
+        let formatted = try DataFormatter.format(original, as: .utf8)
         let parsed = DataFormatter.parse(formatted, as: .utf8)
         XCTAssertEqual(parsed, original)
     }
 
-    func testRoundTripUint8() {
+    func testRoundTripUint8() throws {
         let original = Data([99])
-        let formatted = DataFormatter.format(original, as: .uint8)
+        let formatted = try DataFormatter.format(original, as: .uint8)
         let parsed = DataFormatter.parse(formatted, as: .uint8)
         XCTAssertEqual(parsed, original)
     }
 
-    func testRoundTripUint16LE() {
+    func testRoundTripUint16LE() throws {
         let original = Data([0x39, 0x05])  // 1337 in LE
-        let formatted = DataFormatter.format(original, as: .uint16le)
+        let formatted = try DataFormatter.format(original, as: .uint16le)
         let parsed = DataFormatter.parse(formatted, as: .uint16le)
         XCTAssertEqual(parsed, original)
     }
 
-    func testRoundTripUint32LE() {
+    func testRoundTripUint32LE() throws {
         let original = Data([0xD2, 0x04, 0x00, 0x00])  // 1234 in LE
-        let formatted = DataFormatter.format(original, as: .uint32le)
+        let formatted = try DataFormatter.format(original, as: .uint32le)
         let parsed = DataFormatter.parse(formatted, as: .uint32le)
         XCTAssertEqual(parsed, original)
     }
 
-    func testRoundTripRaw() {
+    func testRoundTripRaw() throws {
         let original = Data([0x01, 0x23, 0x45])
-        let formatted = DataFormatter.format(original, as: .raw)
+        let formatted = try DataFormatter.format(original, as: .raw)
         let parsed = DataFormatter.parse(formatted, as: .raw)
         XCTAssertEqual(parsed, original)
     }
@@ -316,9 +324,9 @@ final class UnalignedDecodeTests: XCTestCase {
     }
 
     func testFormatterReadsMisalignedIntegersAndFloats() {
-        XCTAssertEqual(DataFormatter.format(misaligned([0x34, 0x12]), as: .uint16le), "4660")
-        XCTAssertEqual(DataFormatter.format(misaligned([0x78, 0x56, 0x34, 0x12]), as: .uint32le), "305419896")
-        XCTAssertEqual(DataFormatter.format(misaligned([0x00, 0x00, 0xC0, 0x3F]), as: .float32le), "1.5")
+        XCTAssertEqual(try DataFormatter.format(misaligned([0x34, 0x12]), as: .uint16le), "4660")
+        XCTAssertEqual(try DataFormatter.format(misaligned([0x78, 0x56, 0x34, 0x12]), as: .uint32le), "305419896")
+        XCTAssertEqual(try DataFormatter.format(misaligned([0x00, 0x00, 0xC0, 0x3F]), as: .float32le), "1.5")
     }
 
     /// GATTDecoder copies each field into its own buffer before reading it,

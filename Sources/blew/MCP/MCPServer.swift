@@ -320,7 +320,7 @@ final class BlewMCPServer {
                     return total
                 }
                 return .nus(NUSTranscript(received: String(decoding: bytes, as: UTF8.self),
-                                          receivedHex: DataFormatter.format(bytes, as: .hex),
+                                          receivedHex: DataFormatter.hex(bytes),
                                           dropped: dropped))
             case .message(let msg):
                 return .message(msg)
@@ -737,7 +737,7 @@ extension BlewMCPServer {
                 "type": .string("object"),
                 "properties": .object(targetingProperties.merging([
                     "char_uuid": .object(["type": .string("string"), "description": .string("Characteristic UUID to read")]),
-                    "format":    .object(["type": .string("string"), "enum": formatNames, "description": .string("Output format (default: hex)")]),
+                    "format":    .object(["type": .string("string"), "enum": formatNames, "description": .string("Output format (default: hex). A value whose bytes are not one value of it (5 bytes as uint16le, invalid UTF-8 as utf8) fails the call")]),
                 ]) { $1 }),
                 "required": .array([.string("char_uuid")]),
             ]),
@@ -765,7 +765,7 @@ extension BlewMCPServer {
                 "type": .string("object"),
                 "properties": .object(targetingProperties.merging([
                     "char_uuid": .object(["type": .string("string"), "description": .string("Characteristic UUID to subscribe to")]),
-                    "format":    .object(["type": .string("string"), "enum": formatNames, "description": .string("Value format (default: hex)")]),
+                    "format":    .object(["type": .string("string"), "enum": formatNames, "description": .string("Value format (default: hex). A notification whose bytes are not one value of it has valueError in place of value, and the call fails when it ends")]),
                     "duration":  .object(["type": .string("number"), "minimum": .int(0), "maximum": .double(maxCallDuration), "description": .string("Collection duration in seconds (default: \(Int(defaultSubscribeDuration)), at most \(Int(maxCallDuration)))")]),
                     "count":     .object(["type": .string("integer"), "minimum": .int(1), "description": .string("Stop after this many notifications (default: no limit; the call still ends after `duration`)")]),
                 ]) { $1 }),

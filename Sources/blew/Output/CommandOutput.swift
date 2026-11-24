@@ -206,11 +206,37 @@ struct ReadResult: Codable {
     let format: ValueFormat
 }
 
+/// One notification `sub` received. `value` is its value in the `-f`
+/// format; when its bytes are not one value of that format, `value` is nil
+/// and `valueError` says why (as `valueError` of a `gatt -r -f` row).
+/// Its initializers set exactly one of the two.
 struct NotificationValue: Codable {
     let timestamp: String
     let char: String
     let name: String?
-    let value: String
+    let value: String?
+    let valueError: String?
+
+    init(timestamp: String, char: String, name: String?, value: String) {
+        self.timestamp = timestamp
+        self.char = char
+        self.name = name
+        self.value = value
+        self.valueError = nil
+    }
+
+    init(timestamp: String, char: String, name: String?, formatting data: Data, as format: ValueFormat) {
+        self.timestamp = timestamp
+        self.char = char
+        self.name = name
+        do {
+            value = try DataFormatter.format(data, as: format)
+            valueError = nil
+        } catch {
+            value = nil
+            valueError = error.message
+        }
+    }
 }
 
 /// Notifications of `char` that a subscription dropped because they came

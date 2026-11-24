@@ -44,7 +44,13 @@ final class KVRenderer: OutputRenderer {
         case .notification(let nv):
             var pairs: [(KVKey, String)] = [("ts", nv.timestamp), ("char", nv.char)]
             if let name = nv.name { pairs.append(("name", name)) }
-            pairs.append(("value", nv.value))
+            // A notification that did not fit the format has `error=` in
+            // place of `value=`, so it never reads as a value.
+            if let error = nv.valueError {
+                pairs.append(("error", error))
+            } else if let value = nv.value {
+                pairs.append(("value", value))
+            }
             printKV(pairs)
         case .peripheralSummary(let summary):
             printKV([
@@ -58,7 +64,7 @@ final class KVRenderer: OutputRenderer {
                 printKV([("subscription", uuid)])
             }
         case .nusData(let record):
-            printKV([("ts", record.timestamp), ("rx", DataFormatter.format(record.data, as: .hex))])
+            printKV([("ts", record.timestamp), ("rx", DataFormatter.hex(record.data))])
         case .notificationsDropped(let drops):
             printKV([("sub", "dropped"), ("char", drops.char), ("total", "\(drops.total)")])
         case .nusStatus(let status):
@@ -254,7 +260,7 @@ final class KVRenderer: OutputRenderer {
         case .readRequest(let id, let uuid):
             printKV([("event", "read"), ("ts", ts), ("central", id), ("char", uuid)])
         case .writeRequest(let id, let uuid, let value):
-            printKV([("event", "write"), ("ts", ts), ("central", id), ("char", uuid), ("value", DataFormatter.format(value, as: .hex))])
+            printKV([("event", "write"), ("ts", ts), ("central", id), ("char", uuid), ("value", DataFormatter.hex(value))])
         case .subscribed(let id, let uuid):
             printKV([("event", "subscribe"), ("ts", ts), ("central", id), ("char", uuid)])
         case .unsubscribed(let id, let uuid):

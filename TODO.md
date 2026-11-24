@@ -26,7 +26,15 @@ None open.
 
 ## P3: later (after 0.3.0)
 
-- [ ] **F1. `read -f`, `sub -f` and `periph set|notify` show a value that does not fit the format as if it did.** `Sources/blew/DataFormatter.swift:50` (`format(_:as:)`) returns `(empty)` or `(insufficient data)` as the value for too few bytes, reads a number from the first bytes of a longer value, and gives hex for invalid UTF-8 under `utf8`. Scenario: `blew -o kv read -f uint16le <char>` on a 5-byte value prints a `value=` from 2 of its bytes and exits 0; on a 1-byte value it prints `value="(insufficient data)"`. `gatt chars|tree -r -f` uses `formatExactly(_:as:)`, which fails such a value; moving these commands to it needs an exit code (or a per-notification marker for `sub`) decided for the mismatch.
+- [ ] **D1. SIG decoding of a `utf8s` field drops a leading byte-order
+  mark and shows hex for invalid UTF-8 as if it were the text.**
+  `Sources/blew/GATTDecoder.swift:301` uses `String(data:encoding:)` with a
+  hex fallback, unlike `DataFormatter.format(_:as: .utf8)`. Scenario:
+  `blew gatt chars -r 180A` on a device whose Manufacturer Name is
+  `EF BB BF 41` shows `A`; one whose name is `FF FE` shows `fffe` as the
+  name. Fix: decode through `DataFormatter.format(_:as: .utf8)` and show a
+  failed field as an error.
+
 - [ ] **P6. `periph adv` without GATT services keeps the previous
   command's services published.** `Sources/blew/CommandRouter.swift:1522`
   calls `configure` only when some service has characteristics, and

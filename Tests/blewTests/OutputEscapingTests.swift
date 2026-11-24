@@ -174,10 +174,10 @@ final class OutputEscapingTests: XCTestCase {
         XCTAssertEqual(out, "hi\\x1bc\n")
     }
 
-    func testInvalidUTF8ValueIsShownAsHex() {
-        let value = DataFormatter.format(Data([0x41, 0xFF, 0x1B]), as: .utf8)
+    func testUTF8ValueWithControlCharacterIsEscaped() throws {
+        let value = try DataFormatter.format(Data([0x41, 0x1B]), as: .utf8)
         let out = text(.readValue(ReadResult(char: "2A00", name: nil, value: value, format: .utf8)))
-        XCTAssertEqual(out, "41ff1b\n")
+        XCTAssertEqual(out, "A\\x1b\n")
     }
 
     func testUnpairedSurrogateInBridgedNameBecomesReplacementCharacter() {
