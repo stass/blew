@@ -319,7 +319,7 @@ extension CommandSyntax {
         "info": CommandSyntax("gatt", positionals: [.word("info"), .required("char")]),
     ]
 
-    static let periphAdv = CommandSyntax("periph adv", [.config, .name, .service])
+    static let periphAdv = CommandSyntax("periph adv", [.config, .name, .service, .timeout])
     static let periphClone = CommandSyntax("periph clone", OptionSpec.targeting + [.save])
     static let periphStop = CommandSyntax("periph stop")
     static let periphStatus = CommandSyntax("periph status")

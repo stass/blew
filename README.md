@@ -613,7 +613,7 @@ When standard input is not a terminal, the REPL runs it as a script, the way `ex
 | `sub stop [<uuid>]` | Stop one or all background subscriptions |
 | `sub status` | List active background subscriptions |
 | `nus [-s <text>] [--file <f>] [-e <text>] [-d <s>] [--pty] [-l <port>]` | Nordic UART Service bridge (see `nus`) |
-| `periph adv [-n <n>] [-S <uuid>] [--config <f>]` | Start advertising as a virtual peripheral |
+| `periph adv [-n <n>] [-S <uuid>] [--config <f>] [-t <sec>]` | Start advertising as a virtual peripheral |
 | `periph clone [--save <f>]` | Clone a real device's GATT |
 | `periph stop` | Stop advertising |
 | `periph set [-f <fmt>] <uuid> <val>` | Update a characteristic value |
@@ -789,7 +789,7 @@ Ctrl-C stops the running command: it stops scanning, subscribing or advertising,
 blew periph adv [-n <name>] [-S <uuid>] [--config <file>]
 ```
 
-Starts advertising, prints what it advertises, and runs until interrupted (Ctrl-C), which stops advertising and exits with code 130. Events (reads, writes, subscriptions) are logged to stdout. If Bluetooth is turned off or access is revoked while it advertises, advertising ends, the services are gone, and `periph adv` exits with code 3 ("Bluetooth unavailable: Bluetooth is powered off"). If starting up times out or is interrupted, nothing is left advertising, even when CoreBluetooth confirms the start afterwards.
+Starts advertising, prints what it advertises, and runs until interrupted (Ctrl-C), which stops advertising and exits with code 130. Events (reads, writes, subscriptions) are logged to stdout. If Bluetooth is turned off or access is revoked while it advertises, advertising ends, the services are gone, and `periph adv` exits with code 3 ("Bluetooth unavailable: Bluetooth is powered off"). Starting up (configuring the services, then starting to advertise) must finish within the timeout, 15 seconds unless `-t` is given; past it `periph adv` fails with exit code 4 ("advertising failed to start (timed out)"). The wait for Bluetooth to power on inside that start has its own limit of 5 seconds: Bluetooth that is not on by then fails it with exit code 3, whatever `-t` is. In the REPL and `exec`, `periph adv` also takes `-t <sec>` for the timeout of that start (`periph adv -t 5 -n Sensor -S 180F`); on the command line it is the global `-t` (`blew -t 5 periph adv -n Sensor -S 180F`). If starting up times out or is interrupted, nothing is left advertising, even when CoreBluetooth confirms the start afterwards.
 
 The GATT server answers a remote central the way ATT specifies. A read at an offset past the end of the value is answered with an Invalid Offset error; at the end, with an empty value. A long (prepared) write is assembled from its fragments in order: a write at offset n keeps the first n bytes of the value and replaces the rest. A write at an offset past the end of the value is rejected with Invalid Offset, and one that would make the value longer than 512 bytes (the ATT maximum) with Invalid Attribute Value Length; a rejected request changes nothing. A `writeRequest` event shows the whole value after the write.
 

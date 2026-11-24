@@ -171,7 +171,7 @@ final class CommandRouter {
         let targeting = "[-n <name>] [-S <uuid>] [-i <id>]"
         output.write([
             TextLine("Available commands:"),
-            command("scan", arguments: "\(targeting) [-R <dBm>] [-m <mfr>] [-p <strategy>] [-w]"),
+            command("scan", arguments: "\(targeting) [-R <dBm>] [-m <mfr>] [-p <strategy>] [-t <sec>] [-w]"),
             command("connect", arguments: "\(targeting) [<id>]"),
             command("disconnect"),
             command("status"),
@@ -185,7 +185,7 @@ final class CommandRouter {
             command("sub", arguments: "\(targeting) [-f <fmt>] [-d <sec>] [-c <n>] [-b] <char>"),
             command("sub", "stop", arguments: "[<char>]"),
             command("sub", "status"),
-            command("periph", "adv", arguments: "[-n <name>] [-S <uuid>] [--config <file>]"),
+            command("periph", "adv", arguments: "[-n <name>] [-S <uuid>] [--config <file>] [-t <sec>]"),
             command("periph", "clone", arguments: "\(targeting) [--save <file>]"),
             command("periph", "stop"),
             command("periph", "set", arguments: "[-f <fmt>] <char> <value>"),
@@ -285,7 +285,7 @@ final class CommandRouter {
         do {
             arguments = try CommandSyntax.scan.parse(args)
             target = try DeviceTarget(arguments)
-            duration = try scanDuration(arguments.value(.timeout))
+            duration = try commandTimeout(arguments.value(.timeout))
         } catch {
             return CommandResult(failing: error)
         }
@@ -307,11 +307,12 @@ final class CommandRouter {
         return result
     }
 
-    /// The scan duration: `local` (`scan -t`), else the global `-t`; nil
-    /// when neither is given. Throws when the value is not a duration
-    /// `isValidDuration` accepts, since a scan stop is scheduled with a
-    /// nanosecond sleep.
-    private func scanDuration(_ local: String?) throws -> TimeInterval? {
+    /// A command's timeout: `local` (the command's own `-t`, as in
+    /// `scan -t 3`), else the global `-t`; nil when neither is given. Throws
+    /// when the value is not a duration `isValidDuration` accepts (finite,
+    /// 0 to `maxDuration` seconds): a NaN deadline never passes, and a scan
+    /// stop is scheduled with a nanosecond sleep that a huge value overflows.
+    private func commandTimeout(_ local: String?) throws -> TimeInterval? {
         guard let text = local ?? globals.timeout.map({ "\($0)" }) else { return nil }
         guard let seconds = Double(text), Self.isValidDuration(seconds) else {
             throw InvalidArgument("invalid timeout '\(text)' (use 0 to \(Int(Self.maxDuration)) seconds)")
@@ -321,7 +322,14 @@ final class CommandRouter {
 
     /// The scan duration auto-connect uses: the global `-t`, else 5 seconds.
     private func autoConnectScanDuration() throws -> TimeInterval {
-        try scanDuration(nil) ?? 5.0
+        try commandTimeout(nil) ?? 5.0
+    }
+
+    /// How long `periph adv` waits for advertising to start (configuring
+    /// its services, then the start itself): its `-t`, else the global
+    /// `-t`, else 15 seconds.
+    func advertisingStartTimeout(_ arguments: ParsedArguments) throws -> TimeInterval {
+        try commandTimeout(arguments.value(.timeout)) ?? 15.0
     }
 
     /// The result of a command that cannot start for the reason `message`
@@ -1465,8 +1473,10 @@ extension CommandRouter {
     func runPeriphAdv(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
         var result = CommandResult()
         let arguments: ParsedArguments
+        let startTimeout: TimeInterval
         do {
             arguments = try CommandSyntax.periphAdv.parse(args)
+            startTimeout = try advertisingStartTimeout(arguments)
         } catch {
             return CommandResult(failing: error)
         }
@@ -1531,7 +1541,7 @@ extension CommandRouter {
             }
         }
 
-        switch waitInterruptible(startOperation, timeout: globals.timeout ?? 15.0) {
+        switch waitInterruptible(startOperation, timeout: startTimeout) {
         case .interrupted:
             peripheral.stopAdvertising()
             result.exitCode = BlewExitCode.interrupted.code

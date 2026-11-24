@@ -70,6 +70,12 @@ None open.
   as `sub` reports its drops. Whether CoreBluetooth gives each
   non-resolvable random address its own identifier is unverified; settle
   it with a manual check first.
+- [ ] **C12. The REPL `help` table is a second copy of the commands'
+  syntaxes.** `Sources/blew/CommandRouter.swift` (`printHelp`, the
+  `command(..., arguments:)` strings) spells out each command's options by
+  hand, beside `CommandSyntax` in `Sources/blew/CommandOptions.swift`. An
+  option added to a syntax and not to the string is accepted but missing
+  from `help`. Fix: derive the option list from `CommandSyntax.options`.
 - [ ] **C11. MCP tools still reach the router through a command line.**
   `MCPServer.swift` (`buildTargetingArgs`, `buildReadArgs`, `buildSubArgs`,
   `buildGATTArgs`, `buildPeriphAdvArgs`, ...) serialize typed tool fields

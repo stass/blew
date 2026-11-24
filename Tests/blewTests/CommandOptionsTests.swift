@@ -308,6 +308,29 @@ final class CommandOptionsTests: XCTestCase {
         }
     }
 
+    /// `periph adv -t` bounds the wait for advertising to start, the way
+    /// `scan -t` bounds a scan: its own value, else the global `-t`, else
+    /// 15 seconds.
+    func testPeriphAdvTimeoutBoundsTheStartWait() throws {
+        let local = try CommandSyntax.periphAdv.parse(["-t", "0.5", "-S", "180F"])
+        XCTAssertEqual(try router.advertisingStartTimeout(local), 0.5)
+        let withGlobal = CommandRouter(globals: try GlobalOptions.parse(["-t", "3"]))
+        XCTAssertEqual(try withGlobal.advertisingStartTimeout(local), 0.5)
+        let none = try CommandSyntax.periphAdv.parse(["-S", "180F"])
+        XCTAssertEqual(try withGlobal.advertisingStartTimeout(none), 3)
+        XCTAssertEqual(try router.advertisingStartTimeout(none), 15)
+    }
+
+    /// An invalid `periph adv -t` fails before anything advertises.
+    func testPeriphAdvRejectsAnInvalidTimeout() {
+        for value in ["soon", "inf", "nan", "-1", "1e30"] {
+            let result = router.runPeriphAdv(["-t", value, "-S", "180F"])
+            XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code, value)
+            XCTAssertEqual(result.errors.count, 1, value)
+            XCTAssertTrue(result.errors.first?.hasPrefix("invalid timeout '\(value)'") == true, "\(value): \(result.errors)")
+        }
+    }
+
     /// The commands that take no positional, or at most one, reject more.
     func testCommandsWithFewPositionalsRejectMore() {
         let cases: [(String, CommandResult)] = [
