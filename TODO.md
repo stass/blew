@@ -14,14 +14,6 @@ later release. Delete an item in the commit that fixes it, citing its ID
 
 ## P0: release blockers (0.3.0)
 
-- [ ] **B6. Ctrl-C in one-shot commands bypasses all interrupt handling.**
-  `Sources/blew/Blew.swift:65`. `installSignalHandlers` runs only on the REPL
-  path. In CLI mode SIGINT kills the process, so there is no exit code 130,
-  `cleanupBeforeExit` never runs, and block-buffered stdout is lost
-  (`blew -o kv sub … >> log`). `scan -w` never prints its final table.
-  `periph adv` and `periph clone` never print their startup summary or
-  "Stopped advertising" (`CommandRouter.swift:1469-1524`, `:1634-1686`). Also
-  flush stdout per record when it is not a TTY.
 - [ ] **B7. Concurrent MCP tool calls race on the shared router and BLE
   state.** `Sources/blew/MCP/MCPServer.swift:54`. The swift-sdk runs each
   request in its own Task. Single-slot continuations
@@ -123,9 +115,6 @@ later release. Delete an item in the commit that fixes it, citing its ID
   `waitForPoweredOn(5s)` runs inside `waitInterruptible(globals.timeout)`.
   `BLEManager.swift:61-71` also polls the full 5 s instead of failing fast;
   `ensurePoweredOn` (`:43`) is unused.
-- [ ] **E5. SIGTERM exits 0.** `Blew.swift:90-99`. The handlers call
-  async-signal-unsafe code (Task, semaphores, print). A SIGINT outside
-  `waitInterruptible` `_exit`s the REPL without saving history.
 - [ ] **E7. Invalid option values are silently accepted.**
   `CommandRouter.swift:886`; `Sources/blew/DataFormatter.swift:29-30,59-60`.
   `-c abc` means unlimited. An unknown `-f` means hex. An unknown config
@@ -277,9 +266,6 @@ later release. Delete an item in the commit that fixes it, citing its ID
 - [ ] **R6. Example configs contain wrong values.**
   `Examples/health-thermometer.json:11` decodes to 10360.38 °C.
   `Examples/blood-pressure.json:11` sets flags 0x16 but is only 5 bytes long.
-- [ ] **R7. SIGTERM at the prompt leaves the terminal in raw mode.**
-  `Blew.swift:89-92`, `Sources/LineNoise/Terminal.swift:47-54`. Also, the
-  restore `defer` is registered before `tcgetattr`.
 
 ## P3: later (after 0.3.0)
 

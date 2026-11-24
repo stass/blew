@@ -43,8 +43,15 @@ final class REPL {
         if isInteractive {
             print("blew — type 'help' for commands, 'quit' to exit")
         }
+        if isInteractive {
+            // A signal that ends the process saves the history too. The
+            // hook runs on the signal queue; LineNoise's history is locked.
+            let (ln, historyPath) = (self.ln, self.historyPath)
+            ProcessSignals.shared.setExitHook { try? ln.saveHistory(toFile: historyPath) }
+        }
         defer {
             if isInteractive {
+                ProcessSignals.shared.setExitHook(nil)
                 try? ln.saveHistory(toFile: historyPath)
             }
         }
@@ -65,7 +72,10 @@ final class REPL {
                     break
                 }
 
+                // Ctrl-C from here to the next prompt stops the command.
+                ProcessSignals.shared.commandStarted()
                 let result = router.dispatch(trimmed)
+                ProcessSignals.shared.commandFinished()
                 if !isInteractive && result.exitCode != 0 {
                     throw BlewExitCode(result.exitCode)
                 }

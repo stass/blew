@@ -1,11 +1,7 @@
 import ArgumentParser
 import Foundation
+import os
 import BLEManager
-
-/// Set by the SIGINT handler when a command is in flight; cleared by the polling loop.
-nonisolated(unsafe) var interruptRequested = false
-/// Set to true while a command's polling loop is active; controls SIGINT disposition.
-nonisolated(unsafe) var commandIsRunning = false
 
 @main
 struct Blew: AsyncParsableCommand {
@@ -43,6 +39,12 @@ struct Blew: AsyncParsableCommand {
     /// and prints "Error: exit code N". Commands have already reported their
     /// errors when they throw BlewExitCode, so exit with its code quietly.
     static func main() async {
+        // Piped or redirected output goes out a line at a time, so a reader
+        // sees each record as it is printed (`blew -o kv sub ... >> log`).
+        if isatty(STDOUT_FILENO) == 0 {
+            setvbuf(stdout, nil, _IOLBF, 0)
+        }
+        ProcessSignals.shared.install()
         do {
             var command = try parseAsRoot()
             if var asyncCommand = command as? AsyncParsableCommand {
@@ -62,15 +64,23 @@ struct Blew: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
-        installSignalHandlers()
         let repl = REPL(globals: globals)
         defer { cleanupBeforeExit() }
         try repl.run()
     }
 }
 
+/// Whether `cleanupBeforeExit` has run; it runs once, on the main thread
+/// or on the signal queue, whichever exits first.
+private let cleanupOnce = OSAllocatedUnfairLock(initialState: false)
+
 /// Best-effort disconnect and stop advertising on process exit.
 func cleanupBeforeExit() {
+    let alreadyRan = cleanupOnce.withLock { ran in
+        defer { ran = true }
+        return ran
+    }
+    if alreadyRan { return }
     if BLEPeripheral.shared.isAdvertising() {
         BLEPeripheral.shared.stopAdvertising()
     }
@@ -84,19 +94,4 @@ func cleanupBeforeExit() {
         semaphore.signal()
     }
     _ = semaphore.wait(timeout: .now() + 2.0)
-}
-
-private func installSignalHandlers() {
-    signal(SIGTERM) { _ in
-        cleanupBeforeExit()
-        _exit(0)
-    }
-    signal(SIGINT) { _ in
-        if commandIsRunning {
-            interruptRequested = true
-        } else {
-            cleanupBeforeExit()
-            _exit(130)
-        }
-    }
 }

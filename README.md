@@ -597,7 +597,7 @@ The `exec` subcommand runs a semicolon-separated sequence of commands in a singl
 
 | Flag | Description |
 |------|-------------|
-| `-k, --keep-going` | Continue after a command error; exit with the first non-zero code seen. |
+| `-k, --keep-going` | Continue after a command error; exit with the first non-zero code seen. Ctrl-C still stops the script, with exit code 130. |
 | `--dry-run` | Print parsed steps without executing them. |
 
 **Additional commands available in exec and REPL:**
@@ -679,6 +679,10 @@ The `name=` field is included when the UUID is a known Bluetooth SIG UUID. It is
 | `4` | Timeout |
 | `5` | Operation failed (connect / GATT / read / write / subscribe, or the REPL cannot read or write its terminal or standard input) |
 | `6` | Invalid arguments |
+| `130` | Interrupted by Ctrl-C (SIGINT) |
+| `143` | Terminated by SIGTERM |
+
+Ctrl-C stops the running command: it stops scanning, subscribing or advertising, prints what it has (`scan -w` prints its final table, `periph` prints "Stopped advertising."), and blew exits with code 130. In the REPL, Ctrl-C stops the running command and returns to the prompt. SIGTERM ends blew in any mode with code 143. Before exiting on either signal, blew stops advertising, disconnects, saves the REPL history and gives the terminal back in its normal mode. When standard output is not a terminal, each line is written as soon as it is printed, so `blew -o kv sub ... >> log` delivers each record at once.
 
 ---
 
@@ -698,7 +702,7 @@ The `name=` field is included when the UUID is a known Bluetooth SIG UUID. It is
 blew periph adv [-n <name>] [-S <uuid>] [--config <file>]
 ```
 
-Starts advertising and runs until interrupted (Ctrl-C). Events (reads, writes, subscriptions) are logged to stdout.
+Starts advertising, prints what it advertises, and runs until interrupted (Ctrl-C), which stops advertising and exits with code 130. Events (reads, writes, subscriptions) are logged to stdout.
 
 | Flag | Description |
 |------|-------------|

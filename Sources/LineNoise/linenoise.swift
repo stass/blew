@@ -151,6 +151,14 @@ public class LineNoise {
         try output(text: AnsiCodes.clearScreen)
     }
     
+    /// Leave raw mode for a process that is about to exit, from any thread
+    /// (a signal handler running on a dispatch queue, while `getLine` waits
+    /// for a key). Afterwards no `LineNoise` enters raw mode again, so call
+    /// it only on the way to `exit`.
+    public static func restoreTerminalForExit() {
+        Terminal.restoreForExit()
+    }
+
     /**
      #getLine
      The main function of Linenoise. Gets a line of input from the user.

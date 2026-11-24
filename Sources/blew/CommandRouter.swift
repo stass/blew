@@ -41,7 +41,8 @@ final class CommandRouter {
             let result = dispatch(cmd)
             if result.exitCode != 0 {
                 if firstError == 0 { firstError = result.exitCode }
-                if !keepGoing {
+                // Ctrl-C stops the script, also with --keep-going.
+                if !keepGoing || result.exitCode == BlewExitCode.interrupted.code {
                     return result.exitCode
                 }
             }
@@ -257,7 +258,7 @@ final class CommandRouter {
         let outcome = waitInterruptible(task, semaphore: semaphore)
         spinner?.stop()
 
-        if case .interrupted = outcome { result.exitCode = 130; return ([], result) }
+        if case .interrupted = outcome { result.exitCode = BlewExitCode.interrupted.code; return ([], result) }
         if result.exitCode != 0 { return ([], result) }
 
         let devices = results.matching(filter)
@@ -331,7 +332,7 @@ final class CommandRouter {
             if !devices.isEmpty {
                 result.output.append(.devices(Self.deviceRows(devices.byRSSI)))
             }
-            result.exitCode = 130
+            result.exitCode = BlewExitCode.interrupted.code
             return result
         }
 
@@ -372,7 +373,7 @@ final class CommandRouter {
         let outcome = waitInterruptible(task, semaphore: semaphore)
         lastScanResults = results.matching(filter)
         if case .interrupted = outcome {
-            result.exitCode = 130
+            result.exitCode = BlewExitCode.interrupted.code
             return result
         }
         if scanError != 0 { result.exitCode = scanError; return result }
@@ -421,7 +422,7 @@ final class CommandRouter {
 
         switch waitInterruptible(task, semaphore: semaphore, timeout: connectTimeout) {
         case .completed: if result.exitCode == 0 { connectedAdvertisement = record }
-        case .interrupted: result.exitCode = 130
+        case .interrupted: result.exitCode = BlewExitCode.interrupted.code
         case .timedOut:
             result.errors.append("connection timed out")
             result.exitCode = BlewExitCode.timeout.code
@@ -462,7 +463,7 @@ final class CommandRouter {
 
         switch waitInterruptible(task, semaphore: semaphore, timeout: globals.timeout ?? 5.0) {
         case .completed: break
-        case .interrupted: result.exitCode = 130
+        case .interrupted: result.exitCode = BlewExitCode.interrupted.code
         case .timedOut:
             result.errors.append("disconnect timed out")
             result.exitCode = BlewExitCode.timeout.code
@@ -513,7 +514,7 @@ final class CommandRouter {
         }
 
         if case .interrupted = waitInterruptible(task, semaphore: semaphore) {
-            result.exitCode = 130
+            result.exitCode = BlewExitCode.interrupted.code
         }
         return result
     }
@@ -703,7 +704,7 @@ final class CommandRouter {
 
         switch waitInterruptible(task, semaphore: semaphore, timeout: globals.timeout ?? 10.0) {
         case .completed: break
-        case .interrupted: result.exitCode = 130
+        case .interrupted: result.exitCode = BlewExitCode.interrupted.code
         case .timedOut:
             result.errors.append("operation timed out")
             result.exitCode = BlewExitCode.timeout.code
@@ -769,7 +770,7 @@ final class CommandRouter {
 
         switch waitInterruptible(task, semaphore: semaphore, timeout: globals.timeout ?? 5.0) {
         case .completed: break
-        case .interrupted: result.exitCode = 130
+        case .interrupted: result.exitCode = BlewExitCode.interrupted.code
         case .timedOut:
             result.errors.append("read timed out")
             result.exitCode = BlewExitCode.timeout.code
@@ -837,7 +838,7 @@ final class CommandRouter {
 
         switch waitInterruptible(task, semaphore: semaphore, timeout: globals.timeout ?? 5.0) {
         case .completed: break
-        case .interrupted: result.exitCode = 130
+        case .interrupted: result.exitCode = BlewExitCode.interrupted.code
         case .timedOut:
             result.errors.append("write timed out")
             result.exitCode = BlewExitCode.timeout.code
@@ -938,7 +939,7 @@ final class CommandRouter {
         }
 
         if case .interrupted = waitInterruptible(task, semaphore: semaphore) {
-            result.exitCode = 130
+            result.exitCode = BlewExitCode.interrupted.code
         }
         return result
     }
@@ -1029,11 +1030,11 @@ final class CommandRouter {
         timeout: TimeInterval? = nil
     ) -> CommandOutcome {
         let deadline = timeout.map { Date().addingTimeInterval($0) }
-        commandIsRunning = true
-        defer { commandIsRunning = false }
+        let signals = ProcessSignals.shared
+        signals.commandStarted()
+        defer { signals.commandFinished() }
         while semaphore.wait(timeout: .now() + 0.05) == .timedOut {
-            if interruptRequested {
-                interruptRequested = false
+            if signals.interruptRequested {
                 task.cancel()
                 _ = semaphore.wait(timeout: .now() + 2.0)
                 return .interrupted
@@ -1447,7 +1448,7 @@ extension CommandRouter {
         switch waitInterruptible(startTask, semaphore: startSemaphore, timeout: globals.timeout ?? 15.0) {
         case .interrupted:
             peripheral.stopAdvertising()
-            result.exitCode = 130
+            result.exitCode = BlewExitCode.interrupted.code
             return result
         case .timedOut:
             result.errors.append("advertising failed to start (timed out)")
@@ -1457,34 +1458,8 @@ extension CommandRouter {
             if result.exitCode != 0 { return result }
         }
 
-        // Phase 2: event loop -- streaming, emits each event to caller
-        if isInteractiveMode {
-            backgroundPeriphTask = Task {
-                let eventStream = peripheral.events()
-                for await event in eventStream {
-                    let ts = ISO8601DateFormatter.shared.string(from: Date())
-                    emit(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
-                }
-            }
-            result.output.append(.message("Advertising in background. Use 'periph stop' to stop."))
-            return result
-        } else {
-            let semaphore = DispatchSemaphore(value: 0)
-            let eventTask = Task {
-                defer { semaphore.signal() }
-                let eventStream = peripheral.events()
-                for await event in eventStream {
-                    let ts = ISO8601DateFormatter.shared.string(from: Date())
-                    emit(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
-                    if Task.isCancelled { break }
-                }
-            }
-            if case .interrupted = waitInterruptible(eventTask, semaphore: semaphore) {
-                peripheral.stopAdvertising()
-                result.output.append(.message("Stopped advertising."))
-            }
-            return result
-        }
+        // Phase 2: stream events
+        return streamPeripheralEvents(result, emit: emit)
     }
 
     func runPeriphClone(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
@@ -1558,7 +1533,7 @@ extension CommandRouter {
 
         switch waitInterruptible(snapTask, semaphore: snapSemaphore, timeout: globals.timeout ?? 15.0) {
         case .completed: break
-        case .interrupted: result.exitCode = 130; return result
+        case .interrupted: result.exitCode = BlewExitCode.interrupted.code; return result
         case .timedOut:
             result.errors.append("GATT snapshot timed out")
             result.exitCode = BlewExitCode.timeout.code
@@ -1615,7 +1590,7 @@ extension CommandRouter {
         switch waitInterruptible(startTask, semaphore: startSemaphore, timeout: globals.timeout ?? 15.0) {
         case .interrupted:
             peripheral.stopAdvertising()
-            result.exitCode = 130
+            result.exitCode = BlewExitCode.interrupted.code
             return result
         case .timedOut:
             result.errors.append("advertising failed to start (timed out)")
@@ -1625,7 +1600,21 @@ extension CommandRouter {
             if result.exitCode != 0 { return result }
         }
 
+        return streamPeripheralEvents(result, emit: emit)
+    }
+
+    /// Phase 2 of `periph adv` and `periph clone`, once advertising has
+    /// started; `startup` is what phase 1 gathered. In the REPL, `exec` and
+    /// MCP the events stream from a background task and `startup` returns at
+    /// once. A CLI command renders `startup` (the summary of what is
+    /// advertised) before streaming, because the stream ends only with
+    /// Ctrl-C, and returns what happened after that.
+    private func streamPeripheralEvents(
+        _ startup: CommandResult, emit: @escaping @Sendable (CommandOutput) -> Void
+    ) -> CommandResult {
+        let peripheral = BLEPeripheral.shared
         if isInteractiveMode {
+            var result = startup
             backgroundPeriphTask = Task {
                 let eventStream = peripheral.events()
                 for await event in eventStream {
@@ -1635,23 +1624,26 @@ extension CommandRouter {
             }
             result.output.append(.message("Advertising in background. Use 'periph stop' to stop."))
             return result
-        } else {
-            let semaphore = DispatchSemaphore(value: 0)
-            let eventTask = Task {
-                defer { semaphore.signal() }
-                let eventStream = peripheral.events()
-                for await event in eventStream {
-                    let ts = ISO8601DateFormatter.shared.string(from: Date())
-                    emit(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
-                    if Task.isCancelled { break }
-                }
-            }
-            if case .interrupted = waitInterruptible(eventTask, semaphore: semaphore) {
-                peripheral.stopAdvertising()
-                result.output.append(.message("Stopped advertising."))
-            }
-            return result
         }
+
+        renderer.renderResult(startup)
+        var result = CommandResult()
+        let semaphore = DispatchSemaphore(value: 0)
+        let eventTask = Task {
+            defer { semaphore.signal() }
+            let eventStream = peripheral.events()
+            for await event in eventStream {
+                let ts = ISO8601DateFormatter.shared.string(from: Date())
+                emit(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
+                if Task.isCancelled { break }
+            }
+        }
+        if case .interrupted = waitInterruptible(eventTask, semaphore: semaphore) {
+            peripheral.stopAdvertising()
+            result.output.append(.message("Stopped advertising."))
+            result.exitCode = BlewExitCode.interrupted.code
+        }
+        return result
     }
 
     func runPeriphStop(_ args: [String]) -> CommandResult {

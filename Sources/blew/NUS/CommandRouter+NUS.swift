@@ -114,7 +114,7 @@ struct NUSOptions {
     /// `--reconnect`, once a first connection was made, and never after
     /// Ctrl-C (exit code 130); otherwise end with the attempt's own result.
     static func retries(afterConnectFailure exitCode: Int32, reconnect: Bool, connectedOnce: Bool) -> Bool {
-        exitCode != 130 && reconnect && connectedOnce
+        exitCode != BlewExitCode.interrupted.code && reconnect && connectedOnce
     }
 
     /// After a session: nil means interrupted. A lost link reconnects under
@@ -124,7 +124,7 @@ struct NUSOptions {
     static func step(after outcome: NUSOutcome?, stillConnected: Bool, linger: TimeInterval, reconnect: Bool) -> Step {
         switch outcome {
         case nil:
-            return .finish(exitCode: 130, error: nil)
+            return .finish(exitCode: BlewExitCode.interrupted.code, error: nil)
         case .matched, .inputEnded:
             return .finish(exitCode: 0, error: nil)
         case .expectMissed:
@@ -255,7 +255,7 @@ extension CommandRouter {
                     return connectResult
                 }
                 if case .interrupted = pauseInterruptibly(seconds: 1) {
-                    result.exitCode = 130
+                    result.exitCode = BlewExitCode.interrupted.code
                     return result
                 }
                 continue

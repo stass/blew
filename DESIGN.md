@@ -244,7 +244,19 @@ blew [global-options]                                 →  REPL.run()
 blew mcp                                             →  MCP server over stdio (see 4.12)
 ```
 
-Before any mode exits, `cleanupBeforeExit()` performs a best-effort disconnect (waits up to 2 seconds for the disconnect to complete). SIGINT and SIGTERM both call this function before exiting.
+Before any mode exits, `cleanupBeforeExit()` stops advertising and performs a best-effort disconnect (waits up to 2 seconds for the disconnect to complete).
+
+`Blew.main()` sets standard output to line buffering when it is not a terminal, so piped and redirected output reaches its reader one line at a time, and calls `ProcessSignals.shared.install()` before parsing, so every mode handles signals the same way.
+
+**Signals** (`ProcessSignals.swift`). SIGINT and SIGTERM are set to `SIG_IGN` and delivered through `DispatchSource` signal sources on the `blew.signals` serial queue, so their handling is ordinary code on that queue, never code inside a C signal handler. `ProcessSignals` counts open command spans under a lock. Each `CommandRouter.waitInterruptible` is a span, and so is a whole REPL command, from Enter to the next prompt, so a Ctrl-C while the REPL renders a result or waits outside `waitInterruptible` still only stops the command. Spans nest and may run at once (MCP tool calls). The phase is `idle` (no span open), `running`, or `interrupting` (a SIGINT asked the open spans to stop; the flag stays set until the outermost span closes, so an interrupted REPL command stops at its next wait). The decision is the pure `SignalPolicy.respond(to:in:)`:
+
+| Signal | Phase | Response |
+|--------|-------|----------|
+| SIGINT | `running` | phase becomes `interrupting`; `waitInterruptible` cancels the command's task and returns `.interrupted`; the command returns exit code 130 |
+| SIGINT | `idle` or `interrupting` | exit 130 |
+| SIGTERM | any | exit 143 |
+
+An interrupted command finishes the ordinary way: a CLI subcommand renders what it gathered (the final `scan -w` table, "Stopped advertising.") and exits 130, the REPL returns to the prompt, and `exec` stops the script even with `--keep-going`. An exit on a signal runs on the signal queue while the main thread may be blocked: it calls `LineNoise.restoreTerminalForExit()`, whose lock stays held so the REPL cannot enter raw mode again, then the exit hook (the REPL's history save; `History` locks its state, so the save may run beside the line editor), then `cleanupBeforeExit()` (which runs once per process, whichever thread exits first), flushes standard output unless another thread holds it (a write blocked on a full pipe must not keep blew from exiting), and calls `_exit(code)`.
 
 ### 4.2 GlobalOptions and DeviceTargetingOptions
 
@@ -310,7 +322,7 @@ periph
 1. **Startup phase** (always blocking): configure the GATT server and call `startAdvertising`. Waits synchronously to confirm the peripheral came up successfully.
 2. **Event-loop phase**: stream read/write/subscription events to stdout.
 
-In CLI mode (ArgumentParser subcommand), phase 2 blocks until Ctrl-C — the process exits when advertising stops. In REPL and `exec` mode (`isInteractiveMode == true`), phase 2 runs as a stored background `Task` and the prompt (or script) continues immediately. `periph stop` cancels that task and stops advertising.
+In CLI mode (ArgumentParser subcommand), phase 2 first renders the startup result (the summary of what is advertised), then blocks until Ctrl-C, which stops advertising and returns exit code 130 with "Stopped advertising.". `streamPeripheralEvents` implements phase 2 for both `periph adv` and `periph clone`. In REPL and `exec` mode (`isInteractiveMode == true`), phase 2 runs as a stored background `Task` and the prompt (or script) continues immediately. `periph stop` cancels that task and stops advertising.
 
 **macOS GAP name limitation:** `CBAdvertisementDataLocalNameKey` sets the advertising local name in the BLE advertisement data, but macOS always uses the computer hostname as the GAP (Generic Access Profile) device name. iOS scanners that have previously connected to the Mac will show the cached GAP name (hostname) in their device list instead of the advertising name. The advertising name is still accessible in the raw advertisement data (`kCBAdvDataLocalName`).
 
@@ -472,7 +484,8 @@ The `hex` and `raw` formats both produce hex output but differ: `hex` is a compa
 
 - History file: `~/.config/blew/history`, for interactive input only: loaded on init, saved whenever `run()` returns or throws
 - Prompt: `blew> `
-- `Ctrl-C` during REPL: prints `^C` and continues (does not exit)
+- `Ctrl-C` during REPL: prints `^C` and continues (does not exit). At the prompt the terminal is in raw mode, so Ctrl-C is a key LineNoise reads; while a command runs it is a SIGINT that stops the command (see 4.1)
+- A signal that ends the process (SIGTERM, or a SIGINT outside a command) saves the history through the `ProcessSignals` exit hook and restores the terminal
 - `EOF` or `quit`/`exit`: saves history and returns
 - Input that is not a terminal is a script: `LineNoise` reads it one line at a time without a prompt or editing; the REPL prints no banner, neither loads nor saves the history file, and throws the exit code of the first failing command, as `exec` does. A line that is not valid UTF-8 is an invalid argument (6) in a script and is skipped with an error at a terminal. A read or write error on the terminal or standard input exits 5.
 - `LineNoise` decodes typed UTF-8 (`UTF8Input`) and edits the line as grapheme clusters (`EditState`: a `[Character]` and an integer cursor).
@@ -575,6 +588,8 @@ Custom vendor UUIDs that do not follow the Bluetooth Base pattern return `nil`.
 4   timeout
 5   operation failed (connect / GATT / read / write / subscribe)
 6   invalid arguments
+130 interrupted by SIGINT (Ctrl-C)
+143 terminated by SIGTERM
 ```
 
 ### 4.12 MCP Server Mode
@@ -671,6 +686,7 @@ blew.cb (serial queue)  All CBCentralManager / CBPeripheral calls (central)
 blew.pm (serial queue)  All CBPeripheralManager calls + delegate callbacks
                         GATTStore reads/writes (under NSLock)
 blew.event-processor    BLEEventQueue drain loop, continuation resumes
+blew.signals            SIGINT / SIGTERM handling (ProcessSignals)
 Swift cooperative pool  async Task bodies (BLECentral and BLEPeripheral)
 ```
 

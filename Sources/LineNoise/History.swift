@@ -38,6 +38,7 @@ internal class History {
     
     var maxLength: UInt = 0 {
         didSet {
+            lock.lock(); defer { lock.unlock() }
             if history.count > maxLength && maxLength > 0 {
                 history.removeFirst(history.count - Int(maxLength))
             }
@@ -46,17 +47,23 @@ internal class History {
     private var index: Int = 0
     
     var currentIndex: Int {
+        lock.lock(); defer { lock.unlock() }
         return index
     }
     
     private var hasTempItem: Bool = false
     
     private var history: [String] = [String]()
+    /// Held for every access to `history` and `index`, so `save` may run on
+    /// another thread (a signal exit) while the line editor uses them.
+    private let lock = NSRecursiveLock()
     var historyItems: [String] {
+        lock.lock(); defer { lock.unlock() }
         return history
     }
     
     public func add(_ item: String) {
+        lock.lock(); defer { lock.unlock() }
         // Don't add a duplicate if the last item is equal to this one
         if let lastItem = history.last {
             if lastItem == item {
@@ -78,12 +85,14 @@ internal class History {
     }
 
     func replaceCurrent(_ item: String) {
+        lock.lock(); defer { lock.unlock() }
         history[index] = item
     }
     
     // MARK: - History Navigation
     
     internal func navigateHistory(direction: HistoryDirection) -> String? {
+        lock.lock(); defer { lock.unlock() }
         if history.count == 0 {
             return nil
         }
@@ -110,7 +119,7 @@ internal class History {
     // MARK: - Saving and loading
     
     internal func save(toFile path: String) throws {
-        let output = history.joined(separator: "\n")
+        let output = lock.withLock { history.joined(separator: "\n") }
         try output.write(toFile: path, atomically: true, encoding: .utf8)
     }
     

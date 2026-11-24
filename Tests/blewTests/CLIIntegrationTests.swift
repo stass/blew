@@ -5,19 +5,7 @@ import XCTest
 /// These tests require the binary to be built; they are skipped if the binary is not found.
 final class CLIIntegrationTests: XCTestCase {
 
-    private var binaryPath: String {
-        // The binary lives at .build/debug/blew relative to the package root.
-        // Walk up from this source file to find the package root.
-        var url = URL(fileURLWithPath: #file)
-        for _ in 0..<5 {
-            url = url.deletingLastPathComponent()
-            let candidate = url.appendingPathComponent(".build/debug/blew")
-            if FileManager.default.fileExists(atPath: candidate.path) {
-                return candidate.path
-            }
-        }
-        return ""
-    }
+    private var binaryPath: String { blewBinaryPath() ?? "" }
 
     private func blewAvailable() -> Bool {
         !binaryPath.isEmpty
@@ -202,15 +190,24 @@ private struct RunResult {
 }
 
 private func runBlew(_ args: [String]) throws -> RunResult {
-    var url = URL(fileURLWithPath: #file)
+    guard let path = blewBinaryPath() else {
+        throw XCTSkip("blew binary not found at .build/debug/blew")
+    }
+    return try launch(path: path, args: args)
+}
+
+/// The built `blew` binary: `.build/debug/blew` under the package root,
+/// found by walking up from this source file; nil when it is not built.
+func blewBinaryPath() -> String? {
+    var url = URL(fileURLWithPath: #filePath)
     for _ in 0..<5 {
         url = url.deletingLastPathComponent()
         let candidate = url.appendingPathComponent(".build/debug/blew")
         if FileManager.default.fileExists(atPath: candidate.path) {
-            return try launch(path: candidate.path, args: args)
+            return candidate.path
         }
     }
-    throw XCTSkip("blew binary not found at .build/debug/blew")
+    return nil
 }
 
 private func launch(path: String, args: [String]) throws -> RunResult {

@@ -38,24 +38,40 @@ internal struct Terminal {
     }
     
     // MARK: Raw Mode
+
+    /// The terminal settings raw mode replaced, while raw mode is on. Every
+    /// change of terminal mode happens under `lock`, so a restore from
+    /// another thread (`restoreForExit`) cannot interleave with entering or
+    /// leaving raw mode.
+    private final class RawModeState: @unchecked Sendable {
+        let lock = NSLock()
+        var saved: (fileHandle: Int32, settings: termios)?
+    }
+    private static let rawMode = RawModeState()
+
     static func withRawMode(_ fileHandle: Int32, body: () throws -> ()) throws {
         if !isTTY(fileHandle) {
             throw LinenoiseError.notATTY
         }
-        
+
+        try enterRawMode(fileHandle)
+        defer { leaveRawMode() }
+
+        // Run the body
+        try body()
+    }
+
+    private static func enterRawMode(_ fileHandle: Int32) throws {
+        rawMode.lock.lock()
+        defer { rawMode.lock.unlock() }
+
         var originalTermios: termios = termios()
-        
-        defer {
-            // Disable raw mode
-            _ = tcsetattr(fileHandle, TCSAFLUSH, &originalTermios)
-        }
-        
         if tcgetattr(fileHandle, &originalTermios) == -1 {
             throw LinenoiseError.generalError("Could not get term attributes")
         }
-        
+
         var raw = originalTermios
-        
+
         #if os(Linux) || os(FreeBSD)
             raw.c_iflag &= ~UInt32(BRKINT | ICRNL | INPCK | ISTRIP | IXON)
             raw.c_oflag &= ~UInt32(OPOST)
@@ -67,16 +83,37 @@ internal struct Terminal {
             raw.c_cflag |= UInt(CS8)
             raw.c_lflag &= ~UInt(ECHO | ICANON | IEXTEN | ISIG)
         #endif
-        
+
         // VMIN = 16
         raw.c_cc.16 = 1
-        
+
         if tcsetattr(fileHandle, Int32(TCSAFLUSH), &raw) < 0 {
+            // A failed tcsetattr may have applied part of the change.
+            _ = tcsetattr(fileHandle, TCSAFLUSH, &originalTermios)
             throw LinenoiseError.generalError("Could not set raw mode")
         }
-        
-        // Run the body
-        try body()
+        rawMode.saved = (fileHandle, originalTermios)
+    }
+
+    private static func leaveRawMode() {
+        rawMode.lock.lock()
+        defer { rawMode.lock.unlock() }
+        restoreSaved()
+    }
+
+    /// Put back the settings raw mode replaced. The caller holds `lock`.
+    private static func restoreSaved() {
+        guard var saved = rawMode.saved else { return }
+        rawMode.saved = nil
+        _ = tcsetattr(saved.fileHandle, TCSAFLUSH, &saved.settings)
+    }
+
+    /// Restore the terminal for a process that is about to exit, from any
+    /// thread. The lock stays held, so no thread enters raw mode again
+    /// before the process ends: one that tries blocks until the exit.
+    static func restoreForExit() {
+        rawMode.lock.lock()
+        restoreSaved()
     }
     
     // MARK: - Colors

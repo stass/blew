@@ -14,6 +14,10 @@ struct BlewExitCode: Error, CustomStringConvertible {
     static let timeout = BlewExitCode(4)
     static let operationFailed = BlewExitCode(5)
     static let invalidArguments = BlewExitCode(6)
+    /// Stopped by SIGINT (Ctrl-C): 128 + 2.
+    static let interrupted = BlewExitCode(130)
+    /// Stopped by SIGTERM: 128 + 15.
+    static let terminated = BlewExitCode(143)
 
     var description: String { "exit code \(code)" }
 }
