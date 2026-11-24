@@ -29,7 +29,6 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
-        .package(url: "https://github.com/apple/swift-atomics.git", from: "1.2.0"),
     ] + mcpPackageDependency,
     targets: [
         .executableTarget(
@@ -68,9 +67,6 @@ let package = Package(
         ),
         .target(
             name: "BLEManager",
-            dependencies: [
-                .product(name: "Atomics", package: "swift-atomics"),
-            ],
             swiftSettings: [.swiftLanguageMode(.v5)],
             linkerSettings: [
                 .linkedFramework("CoreBluetooth"),

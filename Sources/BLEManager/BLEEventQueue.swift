@@ -1,82 +1,89 @@
 import Foundation
-import Atomics
 
-/// Lock-free SPSC (single-producer, single-consumer) ring buffer for BLE events.
+/// The FIFO that carries events from BLEDelegate (and the connect markers
+/// of `BLEEventProcessor.issueConnect`), both on blew.cb, to
+/// BLEEventProcessor on its own thread.
 ///
-/// Producer: BLEDelegate on CoreBluetooth's dispatch queue.
-/// Consumer: BLEEventProcessor on a dedicated thread.
-///
-/// If the queue is full, the newest event is dropped and `droppedCount` is incremented.
+/// Every event is kept except scan results: a `didDiscover` that arrives
+/// while `scanResultLimit` events already wait is dropped and counted in
+/// `droppedScanResults`. A scan result is the only event that answers no
+/// wait and that the device repeats (each advertisement is a new result),
+/// so dropping one under an `allowDuplicates` flood loses at most an RSSI
+/// update. Every other event answers a wait or ends one (a connect, a GATT
+/// request, a disconnect, a Bluetooth state change) or is a notification
+/// value that is not sent again; dropping one would hang its wait or lose
+/// data silently. Their number is bounded by what the device sends while
+/// the processor, which never blocks on a consumer, falls behind.
 final class BLEEventQueue: @unchecked Sendable {
-    private let capacity: Int
-    private let buffer: UnsafeMutablePointer<BLEEvent?>
-    private let head = ManagedAtomic<Int>(0) // write position (producer)
-    private let tail = ManagedAtomic<Int>(0) // read position (consumer)
-    private let _droppedCount = ManagedAtomic<Int>(0)
+    /// How many waiting events stop scan results from being queued.
+    let scanResultLimit: Int
+
+    private let lock = NSLock()
+    /// The waiting events from `head` on; the slots before it were taken.
+    private var events: [BLEEvent] = []
+    private var head = 0
+    private var dropped = 0
+    /// Signalled once per queued event, and by `signal()`.
     private let semaphore = DispatchSemaphore(value: 0)
+    /// How many taken slots are kept before they are dropped from the array.
+    private static let compactionThreshold = 1024
 
-    var droppedCount: Int {
-        _droppedCount.load(ordering: .relaxed)
+    init(scanResultLimit: Int = 1024) {
+        precondition(scanResultLimit > 0, "scanResultLimit must be positive")
+        self.scanResultLimit = scanResultLimit
     }
 
-    init(capacity: Int = 1024) {
-        precondition(capacity > 0 && (capacity & (capacity - 1)) == 0, "Capacity must be a power of 2")
-        self.capacity = capacity
-        self.buffer = .allocate(capacity: capacity)
-        self.buffer.initialize(repeating: nil, count: capacity)
+    /// The scan results dropped because the queue was full of waiting
+    /// events.
+    var droppedScanResults: Int {
+        lock.withLock { dropped }
     }
 
-    deinit {
-        buffer.deinitialize(count: capacity)
-        buffer.deallocate()
-    }
-
-    /// Enqueue an event. Called by the producer (BLEDelegate).
-    /// Returns false if the queue was full (event dropped).
+    /// Queue `event`. Returns false when it was a scan result and was
+    /// dropped; every other event is always queued.
     @discardableResult
     func enqueue(_ event: BLEEvent) -> Bool {
-        let currentHead = head.load(ordering: .relaxed)
-        let currentTail = tail.load(ordering: .acquiring)
-        let nextHead = (currentHead + 1) & (capacity - 1)
-
-        if nextHead == currentTail {
-            _droppedCount.wrappingIncrement(ordering: .relaxed)
-            return false
-        }
-
-        buffer[currentHead] = event
-        head.store(nextHead, ordering: .releasing)
-        semaphore.signal()
-        return true
-    }
-
-    /// Dequeue an event. Called by the consumer (BLEEventProcessor).
-    /// Returns nil if the queue is empty.
-    func dequeue() -> BLEEvent? {
-        let currentTail = tail.load(ordering: .relaxed)
-        let currentHead = head.load(ordering: .acquiring)
-
-        if currentTail == currentHead {
-            return nil
-        }
-
-        let event = buffer[currentTail]
-        buffer[currentTail] = nil
-        tail.store((currentTail + 1) & (capacity - 1), ordering: .releasing)
-        return event
-    }
-
-    /// Block until an event is available, then dequeue it.
-    func waitAndDequeue() -> BLEEvent? {
-        while true {
-            if let event = dequeue() {
-                return event
+        let queued: Bool = lock.withLock {
+            if case .didDiscover = event, events.count - head >= scanResultLimit {
+                dropped += 1
+                return false
             }
-            semaphore.wait()
+            events.append(event)
+            return true
+        }
+        if queued { semaphore.signal() }
+        return queued
+    }
+
+    /// The oldest waiting event, or nil when none waits.
+    func dequeue() -> BLEEvent? {
+        lock.withLock {
+            guard head < events.count else { return nil }
+            let event = events[head]
+            head += 1
+            if head == events.count {
+                events.removeAll(keepingCapacity: true)
+                head = 0
+            } else if head >= Self.compactionThreshold, head * 2 >= events.count {
+                // Drop the taken slots once they are at least half the
+                // array, so each event is moved at most once on average.
+                events.removeFirst(head)
+                head = 0
+            }
+            return event
         }
     }
 
-    /// Signal the consumer to wake up (used for shutdown).
+    /// Block until an event is available, then dequeue it. May return nil
+    /// with nothing queued: when woken by `signal()`, and for a permit left
+    /// by an event an earlier call took without waiting; the caller loops.
+    func waitAndDequeue() -> BLEEvent? {
+        if let event = dequeue() { return event }
+        semaphore.wait()
+        return dequeue()
+    }
+
+    /// Wake the consumer (used for shutdown).
     func signal() {
         semaphore.signal()
     }

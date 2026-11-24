@@ -514,6 +514,7 @@ final class CommandRouter {
             let status = await manager.status()
             result.output.append(.connectionStatus(status))
         }
+        result.debugs.append("scan results dropped while the event queue was full: \(manager.droppedScanResults)")
 
         if case .interrupted = waitInterruptible(operation) {
             result.exitCode = BlewExitCode.interrupted.code

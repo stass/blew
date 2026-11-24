@@ -1,9 +1,24 @@
 import Foundation
 import CoreBluetooth
 
+/// One connect of the central to one peripheral, made by
+/// `makeConnectAttempt(to:)`. Two attempts to the same device are
+/// different attempts, so a cancel or a deadline of one cannot end another.
+public struct ConnectAttempt: Hashable, Sendable {
+    public let peripheral: UUID
+    fileprivate let serial: UInt64
+}
+
+/// One wait for the connected peripheral to disconnect, made by
+/// `makeDisconnectWait()`.
+struct DisconnectWait: Hashable, Sendable {
+    fileprivate let serial: UInt64
+}
+
 /// Drains the BLEEventQueue on a dedicated thread and dispatches events
 /// to registered continuations and async streams. It serves one connection
-/// at a time (`link`), and owns the fact of which peripheral is connected.
+/// at a time (`link`), and owns the facts of which peripheral is connected
+/// and of the central's Bluetooth state.
 final class BLEEventProcessor: @unchecked Sendable {
     private let eventQueue: BLEEventQueue
     private var thread: Thread?
@@ -16,26 +31,43 @@ final class BLEEventProcessor: @unchecked Sendable {
     /// notification stream belongs to it, and events of any other peripheral
     /// are dropped.
     private enum Link {
-        /// A connect was started and waits for the peripheral.
-        case connecting(UUID, CheckedContinuation<Void, Error>)
+        /// A connect was registered and waits for the peripheral. `issued`
+        /// turns true when the processor dequeues the attempt's
+        /// `connectIssued` marker, which BLECentral queues on blew.cb just
+        /// before the CoreBluetooth connect call. Only then does the
+        /// peripheral's didConnect or didFailToConnect answer the attempt:
+        /// one queued before the marker belongs to an earlier attempt.
+        case connecting(ConnectAttempt, CheckedContinuation<Void, Error>, issued: Bool)
         /// The peripheral connected; it is served until it disconnects.
-        case connected(UUID)
+        case connected(ConnectAttempt)
 
-        var peripheralId: UUID {
+        var attempt: ConnectAttempt {
             switch self {
-            case .connecting(let id, _), .connected(let id): return id
+            case .connecting(let attempt, _, _), .connected(let attempt): return attempt
             }
         }
+
+        var peripheralId: UUID { attempt.peripheral }
     }
 
-    /// Set by beginConnect; cleared when that connect fails or is cancelled,
-    /// when the peripheral disconnects, when its setup fails
-    /// (endConnection) and when Bluetooth leaves poweredOn.
+    /// Set by beginConnect; cleared when that connect fails, is cancelled or
+    /// passes its deadline, when the peripheral disconnects, when its setup
+    /// fails (endConnection) and when Bluetooth leaves poweredOn.
     private var link: Link?
 
-    private var stateCallbacks: [(CBManagerState) -> Void] = []
-    private var disconnectCallbacks: [(UUID) -> Void] = []
-    private var disconnectContinuation: CheckedContinuation<Void, Error>?
+    /// The central's state from its last `centralStateChanged`. Nothing is
+    /// registered while it is not poweredOn: CoreBluetooth would answer
+    /// nothing, so the wait would never end.
+    private var state: CBManagerState = .unknown
+
+    /// Numbers the connect attempts and disconnect waits.
+    private var lastSerial: UInt64 = 0
+
+    private var linkEndedCallbacks: [(ConnectAttempt) -> Void] = []
+    /// Where and how a connection blew gave up is cancelled in CoreBluetooth
+    /// (see `onCancelConnection`).
+    private var connectionCanceller: (queue: DispatchQueue, cancel: @Sendable (UUID) -> Void)?
+    private var disconnectWaits: [DisconnectWait: CheckedContinuation<Void, Error>] = [:]
     /// The GATT requests in flight and their waits, queued per answering
     /// callback in the order they were issued (see `submit`), and the writes
     /// without response waiting to be sent (see `waitToWrite`).
@@ -71,18 +103,31 @@ final class BLEEventProcessor: @unchecked Sendable {
 
     // MARK: - Registration
 
-    func onStateChange(_ callback: @escaping @Sendable (CBManagerState) -> Void) {
+    /// The central's Bluetooth state, as CoreBluetooth last reported it.
+    var centralState: CBManagerState {
+        lock.withLock { state }
+    }
+
+    /// Called with the attempt when the served link ends, however it ended,
+    /// so the facade can forget that connection.
+    func onLinkEnded(_ callback: @escaping @Sendable (ConnectAttempt) -> Void) {
         lock.lock()
-        stateCallbacks.append(callback)
+        linkEndedCallbacks.append(callback)
         lock.unlock()
     }
 
-    /// Called when the served connection ends (a disconnect, including one
-    /// the device or the link caused), so the facade can forget it.
-    func onDisconnect(_ callback: @escaping @Sendable (UUID) -> Void) {
-        lock.lock()
-        disconnectCallbacks.append(callback)
-        lock.unlock()
+    /// How a connection blew gave up (a cancelled or replaced connect, a
+    /// connect past its deadline, a failed setup) is cancelled: `cancel`
+    /// (`cancelPeripheralConnection`) runs on `queue` (blew.cb) for its
+    /// peripheral, because CoreBluetooth may still hold or be making that
+    /// connection. It is queued while the processor still holds the lock
+    /// that ended the link, so it runs before the connect call of any later
+    /// attempt (whose `issueConnect` is queued after that attempt's
+    /// `beginConnect` took the lock) and after the ended attempt's own. A
+    /// link CoreBluetooth ended (didDisconnect, didFailToConnect, Bluetooth
+    /// leaving poweredOn) is not cancelled.
+    func onCancelConnection(on queue: DispatchQueue, _ cancel: @escaping @Sendable (UUID) -> Void) {
+        lock.withLock { connectionCanceller = (queue, cancel) }
     }
 
     func setScanContinuation(_ cont: AsyncStream<DiscoveredDevice>.Continuation?) {
@@ -100,43 +145,86 @@ final class BLEEventProcessor: @unchecked Sendable {
     /// connect is still waiting).
     var connectedPeripheralId: UUID? {
         lock.withLock {
-            if case .connected(let id) = link { return id }
+            if case .connected(let attempt) = link { return attempt.peripheral }
             return nil
         }
     }
 
-    /// Whether a connect to `peripheral` is waiting for it.
-    func isConnecting(to peripheral: UUID) -> Bool {
+    /// Whether `attempt` waits for its peripheral to connect.
+    func isConnecting(_ attempt: ConnectAttempt) -> Bool {
         lock.withLock {
-            if case .connecting(let id, _) = link { return id == peripheral }
+            if case .connecting(attempt, _, _) = link { return true }
             return false
         }
     }
 
-    /// Start serving `peripheral` and wait for it to connect: `cont` resumes
-    /// on its didConnect, or fails on its didFailToConnect or didDisconnect.
-    /// Events of every other peripheral are dropped from here on. The caller
-    /// disconnects the current device first; a link still held is ended in
-    /// blew's state only, so its device would stay connected.
-    func beginConnect(to peripheral: UUID, _ cont: CheckedContinuation<Void, Error>) {
+    /// Whether `attempt` connected and is still served.
+    func isConnected(_ attempt: ConnectAttempt) -> Bool {
+        lock.withLock {
+            if case .connected(attempt) = link { return true }
+            return false
+        }
+    }
+
+    /// Reserve the identity of one connect to `peripheral`, before its wait
+    /// is registered, so its cancellation handler and deadline name it.
+    func makeConnectAttempt(to peripheral: UUID) -> ConnectAttempt {
+        lock.withLock {
+            lastSerial += 1
+            return ConnectAttempt(peripheral: peripheral, serial: lastSerial)
+        }
+    }
+
+    /// Start serving `attempt`'s peripheral and wait for it to connect:
+    /// `cont` resumes on its didConnect, or fails on its didFailToConnect
+    /// (both only after the attempt's `connectIssued` marker), and fails
+    /// with `BLEError.timeout` when it has not connected `timeout` seconds
+    /// from now (checked on `queue`, blew.cb). Events of every other
+    /// peripheral are dropped from here on. A link still held is ended, and
+    /// its peripheral handed to the link-ended callbacks to cancel. Fails at
+    /// once with `bluetoothUnavailable` while Bluetooth is not poweredOn.
+    func beginConnect(_ attempt: ConnectAttempt, timeout: TimeInterval, on queue: DispatchQueue,
+                      _ cont: CheckedContinuation<Void, Error>) {
         lock.lock()
-        let ended = endLink(BLEError.connectionFailed("replaced by a connect to \(peripheral.uuidString)"))
-        link = .connecting(peripheral, cont)
+        guard state == .poweredOn else {
+            let error = BLEError.unavailable(state)
+            lock.unlock()
+            cont.resume(throwing: error)
+            return
+        }
+        let replaced = endLink(BLEError.connectionFailed("replaced by a connect to \(attempt.peripheral.uuidString)"),
+                               mustCancel: true)
+        link = .connecting(attempt, cont, issued: false)
         lock.unlock()
-        for effect in ended { effect() }
+        for effect in replaced { effect() }
+        queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            self?.cancelConnect(attempt, BLEError.timeout)
+        }
+    }
+
+    /// Reserve the identity of one disconnect wait, before it is registered,
+    /// so its cancellation handler names it.
+    func makeDisconnectWait() -> DisconnectWait {
+        lock.withLock {
+            lastSerial += 1
+            return DisconnectWait(serial: lastSerial)
+        }
     }
 
     /// Wait for the connected `peripheral` to disconnect. Returns true when
     /// the caller must now cancel the connection; when `peripheral` is not
-    /// connected, `cont` resumes at once and this returns false.
-    func beginDisconnect(from peripheral: UUID, _ cont: CheckedContinuation<Void, Error>) -> Bool {
+    /// connected (also while Bluetooth is not poweredOn, which ended every
+    /// link), `cont` resumes at once and this returns false. Each wait
+    /// resumes when the link ends; several may wait at once.
+    func beginDisconnect(_ wait: DisconnectWait, from peripheral: UUID,
+                         _ cont: CheckedContinuation<Void, Error>) -> Bool {
         lock.lock()
-        guard case .connected(peripheral) = link else {
+        guard case .connected(let attempt) = link, attempt.peripheral == peripheral else {
             lock.unlock()
             cont.resume()
             return false
         }
-        disconnectContinuation = cont
+        disconnectWaits[wait] = cont
         lock.unlock()
         return true
     }
@@ -156,9 +244,10 @@ final class BLEEventProcessor: @unchecked Sendable {
     /// the CoreBluetooth call, in the same block. Requests for one callback
     /// are therefore queued in the order CoreBluetooth gets them, which is
     /// the order it answers them. The wait fails with `CancellationError`
-    /// when the ticket was cancelled first, and with `notConnected` when
-    /// `peripheral` is not the connected one when the request would go out;
-    /// in both cases `call` does not run.
+    /// when the ticket was cancelled first, and when the request would go
+    /// out with `bluetoothUnavailable` while Bluetooth is not poweredOn and
+    /// `notConnected` when `peripheral` is not the connected one; in each
+    /// case `call` does not run.
     func submit(_ ticket: Ticket, _ request: CentralRequest, to peripheral: UUID,
                 on queue: DispatchQueue, call: @escaping @Sendable () -> Void) {
         guard lock.withLock({ callbacks.add(ticket, .request(request)) }) else {
@@ -167,10 +256,10 @@ final class BLEEventProcessor: @unchecked Sendable {
         }
         queue.async { [self] in
             lock.lock()
-            guard case .connected(peripheral) = link else {
+            if let refusal = refusal(to: peripheral) {
                 let waiter = callbacks.cancel(ticket)
                 lock.unlock()
-                waiter?.fail(BLEError.notConnected)
+                waiter?.fail(refusal)
                 return
             }
             let issued = callbacks.issue(ticket, as: request.answeredBy)
@@ -184,8 +273,8 @@ final class BLEEventProcessor: @unchecked Sendable {
     /// writes' polls in the order their tickets were made; it checks the
     /// peripheral on blew.cb and, when it can take the write, sends it
     /// through `sendIfWaiting`. Fails with `CancellationError` when the
-    /// ticket was cancelled first, and `notConnected` when `peripheral` is
-    /// not connected.
+    /// ticket was cancelled first, `bluetoothUnavailable` while Bluetooth is
+    /// not poweredOn, and `notConnected` when `peripheral` is not connected.
     func waitToWrite(_ ticket: Ticket, _ cont: CheckedContinuation<Void, Error>, to peripheral: UUID,
                      poll: @escaping @Sendable () -> Void) {
         lock.lock()
@@ -194,10 +283,10 @@ final class BLEEventProcessor: @unchecked Sendable {
             cont.resume(throwing: CancellationError())
             return
         }
-        guard case .connected(peripheral) = link else {
+        if let refusal = refusal(to: peripheral) {
             _ = callbacks.cancel(ticket)
             lock.unlock()
-            cont.resume(throwing: BLEError.notConnected)
+            cont.resume(throwing: refusal)
             return
         }
         lock.unlock()
@@ -238,6 +327,7 @@ final class BLEEventProcessor: @unchecked Sendable {
     /// `queue` (blew.cb), and not at all once `peripheral` is no longer
     /// connected. Fails (the confirmation throws and the stream finishes)
     /// with `CancellationError` when `unsubscribe` came first, with
+    /// `bluetoothUnavailable` while Bluetooth is not poweredOn, with
     /// `notConnected` when `peripheral` is not connected, with the device's
     /// error when it refuses, and with the reason when the connection ends.
     func subscribe(_ id: SubscriberID, to characteristic: String,
@@ -247,18 +337,17 @@ final class BLEEventProcessor: @unchecked Sendable {
                    setNotify: @escaping @Sendable (Bool) -> Void) {
         let issue: @Sendable (Bool) -> Void = { [self] enable in
             queue.async {
-                guard self.lock.withLock({ if case .connected(peripheral) = self.link { return true }; return false })
-                else { return }
+                guard self.lock.withLock({ self.refusal(to: peripheral) == nil }) else { return }
                 setNotify(enable)
             }
         }
         lock.lock()
         let effects: [() -> Void]
-        if case .connected(peripheral) = link {
+        if let refusal = refusal(to: peripheral) {
+            effects = subscriptions.refuse(id, stream: stream, confirmation: confirmation, refusal)
+        } else {
             effects = subscriptions.add(id, to: characteristic, stream: stream, confirmation: confirmation,
                                         setNotify: issue)
-        } else {
-            effects = subscriptions.refuse(id, stream: stream, confirmation: confirmation, BLEError.notConnected)
         }
         lock.unlock()
         for effect in effects { effect() }
@@ -276,35 +365,50 @@ final class BLEEventProcessor: @unchecked Sendable {
         lock.withLock { subscriptions.subscribedCount }
     }
 
-    // MARK: - Cancellation
+    // MARK: - Connect call and cancellation
 
-    /// End a waiting connect with CancellationError and stop serving its
-    /// peripheral. A connect that already completed is left alone: its
-    /// peripheral is served until it disconnects.
-    func cancelConnect() {
-        lock.lock()
-        guard case .connecting(_, let cont) = link else { lock.unlock(); return }
-        link = nil
-        lock.unlock()
-        cont.resume(throwing: CancellationError())
+    /// Run `connect`, the CoreBluetooth connect call of `attempt`, unless
+    /// the attempt no longer waits. Call on blew.cb: the attempt's
+    /// `connectIssued` marker is queued in the same block, behind every
+    /// event CoreBluetooth queued before the call, so the attempt takes only
+    /// a didConnect or didFailToConnect that came after it.
+    func issueConnect(_ attempt: ConnectAttempt, connect: () -> Void) {
+        guard isConnecting(attempt) else { return }
+        eventQueue.enqueue(.connectIssued(attempt))
+        connect()
     }
 
-    /// Stop serving the connected `peripheral` because its setup (service
-    /// discovery) failed or was cancelled: its waits fail and its streams
-    /// finish as on a disconnect, and its later didDisconnect is dropped. The
-    /// caller cancels the CoreBluetooth connection. A no-op when `peripheral`
-    /// is not the connected one.
-    func endConnection(to peripheral: UUID, _ error: BLEError) {
-        lock.lock()
-        guard case .connected(peripheral) = link else { lock.unlock(); return }
-        let ended = endLink(error)
-        lock.unlock()
+    /// End `attempt` while it waits for its peripheral: the wait fails with
+    /// `error` (CancellationError for a cancel, `BLEError.timeout` at its
+    /// deadline) and the CoreBluetooth connect is cancelled
+    /// (`onCancelConnection`). A no-op once the attempt connected, failed or was replaced:
+    /// a connected peripheral is served until it disconnects.
+    func cancelConnect(_ attempt: ConnectAttempt, _ error: Error = CancellationError()) {
+        let ended: [() -> Void] = lock.withLock {
+            guard case .connecting(attempt, _, _) = link else { return [] }
+            return endLink(error, mustCancel: true)
+        }
         for effect in ended { effect() }
     }
 
-    func cancelDisconnectContinuation() {
-        lock.lock(); let c = disconnectContinuation; disconnectContinuation = nil; lock.unlock()
-        c?.resume(throwing: CancellationError())
+    /// Stop serving `attempt`'s connection because its setup (service
+    /// discovery) failed or was cancelled: its waits fail and its streams
+    /// finish as on a disconnect, and its later didDisconnect is dropped. The
+    /// CoreBluetooth connection is cancelled (`onCancelConnection`). A no-op when
+    /// `attempt` is not the connected one.
+    func endConnection(_ attempt: ConnectAttempt, _ error: BLEError) {
+        let ended: [() -> Void] = lock.withLock {
+            guard case .connected(attempt) = link else { return [] }
+            return endLink(error, mustCancel: true)
+        }
+        for effect in ended { effect() }
+    }
+
+    /// Give up the disconnect wait `wait`: it ends with CancellationError.
+    /// A no-op once it resumed.
+    func cancelDisconnect(_ wait: DisconnectWait) {
+        let cont = lock.withLock { disconnectWaits.removeValue(forKey: wait) }
+        cont?.resume(throwing: CancellationError())
     }
 
     /// Give up the request of `ticket`: its wait ends with
@@ -346,16 +450,17 @@ final class BLEEventProcessor: @unchecked Sendable {
         if let target = event.connectionPeripheralId, target != link?.peripheralId { return [] }
 
         switch event {
-        case .centralStateChanged(let state):
-            // The state callbacks run first, so a caller woken by the effects
-            // below already sees the new state.
-            var effects: [() -> Void] = stateCallbacks.map { cb in { cb(state) } }
-            guard state != .poweredOn else { return effects }
+        case .centralStateChanged(let newState):
+            // Set under the lock that registrations take, so a registration
+            // either sees the new state and is refused, or came first and is
+            // ended below; a caller woken by these effects sees it too.
+            state = newState
+            guard newState != .poweredOn else { return [] }
             // CoreBluetooth stops scanning and drops its connections in every
             // other state; end what waits on them. Whether a per-peripheral
             // didDisconnect comes first (ending the link with connectionFailed
             // instead) is unverified; TESTS.md has the manual check.
-            effects += endLink(BLEError.unavailable(state))
+            var effects = endLink(BLEError.unavailable(newState), mustCancel: false)
             if let scan = Self.take(&scanContinuation) {
                 effects.append { scan.finish() }
             }
@@ -372,18 +477,27 @@ final class BLEEventProcessor: @unchecked Sendable {
             guard let stream = scanContinuation else { return [] }
             return [{ stream.yield(device) }]
 
-        case .didConnect(let id):
-            guard case .connecting(_, let cont) = link else { return [] }
-            link = .connected(id)
+        case .connectIssued(let attempt):
+            guard case .connecting(attempt, let cont, issued: false) = link else { return [] }
+            link = .connecting(attempt, cont, issued: true)
+            return []
+
+        case .didConnect:
+            guard case .connecting(let attempt, let cont, issued: true) = link else { return [] }
+            link = .connected(attempt)
             return [{ cont.resume() }]
 
         case .didFailToConnect(_, let error):
-            guard case .connecting(_, let cont) = link else { return [] }
-            link = nil
-            return [{ cont.resume(throwing: BLEError.connectionFailed(error ?? "unknown")) }]
+            guard case .connecting(_, _, issued: true) = link else { return [] }
+            return endLink(BLEError.connectionFailed(error ?? "unknown"), mustCancel: false)
 
         case .didDisconnect(_, let error):
-            return endLink(BLEError.connectionFailed(error ?? "disconnected"))
+            // CoreBluetooth answers a connect with didConnect or
+            // didFailToConnect; a didDisconnect while connecting is the late
+            // answer to blew cancelling an earlier connection to the device
+            // (a failed setup, a cancelled connect), not this attempt's.
+            guard case .connected = link else { return [] }
+            return endLink(BLEError.connectionFailed(error ?? "disconnected"), mustCancel: false)
 
         case .didDiscoverServices(_, let uuids, let error):
             guard case .waiter(.request(.discoverServices(let cont))) = callbacks.complete(.services) else { return [] }
@@ -440,25 +554,39 @@ final class BLEEventProcessor: @unchecked Sendable {
 
     /// End the served connection, if any, with `error`: stop serving it, fail
     /// a waiting connect and every pending one-shot wait, finish the
-    /// notification streams with `error`, run the disconnect callbacks and
-    /// resume a waiting disconnect. The lock must be held; the returned
+    /// notification streams with `error`, run the link-ended callbacks and
+    /// resume the waiting disconnects. When blew, not CoreBluetooth, ended it
+    /// (`mustCancel`), queue the cancel of its connection now, under the
+    /// lock (see `onCancelConnection`). The lock must be held; the returned
     /// effects run after it is released.
-    private func endLink(_ error: BLEError) -> [() -> Void] {
+    private func endLink(_ error: Error, mustCancel: Bool) -> [() -> Void] {
         guard let ended = link else { return [] }
         link = nil
         let id = ended.peripheralId
-        var effects: [() -> Void] = disconnectCallbacks.map { cb in { cb(id) } }
+        if mustCancel, let canceller = connectionCanceller {
+            canceller.queue.async { canceller.cancel(id) }
+        }
+        var effects: [() -> Void] = linkEndedCallbacks.map { cb in { cb(ended.attempt) } }
         // End the notification streams, so `for try await` loops throw why.
         effects += subscriptions.removeAll(error)
 
-        if case .connecting(_, let cont) = ended { effects.append { cont.resume(throwing: error) } }
+        if case .connecting(_, let cont, _) = ended { effects.append { cont.resume(throwing: error) } }
         effects += callbacks.removeAll().map { waiter in { waiter.fail(error) } }
         // Last, so disconnect returns with the connection forgotten and its
         // streams and waits ended.
-        if let cont = Self.take(&disconnectContinuation) {
-            effects.append { cont.resume() }
-        }
+        let waits = disconnectWaits.values
+        disconnectWaits = [:]
+        effects += waits.map { cont in { cont.resume() } }
         return effects
+    }
+
+    /// Why a request to `peripheral` cannot go out now, nil when it can:
+    /// Bluetooth is not poweredOn, or `peripheral` is not the connected one.
+    /// The lock must be held.
+    private func refusal(to peripheral: UUID) -> BLEError? {
+        guard state == .poweredOn else { return .unavailable(state) }
+        guard case .connected(let attempt) = link, attempt.peripheral == peripheral else { return .notConnected }
+        return nil
     }
 
     /// Clear a one-shot slot and return what it held.

@@ -31,45 +31,7 @@ None open.
   `BLEManager.swift:97-108`. Interrupt a scan, start another, and the old
   timer stops the new one early. Starting a scan during `watch` replaces the
   stream without finishing it (`:67-79`).
-- [ ] **S8. When the event queue is full, the newest event is dropped
-  silently** *(plausible)*. `Sources/BLEManager/BLEEventQueue.swift:42-45`.
-  A dropped `didConnect` or `didWriteValue` under an `allowDuplicates` scan
-  flood hangs its wait. `droppedCount` is never reported.
-- [ ] **S9. `BLECentral.connect` ignores its `timeout` parameter.**
-  `Sources/BLEManager/BLEManager.swift:118`. The deadline is enforced only by
-  the caller cancelling the task (`CommandRouter.runConnect`,
-  `waitInterruptible`), so a caller that relies on the parameter waits
-  forever for a device that never appears. Enforce it in `connect` (throwing
-  `BLEError.timeout`) or remove the parameter.
-- [ ] **S10. Connect attempts are matched by peripheral, not by attempt, and
-  `BLECentral` assumes one caller at a time.** `BLEEventProcessor.swift:119`
-  (`beginConnect`, `cancelConnect`, `isConnecting`), `BLEManager.swift:149-180`
-  and `updateConnection`. Nothing enforces one caller; `waitInterruptible`
-  returns after 2 s while the old task may still run. Scenarios: a second
-  `connect` reaches `beginConnect` between another's `closeConnection` and
-  `beginConnect`, and the replaced device stays connected at the OS level;
-  one task's cancel ends another task's connect; a stale `didConnect` of a
-  cancelled attempt completes a quick retry to the same device, whose catch
-  then disconnects it and its own `didConnect` is dropped. Fix: serialise
-  connect and disconnect in `BLECentral`, or give each attempt a token that
-  `cancelConnect`, `isConnecting` and `updateConnection` require.
-  A connect whose service discovery fails ends the link at once
-  (`endConnection`) and queues `cancelPeripheralConnection`; a REPL or MCP
-  retry of the same device faster than that disconnect round-trip has its
-  connect failed by the old connection's late `didDisconnect` (exit 5).
-  `beginDisconnect` (`BLEEventProcessor.swift`) holds one disconnect wait:
-  a second concurrent `disconnect` replaces the first, which never resumes,
-  and `cancelDisconnectContinuation` cancels whichever wait is held.
-- [ ] **S11. A registration made after Bluetooth left poweredOn is never
-  failed.** `BLEManager.swift:110-153`, `BLEEventProcessor.swift` (the
-  `centralStateChanged` case). The processor fails what is registered when
-  the state changes, but nothing refuses a later registration: a power-off
-  during `closeConnection` lets `beginConnect` install a wait that CoreBluetooth
-  never answers, so `connect` exits 4 (timeout) instead of 3. Fix: the
-  processor owns the central state under its lock (`BLECentral.cbState`
-  reads it) and `beginConnect`, `beginDisconnect` and `submit` fail at
-  once with `BLEError.unavailable(state)` when it is not poweredOn (a GATT
-  request whose link already ended fails with `notConnected`, exit 5).
+
 ### Exit codes and README contract
 
 - [ ] **E2. A scan that Bluetooth turning off ends exits 0.**
@@ -79,8 +41,7 @@ None open.
   and exits 0 instead of 3. Make the scan stream an `AsyncThrowingStream`
   finished with `bluetoothUnavailable`, as the notification stream is, and
   iterate it with `for try await`; the catch blocks already record the
-  error with `CommandResult.fail`. `ensurePoweredOn` (`BLEManager.swift:45`)
-  is unused; delete it.
+  error with `CommandResult.fail`.
 
 ### Output
 

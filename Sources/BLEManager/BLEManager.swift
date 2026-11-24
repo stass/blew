@@ -7,7 +7,7 @@ public final class BLECentral: @unchecked Sendable {
     public static let shared = BLECentral()
 
     private let cbQueue = DispatchQueue(label: "blew.cb", qos: .userInitiated)
-    private let eventQueue = BLEEventQueue(capacity: 1024)
+    private let eventQueue = BLEEventQueue()
     private let processor: BLEEventProcessor
     let delegate: BLEDelegate
     private var centralManager: CBCentralManager!
@@ -17,35 +17,38 @@ public final class BLECentral: @unchecked Sendable {
     // its name and GATT database, written only while it is connected
     // (`updateConnection`) and cleared when it disconnects.
     private let stateLock = NSLock()
+    /// The attempt whose connection the cache describes.
+    private var cachedAttempt: ConnectAttempt?
     private var connectedPeripheralName: String?
     private var discoveredServices: [CBService] = []
     private var discoveredCharacteristics: [CBCharacteristic] = []
     private var lastError: String?
-    private var cbState: CBManagerState = .unknown
 
     private init() {
         self.delegate = BLEDelegate(queue: eventQueue)
         self.processor = BLEEventProcessor(eventQueue: eventQueue)
         self.centralManager = CBCentralManager(delegate: delegate, queue: cbQueue)
 
-        processor.onStateChange { [weak self] state in
-            self?.stateLock.lock()
-            self?.cbState = state
-            self?.stateLock.unlock()
+        processor.onLinkEnded { [weak self] attempt in
+            self?.forgetConnection(attempt)
         }
-        processor.onDisconnect { [weak self] _ in
-            self?.forgetConnection()
+        // A connection blew gave up (a cancelled, replaced or timed-out
+        // connect, a failed setup) may still be held or pending in
+        // CoreBluetooth, which would connect the device later with no one
+        // waiting for it.
+        processor.onCancelConnection(on: cbQueue) { [weak self] peripheral in
+            guard let self, let p = self.delegate.peripherals[peripheral] else { return }
+            self.centralManager.cancelPeripheralConnection(p)
         }
         processor.start()
     }
 
     // MARK: - State helpers
 
-    private func ensurePoweredOn() throws {
-        stateLock.lock()
-        let state = cbState
-        stateLock.unlock()
-        guard state == .poweredOn else { throw BLEError.unavailable(state) }
+    /// Scan results dropped because the event queue was full of events the
+    /// processor had not yet handled (an `allowDuplicates` scan flood).
+    public var droppedScanResults: Int {
+        eventQueue.droppedScanResults
     }
 
     /// Poll the state until poweredOn. A state that will not change by
@@ -53,7 +56,7 @@ public final class BLECentral: @unchecked Sendable {
     private func waitForPoweredOn(timeout: TimeInterval) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
-            let state = stateLock.withLock { cbState }
+            let state = processor.centralState
             if state == .poweredOn { return }
             if let error = BLEError.persistentlyUnavailable(state) { throw error }
             if Date() > deadline {
@@ -137,46 +140,44 @@ public final class BLECentral: @unchecked Sendable {
 
         try await closeConnection()
 
+        let processor = self.processor
+        let attempt = processor.makeConnectAttempt(to: uuid)
         do {
             try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                    processor.beginConnect(to: uuid, cont)
+                    processor.beginConnect(attempt, timeout: timeout, on: cbQueue, cont)
                     // A cancel before the wait was registered found nothing to end.
                     if Task.isCancelled {
-                        processor.cancelConnect()
+                        processor.cancelConnect(attempt)
                         return
                     }
                     cbQueue.async {
-                        // A cancel that ran first ended the wait: start no
-                        // connect that no one waits for.
-                        guard self.processor.isConnecting(to: uuid) else { return }
-                        targetPeripheral.delegate = self.delegate
-                        self.centralManager.connect(targetPeripheral, options: nil)
+                        // A cancel or deadline that came first ended the
+                        // wait: start no connect that no one waits for.
+                        processor.issueConnect(attempt) {
+                            targetPeripheral.delegate = self.delegate
+                            self.centralManager.connect(targetPeripheral, options: nil)
+                        }
                     }
                 }
             } onCancel: {
-                self.processor.cancelConnect()
+                processor.cancelConnect(attempt)
             }
             // A cancel that came just after the device connected: keep no
             // connection the caller gave up on.
             try Task.checkCancellation()
 
-            updateConnection(uuid) {
+            updateConnection(attempt) {
                 connectedPeripheralName = targetPeripheral.name
             }
             // Without its GATT database the connection serves no operation.
-            try await discoverAllServices(peripheral: targetPeripheral)
+            try await discoverAllServices(peripheral: targetPeripheral, attempt: attempt)
         } catch {
             // A connection whose setup failed is not kept: blew stops serving
             // it at once (a no-op when the connect itself failed), so it is not
-            // reported or reused as connected.
-            processor.endConnection(to: uuid, BLEError.connectionFailed("connection setup did not complete"))
-            // CoreBluetooth keeps a connect pending until it is cancelled, and
-            // would connect the device later with no one waiting for it. On
-            // blew.cb this runs after any connect queued before the cancel.
-            cbQueue.async {
-                self.centralManager.cancelPeripheralConnection(targetPeripheral)
-            }
+            // reported or reused as connected, and the link-ended callback
+            // cancels it in CoreBluetooth.
+            processor.endConnection(attempt, BLEError.connectionFailed("connection setup did not complete"))
             throw error
         }
     }
@@ -191,7 +192,7 @@ public final class BLECentral: @unchecked Sendable {
     }
 
     /// Disconnect the connected device, if any, and wait until it has. The
-    /// processor's disconnect callback has forgotten the connection by then.
+    /// processor's link-ended callback has forgotten the connection by then.
     private func closeConnection() async throws {
         guard let uuid = getConnectedId() else { return }
         var peripheral: CBPeripheral?
@@ -202,34 +203,44 @@ public final class BLECentral: @unchecked Sendable {
             throw BLEError.operationFailed("the connected device \(uuid.uuidString) is missing from the peripheral cache")
         }
 
+        let processor = self.processor
+        let wait = processor.makeDisconnectWait()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                if processor.beginDisconnect(from: uuid, cont) {
+                if processor.beginDisconnect(wait, from: uuid, cont) {
+                    // A cancel before the wait was registered found nothing
+                    // to end; the disconnect still goes out.
+                    if Task.isCancelled { processor.cancelDisconnect(wait) }
                     cbQueue.async {
                         self.centralManager.cancelPeripheralConnection(p)
                     }
                 }
             }
         } onCancel: {
-            self.processor.cancelDisconnectContinuation()
+            processor.cancelDisconnect(wait)
         }
     }
 
-    /// Update the cached state of the connection to `id`, unless it has
-    /// already ended. The processor stops serving a connection before its
-    /// disconnect callback takes `stateLock` to clear the cache, so an update
-    /// made here is either refused or cleared afterwards.
-    private func updateConnection(_ id: UUID, _ update: () -> Void) {
+    /// Update the cached state of the connection `attempt` made, unless it
+    /// has already ended. The processor stops serving a connection before
+    /// its link-ended callback takes `stateLock` to clear the cache, so an
+    /// update made here is either refused or cleared afterwards.
+    private func updateConnection(_ attempt: ConnectAttempt, _ update: () -> Void) {
         stateLock.withLock {
-            guard processor.connectedPeripheralId == id else { return }
+            guard processor.isConnected(attempt) else { return }
+            cachedAttempt = attempt
             update()
         }
     }
 
     /// Clear the cached state after the connection ended, whoever ended it,
     /// so status() reports it and a later connect starts fresh.
-    private func forgetConnection() {
+    private func forgetConnection(_ attempt: ConnectAttempt) {
         stateLock.withLock {
+            // A late callback of an earlier attempt leaves a newer one's
+            // cache alone.
+            guard cachedAttempt == nil || cachedAttempt == attempt else { return }
+            cachedAttempt = nil
             connectedPeripheralName = nil
             discoveredServices = []
             discoveredCharacteristics = []
@@ -499,7 +510,7 @@ public final class BLECentral: @unchecked Sendable {
         }
     }
 
-    private func discoverAllServices(peripheral: CBPeripheral) async throws {
+    private func discoverAllServices(peripheral: CBPeripheral, attempt: ConnectAttempt) async throws {
         _ = try await request({ .discoverServices($0) }, to: peripheral) {
             peripheral.discoverServices(nil)
         }
@@ -523,7 +534,7 @@ public final class BLECentral: @unchecked Sendable {
             }
         }
 
-        updateConnection(peripheral.identifier) {
+        updateConnection(attempt) {
             discoveredServices = allServices
             discoveredCharacteristics = allChars
         }

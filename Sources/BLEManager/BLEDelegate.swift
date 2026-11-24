@@ -1,7 +1,7 @@
 import Foundation
 import CoreBluetooth
 
-/// CoreBluetooth delegate that extracts event data and enqueues to the lock-free queue.
+/// CoreBluetooth delegate that extracts event data and enqueues it to the event queue.
 /// All callbacks return immediately after enqueuing.
 final class BLEDelegate: NSObject, @unchecked Sendable {
     let queue: BLEEventQueue

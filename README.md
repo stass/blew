@@ -230,7 +230,7 @@ Explicitly connects to a BLE device and exits. Useful for testing connectivity o
 
 For `gatt`, `read`, `write`, and `sub` you do not need to run `connect` first — those commands connect automatically using the same device-targeting options.
 
-blew holds one connection at a time: `connect` disconnects the current device first, also when it is the same one, and then connects and discovers its services afresh. A connect that times out or is interrupted stops connecting, so the device does not connect later. A connect whose service discovery fails or is interrupted fails too and leaves nothing connected.
+blew holds one connection at a time: `connect` disconnects the current device first, also when it is the same one, and then connects and discovers its services afresh. `-t` (default 10 seconds) bounds the wait for the device to connect: past it `connect` fails with exit code 4. A connect that times out or is interrupted stops connecting, so the device does not connect later. A connect whose service discovery fails or is interrupted fails too and leaves nothing connected. While Bluetooth is off, or when it turns off during the connect, `connect` fails with exit code 3, as do GATT commands and `sub`.
 
 The connection is automatically closed on exit.
 
@@ -595,7 +595,7 @@ When standard input is not a terminal, the REPL runs it as a script, the way `ex
 | `scan [options]` | Scan for devices |
 | `connect [<id>]` | Connect to a device |
 | `disconnect` | Disconnect |
-| `status` | Show connection status |
+| `status` | Show connection status (at `-vv`, also how many scan results were dropped because blew fell behind a scan) |
 | `gatt svcs\|tree\|chars\|desc\|info` | GATT inspection |
 | `read [-f <fmt>] <uuid>` | Read a characteristic |
 | `write [-f <fmt>] [-r\|-w] <uuid> <data>` | Write to a characteristic |

@@ -41,13 +41,64 @@ final class BLEEventProcessorTests: XCTestCase {
         }
     }
 
-    /// A processor connected to `peripheral` the way BLECentral connects.
-    private func connected(to peripheral: UUID) -> BLEEventProcessor {
+    /// A processor that CoreBluetooth reported poweredOn.
+    private func poweredOn() -> BLEEventProcessor {
         let processor = BLEEventProcessor(eventQueue: BLEEventQueue())
-        let connect = Wait<Void> { processor.beginConnect(to: peripheral, $0) }
+        processor.dispatch(.centralStateChanged(.poweredOn))
+        return processor
+    }
+
+    /// A connect registered the way BLECentral registers one, with its
+    /// attempt. `issued` dispatches the attempt's marker, as issueConnect
+    /// queues it before the CoreBluetooth call.
+    private struct Connecting {
+        let attempt: ConnectAttempt
+        let wait: Wait<Void>
+        func outcome(timeout: TimeInterval = 1) -> Result<Void, Error>? { wait.outcome(timeout: timeout) }
+    }
+
+    private func startConnect(_ processor: BLEEventProcessor, to peripheral: UUID, timeout: TimeInterval = 60,
+                              issued: Bool = true) -> Connecting {
+        let attempt = processor.makeConnectAttempt(to: peripheral)
+        let wait = Wait<Void> { processor.beginConnect(attempt, timeout: timeout, on: self.gattQueue, $0) }
+        if issued { processor.dispatch(.connectIssued(attempt)) }
+        return Connecting(attempt: attempt, wait: wait)
+    }
+
+    /// A processor connected to `peripheral` the way BLECentral connects,
+    /// with the attempt that connected it.
+    private func connection(to peripheral: UUID) -> (BLEEventProcessor, ConnectAttempt) {
+        let processor = poweredOn()
+        let connect = startConnect(processor, to: peripheral)
         processor.dispatch(.didConnect(peripheralId: peripheral))
         if case .success = connect.outcome() {} else { XCTFail("the connect did not complete") }
-        return processor
+        return (processor, connect.attempt)
+    }
+
+    private func connected(to peripheral: UUID) -> BLEEventProcessor {
+        connection(to: peripheral).0
+    }
+
+    /// Record the peripherals whose connection the processor has cancelled.
+    private func recordCancels(_ processor: BLEEventProcessor) -> SharedBox<[UUID]> {
+        let cancelled = SharedBox<[UUID]>([])
+        processor.onCancelConnection(on: gattQueue) { id in cancelled.update { $0.append(id) } }
+        return cancelled
+    }
+
+    /// The cancels queued so far, once they have run.
+    private func cancels(_ cancelled: SharedBox<[UUID]>) -> [UUID] {
+        gattQueue.sync {}
+        return cancelled.get()
+    }
+
+    private func disconnectWait(_ processor: BLEEventProcessor, from peripheral: UUID,
+                                mustCancel: SharedBox<Bool>? = nil) -> Wait<Void> {
+        let wait = processor.makeDisconnectWait()
+        return Wait<Void> {
+            let result = processor.beginDisconnect(wait, from: peripheral, $0)
+            mustCancel?.set(result)
+        }
     }
 
     /// Dispatch `event` and report whether the processor ignored it: it
@@ -318,7 +369,7 @@ final class BLEEventProcessorTests: XCTestCase {
         let finished = DispatchSemaphore(value: 0)
         let stream = registerStream(processor, finished: finished)
         let calledBack = DispatchSemaphore(value: 0)
-        processor.onDisconnect { _ in
+        processor.onLinkEnded { _ in
             _ = processor.makeTicket()
             calledBack.signal()
         }
@@ -353,8 +404,8 @@ final class BLEEventProcessorTests: XCTestCase {
 
     /// A connect completes or fails only on its own peripheral's events.
     func testConnectIgnoresAnotherPeripheralsEvents() {
-        let processor = BLEEventProcessor(eventQueue: BLEEventQueue())
-        let connect = Wait<Void> { processor.beginConnect(to: self.deviceB, $0) }
+        let processor = poweredOn()
+        let connect = startConnect(processor, to: deviceB)
 
         XCTAssertTrue(ignores(processor, .didConnect(peripheralId: deviceA)))
         XCTAssertTrue(ignores(processor, .didFailToConnect(peripheralId: deviceA, error: "refused")))
@@ -370,14 +421,14 @@ final class BLEEventProcessorTests: XCTestCase {
     /// `connect A` is cancelled (it timed out), `connect B` starts, and A
     /// comes into range: A's late events must not complete or fail B's connect.
     func testCancelledConnectsLateEventsDoNotReachTheNextConnect() {
-        let processor = BLEEventProcessor(eventQueue: BLEEventQueue())
-        let connectA = Wait<Void> { processor.beginConnect(to: self.deviceA, $0) }
-        processor.cancelConnect()
+        let processor = poweredOn()
+        let connectA = startConnect(processor, to: deviceA)
+        processor.cancelConnect(connectA.attempt)
         guard case .failure(is CancellationError) = connectA.outcome() else {
             return XCTFail("the cancelled connect did not end with CancellationError")
         }
 
-        let connectB = Wait<Void> { processor.beginConnect(to: self.deviceB, $0) }
+        let connectB = startConnect(processor, to: deviceB)
         XCTAssertTrue(ignores(processor, .didConnect(peripheralId: deviceA)))
         XCTAssertTrue(ignores(processor, .didDisconnect(peripheralId: deviceA, error: nil)))
         XCTAssertNil(connectB.outcome(timeout: 0.1), "A's late event ended B's connect")
@@ -391,11 +442,11 @@ final class BLEEventProcessorTests: XCTestCase {
     /// A cancelled connect stops serving its peripheral: a late didConnect
     /// does not make the processor route that peripheral's events.
     func testCancelledConnectStopsServingItsPeripheral() {
-        let processor = BLEEventProcessor(eventQueue: BLEEventQueue())
-        let connect = Wait<Void> { processor.beginConnect(to: self.deviceA, $0) }
-        processor.cancelConnect()
+        let processor = poweredOn()
+        let connect = startConnect(processor, to: deviceA)
+        processor.cancelConnect(connect.attempt)
         _ = connect.outcome()
-        processor.onDisconnect { _ in }
+        processor.onLinkEnded { _ in }
 
         XCTAssertTrue(ignores(processor, .didConnect(peripheralId: deviceA)))
         XCTAssertNil(processor.connectedPeripheralId, "a cancelled connect's late didConnect connected it")
@@ -407,18 +458,17 @@ final class BLEEventProcessorTests: XCTestCase {
     /// waits, the peripheral once it connected, none after it disconnected.
     /// A cancel that comes after the connect completed leaves it connected.
     func testConnectedPeripheralFollowsTheLink() {
-        let processor = BLEEventProcessor(eventQueue: BLEEventQueue())
-        let connect = Wait<Void> { processor.beginConnect(to: self.deviceB, $0) }
+        let processor = poweredOn()
+        let connect = startConnect(processor, to: deviceB)
         XCTAssertNil(processor.connectedPeripheralId)
-        XCTAssertTrue(processor.isConnecting(to: deviceB))
-        XCTAssertFalse(processor.isConnecting(to: deviceA))
+        XCTAssertTrue(processor.isConnecting(connect.attempt))
 
         processor.dispatch(.didConnect(peripheralId: deviceB))
         guard case .success = connect.outcome() else { return XCTFail("the connect did not complete") }
         XCTAssertEqual(processor.connectedPeripheralId, deviceB)
-        XCTAssertFalse(processor.isConnecting(to: deviceB))
+        XCTAssertFalse(processor.isConnecting(connect.attempt))
 
-        processor.cancelConnect()
+        processor.cancelConnect(connect.attempt)
         XCTAssertEqual(processor.connectedPeripheralId, deviceB, "a late cancel ended a completed connect")
 
         processor.dispatch(.didDisconnect(peripheralId: deviceB, error: nil))
@@ -432,14 +482,14 @@ final class BLEEventProcessorTests: XCTestCase {
     func testDisconnectWaitsForTheConnectedPeripheralOnly() {
         let processor = connected(to: deviceB)
         let calledBack = DispatchSemaphore(value: 0)
-        processor.onDisconnect { _ in calledBack.signal() }
+        processor.onLinkEnded { _ in calledBack.signal() }
 
         nonisolated(unsafe) var mustCancel = true
-        let other = Wait<Void> { mustCancel = processor.beginDisconnect(from: self.deviceA, $0) }
+        let other = Wait<Void> { mustCancel = processor.beginDisconnect(processor.makeDisconnectWait(), from: self.deviceA, $0) }
         XCTAssertFalse(mustCancel)
         guard case .success = other.outcome() else { return XCTFail("the wait for an unconnected peripheral did not resume") }
 
-        let disconnect = Wait<Void> { mustCancel = processor.beginDisconnect(from: self.deviceB, $0) }
+        let disconnect = Wait<Void> { mustCancel = processor.beginDisconnect(processor.makeDisconnectWait(), from: self.deviceB, $0) }
         XCTAssertTrue(mustCancel)
         XCTAssertNil(disconnect.outcome(timeout: 0.1), "the disconnect wait resumed before the disconnect")
         processor.dispatch(.didDisconnect(peripheralId: deviceB, error: nil))
@@ -455,15 +505,15 @@ final class BLEEventProcessorTests: XCTestCase {
         let finished = DispatchSemaphore(value: 0)
         let stream = registerStream(processor, finished: finished)
 
-        let connect = Wait<Void> { processor.beginConnect(to: self.deviceB, $0) }
+        let connect = startConnect(processor, to: deviceB)
         guard case .failure(BLEError.connectionFailed) = read.outcome() else {
             return XCTFail("the replaced connection's read was left pending")
         }
         XCTAssertEqual(finished.wait(timeout: .now() + 1), .success)
         XCTAssertNil(processor.connectedPeripheralId)
-        XCTAssertTrue(processor.isConnecting(to: deviceB))
+        XCTAssertTrue(processor.isConnecting(connect.attempt))
 
-        processor.cancelConnect()
+        processor.cancelConnect(connect.attempt)
         _ = connect.outcome()
         withExtendedLifetime(stream) {}
     }
@@ -477,8 +527,8 @@ final class BLEEventProcessorTests: XCTestCase {
         let finished = DispatchSemaphore(value: 0)
         let stream = registerStream(processor, finished: finished)
         let disconnected = DispatchSemaphore(value: 0)
-        processor.onDisconnect { id in
-            XCTAssertEqual(id, self.deviceB)
+        processor.onLinkEnded { ended in
+            XCTAssertEqual(ended.peripheral, self.deviceB)
             disconnected.signal()
         }
 
@@ -540,7 +590,7 @@ final class BLEEventProcessorTests: XCTestCase {
             let scanFinished = DispatchSemaphore(value: 0)
             let scan = registerScan(processor, finished: scanFinished)
             let disconnected = DispatchSemaphore(value: 0)
-            processor.onDisconnect { _ in disconnected.signal() }
+            processor.onLinkEnded { _ in disconnected.signal() }
 
             processor.dispatch(.centralStateChanged(state))
 
@@ -594,17 +644,20 @@ final class BLEEventProcessorTests: XCTestCase {
     /// connected, its waits fail, the disconnect callbacks run, and the late
     /// didDisconnect of the cancelled connection is dropped.
     func testEndConnectionEndsTheConnectionItNames() {
-        let processor = connected(to: deviceB)
+        let (processor, attempt) = connection(to: deviceB)
         let discover = start(processor) { .discoverServices($0) }.wait
         let disconnected = DispatchSemaphore(value: 0)
-        processor.onDisconnect { _ in disconnected.signal() }
+        processor.onLinkEnded { _ in disconnected.signal() }
+        let cancelled = recordCancels(processor)
 
-        processor.endConnection(to: deviceA, .connectionFailed("setup failed"))
-        XCTAssertEqual(processor.connectedPeripheralId, deviceB, "ending another peripheral's connection ended this one")
+        processor.endConnection(processor.makeConnectAttempt(to: deviceA), .connectionFailed("setup failed"))
+        processor.endConnection(processor.makeConnectAttempt(to: deviceB), .connectionFailed("setup failed"))
+        XCTAssertEqual(processor.connectedPeripheralId, deviceB, "ending another attempt's connection ended this one")
         XCTAssertNil(discover.outcome(timeout: 0.1))
 
-        processor.endConnection(to: deviceB, .connectionFailed("setup failed"))
+        processor.endConnection(attempt, .connectionFailed("setup failed"))
         XCTAssertNil(processor.connectedPeripheralId)
+        XCTAssertEqual(cancels(cancelled), [deviceB], "a failed setup's connection was not cancelled")
         guard case .failure(BLEError.connectionFailed) = discover.outcome() else {
             return XCTFail("the pending discovery was not failed")
         }
@@ -615,27 +668,230 @@ final class BLEEventProcessorTests: XCTestCase {
 
     /// A connect still waiting for its device fails when Bluetooth goes away.
     func testBluetoothPowerOffFailsAWaitingConnect() {
-        let processor = BLEEventProcessor(eventQueue: BLEEventQueue())
-        let connect = Wait<Void> { processor.beginConnect(to: self.deviceB, $0) }
+        let processor = poweredOn()
+        let connect = startConnect(processor, to: deviceB)
         processor.dispatch(.centralStateChanged(.poweredOff))
         guard case .failure(BLEError.bluetoothUnavailable) = connect.outcome() else {
             return XCTFail("the waiting connect did not fail with bluetoothUnavailable")
         }
-        XCTAssertFalse(processor.isConnecting(to: deviceB))
+        XCTAssertFalse(processor.isConnecting(connect.attempt))
     }
 
-    /// Bluetooth reporting poweredOn ends nothing, and the state callbacks
-    /// see every state.
+    /// Bluetooth reporting poweredOn ends nothing, and the processor
+    /// reports the state.
     func testPoweredOnLeavesTheConnectionAlone() {
         let processor = connected(to: deviceB)
         let read = startRead(processor, "2A19").wait
-        let seen = DispatchSemaphore(value: 0)
-        processor.onStateChange { state in if state == .poweredOn { seen.signal() } }
-
         processor.dispatch(.centralStateChanged(.poweredOn))
-        XCTAssertEqual(seen.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(processor.centralState, .poweredOn)
         XCTAssertNil(read.outcome(timeout: 0.1), "poweredOn failed the read")
         XCTAssertEqual(processor.connectedPeripheralId, deviceB)
+    }
+
+    // MARK: - Attempts
+
+    /// A connect whose setup failed ends its link at once and cancels the
+    /// connection; a retry to the same device made before that cancel's
+    /// didDisconnect arrives must not be failed by it.
+    func testLateDisconnectOfAFailedSetupDoesNotFailARetry() {
+        let (processor, first) = connection(to: deviceA)
+        processor.endConnection(first, .connectionFailed("setup"))
+        let retry = startConnect(processor, to: deviceA)
+        processor.dispatch(.didDisconnect(peripheralId: deviceA, error: nil))
+        XCTAssertNil(retry.outcome(timeout: 0.1), "the old connection's didDisconnect failed the retry")
+
+        processor.dispatch(.didConnect(peripheralId: deviceA))
+        guard case .success = retry.outcome() else { return XCTFail("the retry did not connect") }
+    }
+
+    /// A cancelled connect's didConnect, queued before the retry's connect
+    /// call was made, and the cancelled attempt's own marker, must not
+    /// complete a retry to the same device; the retry's marker and the
+    /// didConnect after it do.
+    func testStaleConnectOfACancelledAttemptDoesNotCompleteARetry() {
+        let processor = poweredOn()
+        let first = startConnect(processor, to: deviceA)
+        processor.cancelConnect(first.attempt)
+        XCTAssertTrue(isCancellation(first.outcome()))
+
+        let retry = startConnect(processor, to: deviceA, issued: false)
+        processor.dispatch(.didConnect(peripheralId: deviceA))
+        processor.dispatch(.didFailToConnect(peripheralId: deviceA, error: "stale"))
+        processor.dispatch(.connectIssued(first.attempt))
+        processor.dispatch(.didConnect(peripheralId: deviceA))
+        XCTAssertNil(retry.outcome(timeout: 0.1), "an event of the cancelled attempt ended the retry")
+
+        processor.dispatch(.connectIssued(retry.attempt))
+        processor.dispatch(.didConnect(peripheralId: deviceA))
+        guard case .success = retry.outcome() else { return XCTFail("the retry did not connect") }
+    }
+
+    /// issueConnect makes the call, behind its marker, only while the
+    /// attempt waits.
+    func testIssueConnectQueuesTheMarkerBeforeTheCall() {
+        let queue = BLEEventQueue()
+        let processor = BLEEventProcessor(eventQueue: queue)
+        processor.dispatch(.centralStateChanged(.poweredOn))
+        let connect = startConnect(processor, to: deviceA, issued: false)
+        let calls = SharedBox(0)
+
+        processor.issueConnect(connect.attempt) {
+            if case .connectIssued(let attempt)? = queue.dequeue() {
+                XCTAssertEqual(attempt, connect.attempt)
+            } else {
+                XCTFail("the marker was not queued before the call")
+            }
+            calls.update { $0 += 1 }
+        }
+        processor.cancelConnect(connect.attempt)
+        processor.issueConnect(connect.attempt) { calls.update { $0 += 1 } }
+        XCTAssertEqual(calls.get(), 1, "a cancelled attempt's connect call was made")
+        XCTAssertNil(queue.dequeue())
+    }
+
+    /// Concurrent connects: each replaces the link before it, which is handed
+    /// to the link-ended callbacks to cancel (so a replaced device does not
+    /// stay connected), and a late cancel of a replaced attempt leaves the
+    /// newest one waiting.
+    func testConcurrentConnectsEachSettleAndOnlyTheirOwnCancelEndsThem() {
+        let processor = connected(to: deviceA)
+        let ended = SharedBox<[UUID]>([])
+        processor.onLinkEnded { attempt in ended.update { $0.append(attempt.peripheral) } }
+        let cancelled = recordCancels(processor)
+
+        let two = startConnect(processor, to: deviceB)
+        let three = startConnect(processor, to: deviceA)
+        guard case .failure(BLEError.connectionFailed) = two.outcome() else {
+            return XCTFail("the replaced connect was left waiting")
+        }
+        processor.cancelConnect(two.attempt)
+        XCTAssertTrue(processor.isConnecting(three.attempt), "a replaced attempt's cancel ended the newest connect")
+        XCTAssertEqual(ended.get(), [deviceA, deviceB])
+        XCTAssertEqual(cancels(cancelled), [deviceA, deviceB], "a replaced connection was not cancelled")
+
+        processor.dispatch(.didConnect(peripheralId: deviceA))
+        guard case .success = three.outcome() else { return XCTFail("the newest connect did not complete") }
+    }
+
+    /// An earlier attempt to the same device cannot end a later one: neither
+    /// its cancel nor its deadline, and the cancel of its connection is
+    /// queued before the later attempt's connect call.
+    func testAnEarlierAttemptToTheSameDeviceLeavesTheLaterOneAlone() {
+        let processor = poweredOn()
+        let cancelled = recordCancels(processor)
+        let first = startConnect(processor, to: deviceA, timeout: 0.05, issued: false)
+        let second = startConnect(processor, to: deviceA, issued: false)
+        guard case .failure(BLEError.connectionFailed) = first.outcome() else {
+            return XCTFail("the replaced attempt was left waiting")
+        }
+        let order = SharedBox<[String]>([])
+        gattQueue.async { processor.issueConnect(second.attempt) { order.update { $0.append("connect") } } }
+        processor.cancelConnect(first.attempt)
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertEqual(cancels(cancelled), [deviceA], "the replaced attempt's connection was not cancelled once")
+        XCTAssertEqual(order.get(), ["connect"])
+        XCTAssertTrue(processor.isConnecting(second.attempt),
+                      "the earlier attempt's cancel or deadline ended the later one")
+
+        processor.dispatch(.connectIssued(second.attempt))
+        processor.dispatch(.didConnect(peripheralId: deviceA))
+        guard case .success = second.outcome() else { return XCTFail("the later attempt did not connect") }
+    }
+
+    /// The cancel of a connection blew gave up is queued on blew.cb before
+    /// the connect call of an attempt that starts after it, also from
+    /// another thread, so it cannot cancel that attempt's connect.
+    func testCancelOfAnEndedLinkIsQueuedBeforeTheNextConnectCall() {
+        let processor = poweredOn()
+        let order = SharedBox<[String]>([])
+        processor.onCancelConnection(on: gattQueue) { _ in order.update { $0.append("cancel") } }
+        let first = startConnect(processor, to: deviceA)
+        processor.cancelConnect(first.attempt)
+        let retry = startConnect(processor, to: deviceA, issued: false)
+        gattQueue.async { processor.issueConnect(retry.attempt) { order.update { $0.append("connect") } } }
+        gattQueue.sync {}
+        XCTAssertEqual(order.get(), ["cancel", "connect"])
+        processor.cancelConnect(retry.attempt)
+    }
+
+    /// Several disconnect waits each resume when the link ends, and a
+    /// cancel ends only the wait it names.
+    func testEveryDisconnectWaitResumesAndACancelEndsOnlyItsOwn() {
+        let processor = connected(to: deviceA)
+        let first = processor.makeDisconnectWait()
+        let one = Wait<Void> { _ = processor.beginDisconnect(first, from: self.deviceA, $0) }
+        let two = disconnectWait(processor, from: deviceA)
+        let three = disconnectWait(processor, from: deviceA)
+
+        processor.cancelDisconnect(first)
+        XCTAssertTrue(isCancellation(one.outcome()))
+        XCTAssertNil(two.outcome(timeout: 0.1), "a cancel ended another disconnect wait")
+
+        processor.dispatch(.didDisconnect(peripheralId: deviceA, error: nil))
+        guard case .success = two.outcome(), case .success = three.outcome() else {
+            return XCTFail("a disconnect wait did not resume")
+        }
+    }
+
+    /// A connect has its own deadline: past it the wait fails with timeout
+    /// and the pending connect is handed over to be cancelled. A connect
+    /// that completed first is left alone.
+    func testConnectDeadlineFailsTheWaitAndCancelsThePendingConnect() {
+        let processor = poweredOn()
+        let cancelled = recordCancels(processor)
+
+        let late = startConnect(processor, to: deviceA, timeout: 0.05)
+        guard case .failure(BLEError.timeout) = late.outcome() else {
+            return XCTFail("the connect did not fail at its deadline")
+        }
+        XCTAssertFalse(processor.isConnecting(late.attempt))
+        XCTAssertEqual(cancels(cancelled), [deviceA], "the pending connect was not cancelled")
+
+        let quick = startConnect(processor, to: deviceA, timeout: 0.05)
+        processor.dispatch(.didConnect(peripheralId: deviceA))
+        guard case .success = quick.outcome() else { return XCTFail("the connect did not complete") }
+        Thread.sleep(forTimeInterval: 0.1)
+        gattQueue.sync {}
+        XCTAssertTrue(processor.isConnected(quick.attempt), "the deadline ended a connect that had completed")
+    }
+
+    /// Nothing is registered while Bluetooth is not poweredOn: a connect, a
+    /// request, a write without response and a subscribe each fail at once
+    /// with bluetoothUnavailable (exit code 3). A disconnect returns at once:
+    /// the power-off ended the link.
+    func testRegistrationsWhileBluetoothIsOffFailWithUnavailable() {
+        let unknown = BLEEventProcessor(eventQueue: BLEEventQueue())
+        guard case .failure(BLEError.bluetoothUnavailable) = startConnect(unknown, to: deviceA).outcome() else {
+            return XCTFail("a connect before Bluetooth reported poweredOn was not refused")
+        }
+
+        let processor = connected(to: deviceB)
+        processor.dispatch(.centralStateChanged(.poweredOff))
+        XCTAssertEqual(processor.centralState, .poweredOff)
+
+        let connect = startConnect(processor, to: deviceA)
+        guard case .failure(BLEError.bluetoothUnavailable) = connect.outcome(timeout: 0.2) else {
+            return XCTFail("a connect registered while Bluetooth is off was not refused")
+        }
+        let mustCancel = SharedBox(true)
+        guard case .success = disconnectWait(processor, from: deviceB, mustCancel: mustCancel).outcome() else {
+            return XCTFail("a disconnect while Bluetooth is off did not return at once")
+        }
+        XCTAssertFalse(mustCancel.get(), "a disconnect while Bluetooth is off asked to cancel a connection")
+        guard case .failure(BLEError.bluetoothUnavailable) = startRead(processor, "2A19").wait.outcome() else {
+            return XCTFail("a read while Bluetooth is off did not fail with bluetoothUnavailable")
+        }
+        let write = startWriteWithoutResponse(processor, ready: { true }, sent: {})
+        guard case .failure(BLEError.bluetoothUnavailable) = write.wait.outcome() else {
+            return XCTFail("a write without response while Bluetooth is off did not fail with bluetoothUnavailable")
+        }
+        let calls = SharedBox<[Bool]>([])
+        guard case .failure(BLEError.bluetoothUnavailable) =
+                subscribe(processor, calls: calls).confirmed.outcome() else {
+            return XCTFail("a subscribe while Bluetooth is off did not fail with bluetoothUnavailable")
+        }
+        gattQueue.sync {}
+        XCTAssertEqual(made(calls), [], "a setNotifyValue call was made while Bluetooth is off")
     }
 
     // MARK: - Requests answered in issue order

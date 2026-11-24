@@ -18,6 +18,11 @@ public enum BLEEvent: Sendable {
     )
 
     // Connection
+
+    /// Queued by `BLEEventProcessor.issueConnect` on blew.cb just before the
+    /// CoreBluetooth connect call of `attempt`; CoreBluetooth sends no such
+    /// event. Orders the attempt's start with the callbacks around it.
+    case connectIssued(ConnectAttempt)
     case didConnect(peripheralId: UUID)
     case didFailToConnect(peripheralId: UUID, error: String?)
     case didDisconnect(peripheralId: UUID, error: String?)
@@ -75,6 +80,8 @@ public enum BLEEvent: Sendable {
         switch self {
         case .centralStateChanged, .didDiscover:
             return nil
+        case .connectIssued(let attempt):
+            return attempt.peripheral
         case .didConnect(let id), .didFailToConnect(let id, _), .didDisconnect(let id, _),
              .didDiscoverServices(let id, _, _), .didDiscoverCharacteristics(let id, _, _, _),
              .didDiscoverDescriptors(let id, _, _, _), .didUpdateValue(let id, _, _, _),
