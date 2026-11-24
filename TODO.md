@@ -249,7 +249,6 @@ later release. Delete an item in the commit that fixes it, citing its ID
 - [ ] **R1. The version string is out of date.** `Sources/blew/Blew.swift:16`
   says `0.2.0`; the latest tag is `v0.2.2`. Set it to `0.3.0` for the
   release.
-- [ ] **R2. There is no `.gitignore`** (`.build/` shows as untracked).
 - [ ] **R3. A fresh clone without submodules fails** with a Ruby `ENOENT`
   backtrace. `Plugins/GenerateBLENames/plugin.swift:9-17`,
   `Scripts/generate-ble-names.rb:26`. Check for the submodules with a clear

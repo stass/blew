@@ -1,0 +1,4 @@
+.build/
+.swiftpm/
+.claude/worktrees/
+.claude/settings.local.json
