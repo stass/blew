@@ -477,7 +477,7 @@ blew nus [-n <name>] [-i <id>] [-S <uuid>] [-p <strategy>]
 
 Bridges a local endpoint to a device's [Nordic UART Service](https://docs.nordicsemi.com/bundle/ncs-latest/page/nrf/libraries/bluetooth/services/nus.html) (NUS): service `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`, RX characteristic `6E400002-…` (blew writes to it) and TX characteristic `6E400003-…` (the device notifies on it). Connects like `connect`; with no device option at all it uses the connected device, or else scans for devices advertising NUS and picks the strongest (or the one `-p` picks). Writes are split into pieces that fit one ATT packet (the negotiated MTU minus 3), and writes without response wait for the device to be ready rather than being dropped.
 
-Bytes pass unchanged in both directions: no line-ending translation and no added newline. What arrives from the device is written to stdout as it comes, without a timestamp or newline; with `--out kv`, each notification is a `ts=… rx=<hex>` line instead. Bridge events (`connected`, `disconnected`, the pty path, TCP clients) go to stderr as `nus <event>: <detail>` lines.
+Bytes pass unchanged in both directions: no line-ending translation and no added newline. What arrives from the device is written to stdout as it comes, without a timestamp or newline; with `--out kv`, each notification is a `ts=… rx=<hex>` line instead. Bridge events (`connected`, `disconnected`, `reconnecting`, `dropped`, the pty path, TCP clients) go to stderr as `nus <event>: <detail>` lines.
 
 The local endpoint is one of:
 
@@ -493,10 +493,14 @@ The local endpoint is one of:
 |------|-------------|
 | `-e, --expect <text>` | Succeed as soon as this text (same escapes as `--send`) has arrived, even split across notifications; exit with code 4 (timeout) if it has not arrived `--duration` seconds after the input ends. Works with stdin, `--send` and `--file`. |
 | `-d, --duration <sec>` | Seconds to keep listening after the input ends. Default 1; with `--expect`, the deadline for the expected text, default 5. At most a year. |
-| `--reconnect` | When the device disconnects, report it, reconnect to that same device (by its identifier, whatever else now matches the targeting options) and keep the endpoint (pty or TCP listener) open. Without it, a disconnect ends the command with exit code 5 (3 when Bluetooth is turned off or blew loses Bluetooth permission); so does a subscribe or write failure while the device is still connected, with or without it. |
+| `--reconnect` | When the device disconnects, report it, reconnect to that same device (by its identifier, whatever else now matches the targeting options) and keep the endpoint (pty or TCP listener) open. Input not yet written when the link was lost (the rest of `--send`, `--file` or stdin, or what a pty or TCP client typed meanwhile) is written after the reconnect, starting with the piece whose write was under way, so the device may receive that piece twice. Only writes with response (`-r`) are confirmed by the device: without response, pieces handed to Bluetooth just before the link was lost can be lost, so use `-r` when every byte must arrive. A TCP client's bytes not yet written when it disconnects are dropped, so they never reach the device on behalf of the next client. Without `--reconnect`, a disconnect ends the command with exit code 5 (3 when Bluetooth is turned off or blew loses Bluetooth permission), and the error gives a lower bound on the input bytes not sent; so does a subscribe or write failure while the device is still connected, with or without it. |
 | `-r, --with-response` / `-w, --without-response` | Write type for RX. Default: without response when RX supports it. |
 
-A pty or TCP bridge runs until `Ctrl-C` (or until the device disconnects, without `--reconnect`). If the local program is not reading, bytes from the device that do not fit the pty or socket buffer are dropped, as on a serial line.
+Each write to the device must complete within the operation timeout (`-t`, default 5 s); a write the device never acknowledges, or a write without response that never gets the device's flow-control credit, ends the command with exit code 4.
+
+blew holds about 64 KiB of local input that the device has not taken yet (64 KiB plus one read of at most 4 KiB); while that much is waiting it stops reading, so a pipe waits and a pty or TCP client's writes block, instead of blew's memory growing. `--file` reads the whole file into memory first.
+
+A pty or TCP bridge runs until `Ctrl-C` (or until the device disconnects, without `--reconnect`). If the local program is not reading, or no TCP client is connected, bytes from the device that do not fit the pty or socket buffer are dropped, as on a serial line: the first loss of each run is reported as `nus dropped: <n> bytes from the device: …`, and when the bridge ends a last `dropped` event gives the total.
 
 In the REPL and `exec`, standard input belongs to blew, so `nus` there sends only `--send`/`--file` bytes, or just listens for `--duration` seconds; `--pty` and `--listen` block the prompt until `Ctrl-C`.
 

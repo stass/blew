@@ -123,24 +123,17 @@ None open.
 
 ### NUS bridge
 
-- [ ] **N1. `--reconnect` with fixed or piped input exits 0 with data
-  unsent.** `Sources/blew/NUS/NUSPort.swift:62,71-81`,
-  `Sources/blew/NUS/CommandRouter+NUS.swift:124-125`. After a reconnect the
-  input stream is already finished.
-- [ ] **N2. No back-pressure from BLE to local input.** `NUSPort.swift:40`,
-  `:73`: the `AsyncStream` buffer is unbounded, so memory grows without
-  limit for large files and fast TCP or pty clients.
-- [ ] **N3. Data to slow TCP or pty clients is dropped silently.**
-  `NUSPort.swift:297-313`. Add at least a drop counter and an `nusStatus`
-  event.
-- [ ] **N4. Reconnect eligibility uses one connection-state sample.**
-  `CommandRouter+NUS.swift:260`. A write error that arrives before the
-  disconnect callback exits 5 instead of reconnecting.
-- [ ] **N5. NUS writes have no operation deadline in the CLI.**
-  `CommandRouter+NUS.swift:307-310`. A write with response that the device
-  never acknowledges, or a write without response that never gets
-  flow-control credit, blocks `blew nus` until Ctrl-C. MCP `ble_nus` calls
-  end by their time budget.
+None open.
+
+### Writes
+
+- [ ] **W1. A timed-out write with response can complete a later write.**
+  `Sources/BLEManager/BLEEventProcessor.swift:366`. Cancelling the wait
+  (`cancelWriteContinuation`) leaves the CoreBluetooth write outstanding,
+  and its late `didWriteValue` resumes whatever write continuation is then
+  registered for that characteristic. After `nus` exits 4 on a write
+  timeout in the REPL, `exec -k` or MCP, the next `write` to RX can report
+  success (or the old error) before the device acknowledged it.
 
 ### MCP
 

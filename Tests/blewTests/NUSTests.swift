@@ -16,33 +16,97 @@ private final class Sink: @unchecked Sendable {
     func append(_ d: Data) { lock.withLock { stored.append(d) } }
 }
 
-// MARK: - Chunking
+// MARK: - Input buffer
 
-final class NUSChunkTests: XCTestCase {
-    func testSplitsIntoPiecesOfAtMostMaxLength() {
-        let chunks = NUS.chunks(bytes("abcdefg"), maxLength: 3)
-        XCTAssertEqual(chunks, [bytes("abc"), bytes("def"), bytes("g")])
+final class NUSInputBufferTests: XCTestCase {
+    /// Take every piece the buffer gives, consuming each.
+    private func drain(_ buffer: NUSInputBuffer, maxLength: Int) async throws -> [Data] {
+        var pieces: [Data] = []
+        while let piece = try await buffer.next(maxLength: maxLength) {
+            pieces.append(piece.data)
+            buffer.consume(piece)
+        }
+        return pieces
     }
 
-    func testExactMultipleHasNoEmptyTail() {
-        XCTAssertEqual(NUS.chunks(bytes("abcdef"), maxLength: 3), [bytes("abc"), bytes("def")])
+    func testPiecesAreAtMostMaxLengthAndNeverSpanTwoReads() async throws {
+        let buffer = NUSInputBuffer(capacity: 1024)
+        buffer.append(bytes("abcdefg"))
+        buffer.append(bytes("hi"))
+        buffer.end()
+        let pieces = try await drain(buffer, maxLength: 3)
+        XCTAssertEqual(pieces, [bytes("abc"), bytes("def"), bytes("g"), bytes("hi")])
     }
 
-    func testEmptyDataHasNoChunks() {
-        XCTAssertEqual(NUS.chunks(Data(), maxLength: 20), [])
-    }
-
-    func testSliceWithNonZeroStartIndex() {
-        let slice = bytes("xxabcd").dropFirst(2)
-        XCTAssertEqual(NUS.chunks(Data(slice), maxLength: 3), [bytes("abc"), bytes("d")])
-        XCTAssertEqual(NUS.chunks(slice, maxLength: 3), [bytes("abc"), bytes("d")])
-    }
-
-    func testRejoinedChunksEqualInput() {
+    func testRejoinedPiecesEqualInput() async throws {
         let input = Data((0..<1000).map { UInt8($0 % 251) })
-        let chunks = NUS.chunks(input, maxLength: 244)
-        XCTAssertTrue(chunks.allSatisfy { $0.count <= 244 })
-        XCTAssertEqual(chunks.reduce(Data(), +), input)
+        let buffer = NUSInputBuffer(capacity: 4096)
+        buffer.append(Data(bytes("xx").dropFirst(2)) + input)
+        buffer.end()
+        let pieces = try await drain(buffer, maxLength: 244)
+        XCTAssertTrue(pieces.allSatisfy { $0.count <= 244 })
+        XCTAssertEqual(pieces.reduce(Data(), +), input)
+        XCTAssertEqual(buffer.pendingCount, 0)
+    }
+
+    func testNextLeavesBytesUntilConsumed() async throws {
+        let buffer = NUSInputBuffer(capacity: 1024)
+        buffer.append(bytes("abcd"))
+        let taken = try await buffer.next(maxLength: 2)
+        let first = try XCTUnwrap(taken)
+        let again = try await buffer.next(maxLength: 2)
+        XCTAssertEqual(first.data, bytes("ab"))
+        XCTAssertEqual(again?.data, bytes("ab"), "a piece not consumed is given again")
+        buffer.consume(first)
+        let rest = try await buffer.next(maxLength: 8)
+        XCTAssertEqual(rest?.data, bytes("cd"))
+        XCTAssertEqual(buffer.pendingCount, 2)
+    }
+
+    /// A TCP client left: its bytes are dropped, and the write of a piece
+    /// taken before that removes nothing of what the next client sends.
+    func testDiscardDropsHeldBytesAndStalePiecesConsumeNothing() async throws {
+        let buffer = NUSInputBuffer(capacity: 1024)
+        buffer.append(bytes("secret"))
+        let taken = try await buffer.next(maxLength: 4)
+        let inFlight = try XCTUnwrap(taken)
+        XCTAssertEqual(buffer.discard(), 6)
+        buffer.append(bytes("next"))
+        buffer.consume(inFlight)
+        let front = try await buffer.next(maxLength: 8)
+        XCTAssertEqual(front?.data, bytes("next"))
+    }
+
+    func testNextWaitsForInputAndEndsWhenCancelled() async throws {
+        let buffer = NUSInputBuffer(capacity: 1024)
+        let waiting = Task { try await buffer.next(maxLength: 8) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        waiting.cancel()
+        do {
+            _ = try await waiting.value
+            XCTFail("a cancelled wait returned")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        let woken = Task { try await buffer.next(maxLength: 8) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        buffer.append(bytes("x"))
+        let got = try await woken.value
+        XCTAssertEqual(got?.data, bytes("x"))
+    }
+}
+
+// MARK: - Dropped device bytes
+
+final class NUSDropTallyTests: XCTestCase {
+    func testEachRunOfLossesIsReportedOnceAndAllAreCounted() {
+        var tally = NUSDropTally()
+        XCTAssertNil(tally.record(offered: 10, delivered: 10))
+        XCTAssertEqual(tally.record(offered: 10, delivered: 4), 6, "a run starts")
+        XCTAssertNil(tally.record(offered: 10, delivered: 0), "the run goes on")
+        XCTAssertNil(tally.record(offered: 5, delivered: 5), "delivery resumes")
+        XCTAssertEqual(tally.record(offered: 5, delivered: 0), 5, "a new run")
+        XCTAssertEqual(tally.total, 21)
     }
 }
 
@@ -117,21 +181,68 @@ final class NUSSessionTests: XCTestCase {
         -> (NUSSession, AsyncThrowingStream<Data, Error>.Continuation, Sink, Sink) {
         let rx = Sink()
         let delivered = Sink()
-        let (received, deviceSends) = AsyncThrowingStream<Data, Error>.makeStream()
-        let (inputStream, inputCont) = AsyncStream<Data>.makeStream()
-        input.forEach { inputCont.yield($0) }
-        if inputEnds { inputCont.finish() }
-        let session = NUSSession(
-            send: { data in
-                if sendFails { throw NUSPortError("link down") }
-                rx.append(data)
-            },
-            received: received,
-            input: inputStream,
-            deliver: { delivered.append($0) },
-            expect: expect,
-            linger: linger)
+        let buffer = NUSInputBuffer(capacity: 1024)
+        input.forEach { buffer.append($0) }
+        if inputEnds { buffer.end() }
+        let (session, deviceSends) = makeSession(input: buffer, expect: expect, linger: linger,
+                                                 deliver: { delivered.append($0) }) { data in
+            if sendFails { throw NUSPortError("link down") }
+            rx.append(data)
+        }
         return (session, deviceSends, rx, delivered)
+    }
+
+    private func makeSession(input: NUSInputBuffer, maxLength: Int = 64, writeTimeout: TimeInterval = 5,
+                             expect: Data? = nil, linger: TimeInterval = 0.05,
+                             deliver: @escaping @Sendable (Data) -> Void = { _ in },
+                             send: @escaping @Sendable (Data) async throws -> Void)
+        -> (NUSSession, AsyncThrowingStream<Data, Error>.Continuation) {
+        let (received, deviceSends) = AsyncThrowingStream<Data, Error>.makeStream()
+        let session = NUSSession(send: send, maxLength: maxLength, writeTimeout: writeTimeout,
+                                 received: received, input: input, deliver: deliver,
+                                 expect: expect, linger: linger)
+        return (session, deviceSends)
+    }
+
+    /// `--reconnect` with `--send` or piped input: the piece whose write the
+    /// lost link failed, and everything after it, go out on the next
+    /// connection, and the command ends only once they did.
+    func testInputALostLinkLeftUnsentIsSentByTheNextSession() async {
+        let port = NUSPort.fixed(bytes("abcdef"), write: { _ in })
+        let sentFirst = Sink()
+        let (first, _) = makeSession(input: port.input(), maxLength: 2) { piece in
+            if !sentFirst.data.isEmpty { throw BLEError.connectionFailed("disconnected") }
+            sentFirst.append(piece)
+        }
+        let lost = await first.run()
+        XCTAssertEqual(lost, .linkLost("write failed: Connection failed: disconnected",
+                                       exitCode: BlewExitCode.operationFailed.code, linkDown: true))
+        XCTAssertEqual(sentFirst.data, bytes("ab"))
+        XCTAssertEqual(port.unsentCount, 4)
+        XCTAssertEqual(NUSPort.fixed(bytes("abcdef"), write: { _ in }).unsentCount, 6,
+                       "input not read yet counts as unsent")
+
+        let sentSecond = Sink()
+        let (second, _) = makeSession(input: port.input(), maxLength: 2) { sentSecond.append($0) }
+        let outcome = await second.run()
+        XCTAssertEqual(outcome, .inputEnded)
+        XCTAssertEqual(sentSecond.data, bytes("cdef"))
+        XCTAssertEqual(port.unsentCount, 0)
+    }
+
+    /// A write the device never completes ends the session with a timeout
+    /// (exit code 4) after the write timeout, not never.
+    func testAWriteThatNeverCompletesTimesOut() async {
+        let buffer = NUSInputBuffer(capacity: 1024)
+        buffer.append(bytes("x"))
+        let (session, _) = makeSession(input: buffer, writeTimeout: 0.2) { _ in
+            try await Task.sleep(nanoseconds: 60_000_000_000)
+        }
+        let start = Date()
+        let outcome = await session.run()
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+        XCTAssertEqual(outcome, .linkLost("write failed: Operation timed out", exitCode: BlewExitCode.timeout.code))
+        XCTAssertEqual(buffer.pendingCount, 1, "the timed-out piece is not consumed")
     }
 
     func testInputIsSentInOrderAndSessionEndsAfterLinger() async {
@@ -170,13 +281,14 @@ final class NUSSessionTests: XCTestCase {
         let (session, deviceSends, _, _) = makeSession(input: [], inputEnds: false)
         deviceSends.finish(throwing: BLEError.connectionFailed("disconnected"))
         let outcome = await session.run()
-        XCTAssertEqual(outcome, .linkLost("Connection failed: disconnected", exitCode: BlewExitCode.operationFailed.code))
+        XCTAssertEqual(outcome, .linkLost("Connection failed: disconnected",
+                                          exitCode: BlewExitCode.operationFailed.code, linkDown: true))
     }
 
     func testWriteFailureIsLinkLost() async {
         let (session, _, _, _) = makeSession(input: [bytes("x")], inputEnds: false, sendFails: true)
         let outcome = await session.run()
-        guard case .linkLost(let reason, _) = outcome else { return XCTFail("got \(outcome)") }
+        guard case .linkLost(let reason, _, _) = outcome else { return XCTFail("got \(outcome)") }
         XCTAssertTrue(reason.hasPrefix("write failed"), reason)
     }
 
@@ -187,7 +299,7 @@ final class NUSSessionTests: XCTestCase {
         deviceSends.finish(throwing: BLEError.bluetoothUnavailable("Bluetooth is powered off"))
         let outcome = await session.run()
         XCTAssertEqual(outcome, .linkLost("Bluetooth unavailable: Bluetooth is powered off",
-                                          exitCode: BlewExitCode.bluetoothUnavailable.code))
+                                          exitCode: BlewExitCode.bluetoothUnavailable.code, linkDown: true))
         XCTAssertEqual(NUSOptions.step(after: outcome, stillConnected: false, linger: 1, reconnect: false),
                        .finish(exitCode: BlewExitCode.bluetoothUnavailable.code,
                                error: "Bluetooth unavailable: Bluetooth is powered off"))
@@ -197,20 +309,59 @@ final class NUSSessionTests: XCTestCase {
 // MARK: - Ports
 
 final class NUSPortTests: XCTestCase {
-    private func firstChunk(_ stream: AsyncStream<Data>) async -> Data? {
-        var it = stream.makeAsyncIterator()
-        return await it.next()
+    /// The next read from the port's input, consumed.
+    private func nextRead(_ input: NUSInputBuffer) async throws -> Data? {
+        guard let piece = try await input.next(maxLength: 4096) else { return nil }
+        input.consume(piece)
+        return piece.data
     }
 
-    func testFixedPortSendsOnceThenEnds() async {
+    func testFixedPortSendsOnceThenEnds() async throws {
         let port = NUSPort.fixed(bytes("hi"), write: { _ in })
-        var all = Data()
-        for await chunk in port.input() { all.append(chunk) }
-        XCTAssertEqual(all, bytes("hi"))
-        // A later session (after a reconnect) finds the input already ended.
-        var count = 0
-        for await _ in port.input() { count += 1 }
-        XCTAssertEqual(count, 0)
+        let first = try await nextRead(port.input())
+        XCTAssertEqual(first, bytes("hi"))
+        // A later session (after a reconnect) finds the input ended.
+        let later = try await nextRead(port.input())
+        XCTAssertNil(later)
+    }
+
+    /// A source faster than the device: the reader stops once the buffer
+    /// holds its capacity, and reads again when a session consumes.
+    func testReaderStopsWhileTheInputBufferIsFull() async throws {
+        let reads = Locked(0)
+        let closed = Locked(false)
+        let port = NUSPort(label: "test", capacity: 4 * 4096, read: {
+            if closed.value { return nil }
+            reads.withValue { $0 += 1 }
+            return Data(count: 4096)
+        }, write: { $0.count }, close: { closed.set(true) })
+        defer { port.close() }
+        let input = port.input()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(reads.value, 4)
+        XCTAssertEqual(port.unsentCount, 4 * 4096)
+
+        _ = try await nextRead(input)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(reads.value, 5, "consuming makes room for one more read")
+    }
+
+    /// A pty nobody reads, and a TCP listener with no client: bytes from
+    /// the device that do not fit are counted, and the first loss of each
+    /// run is reported.
+    func testBytesTheLocalEndDoesNotTakeAreCounted() throws {
+        let pty = try NUSPort.pty()
+        defer { pty.close() }
+        let big = Data(count: 1 << 20)
+        let firstLoss = try XCTUnwrap(pty.deliver(big), "a full pty drops bytes")
+        XCTAssertGreaterThan(firstLoss, 0)
+        XCTAssertNil(pty.deliver(big), "the same run is reported once")
+        XCTAssertEqual(pty.droppedCount, firstLoss + big.count)
+
+        let tcp = try NUSPort.tcp(host: "127.0.0.1", port: 0, onEvent: { _ in })
+        defer { tcp.close() }
+        XCTAssertEqual(tcp.deliver(bytes("hello")), 5, "no client takes nothing")
+        XCTAssertEqual(tcp.droppedCount, 5)
     }
 
     func testPtyBridgesBothDirections() async throws {
@@ -225,10 +376,10 @@ final class NUSPortTests: XCTestCase {
         defer { close(fd) }
 
         _ = write(fd, "AT\r", 3)
-        let got = await firstChunk(input)
+        let got = try await nextRead(input)
         XCTAssertEqual(got, bytes("AT\r"), "raw mode: the CR passes unchanged")
 
-        port.write(bytes("OK\r\n"))
+        _ = port.deliver(bytes("OK\r\n"))
         var buf = [UInt8](repeating: 0, count: 16)
         let n = read(fd, &buf, buf.count)
         XCTAssertEqual(Data(buf[0..<max(n, 0)]), bytes("OK\r\n"))
@@ -241,15 +392,14 @@ final class NUSPortTests: XCTestCase {
         let portNumber = try XCTUnwrap(UInt16(port.label.split(separator: ":").last ?? ""))
         XCTAssertNotEqual(portNumber, 0)
         let input = port.input()
-        var it = input.makeAsyncIterator()
 
         for line in ["first\n", "second\n"] {
             let client = try connectLoopback(port: portNumber)
             _ = line.withCString { write(client, $0, strlen($0)) }
-            let got = await it.next()
+            let got = try await nextRead(input)
             XCTAssertEqual(got, bytes(line))
 
-            port.write(bytes("echo"))
+            _ = port.deliver(bytes("echo"))
             var buf = [UInt8](repeating: 0, count: 16)
             let n = read(client, &buf, buf.count)
             XCTAssertEqual(Data(buf[0..<max(n, 0)]), bytes("echo"))
@@ -420,6 +570,47 @@ final class NUSStepTests: XCTestCase {
         let failure = NUSOutcome.linkLost("write failed: busy")
         XCTAssertEqual(NUSOptions.step(after: failure, stillConnected: true, linger: 1, reconnect: true),
                        .finish(exitCode: failed, error: "write failed: busy"))
+    }
+
+    /// A write failed by the disconnect (or after it) reconnects even when
+    /// the connection state has not caught up with the disconnect yet.
+    func testWriteErrorFromALostLinkReconnects() {
+        for error in [BLEError.connectionFailed("disconnected"), .notConnected] {
+            let outcome = NUSOutcome.linkLost("write failed", error)
+            XCTAssertEqual(NUSOptions.step(after: outcome, stillConnected: true, linger: 1, reconnect: true),
+                           .reconnect, "\(error)")
+        }
+        let timedOut = NUSOutcome.linkLost("write failed", BLEError.timeout)
+        XCTAssertEqual(NUSOptions.step(after: timedOut, stillConnected: true, linger: 1, reconnect: true),
+                       .finish(exitCode: BlewExitCode.timeout.code, error: "write failed: Operation timed out"))
+    }
+
+    /// A write error the disconnect report follows: the settle wait sees
+    /// the link go down and the step reconnects.
+    func testSettleWaitSeesALateDisconnect() async {
+        let probes = Locked(0)
+        let up = await NUSOptions.linkStaysUp(for: 5, interval: 0.01) {
+            probes.withValue { $0 += 1; return $0 < 3 }
+        }
+        XCTAssertFalse(up)
+        XCTAssertEqual(probes.value, 3)
+        let failure = NUSOutcome.linkLost("write failed", BLEError.writeFailed("connection timed out"))
+        XCTAssertEqual(NUSOptions.step(after: failure, stillConnected: up, linger: 1, reconnect: true), .reconnect)
+    }
+
+    func testSettleWaitEndsWhenTheLinkStaysUp() async {
+        let start = Date()
+        let up = await NUSOptions.linkStaysUp(for: 0.1, interval: 0.01) { true }
+        XCTAssertTrue(up)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+    }
+
+    /// Without `--reconnect`, a lost link with input left over fails and
+    /// says how much was not sent.
+    func testUnsentInputIsReported() {
+        XCTAssertEqual(NUSOptions.step(after: .linkLost("device disconnected"), stillConnected: false,
+                                       linger: 1, reconnect: false, unsent: 12),
+                       .finish(exitCode: failed, error: "device disconnected (at least 12 bytes of input not sent)"))
     }
 
     func testSessionEnds() {

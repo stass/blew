@@ -10,18 +10,6 @@ enum NUS {
     /// The peripheral notifies on TX.
     static let tx = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
-    /// Split `data` into pieces of at most `maxLength` bytes, in order.
-    /// A UART carries bytes, so pieces may split a multi-byte character;
-    /// the receiver reassembles the stream.
-    static func chunks(_ data: Data, maxLength: Int) -> [Data] {
-        precondition(maxLength > 0, "maxLength must be positive")
-        return stride(from: 0, to: data.count, by: maxLength).map { offset in
-            let start = data.index(data.startIndex, offsetBy: offset)
-            let end = data.index(start, offsetBy: min(maxLength, data.count - offset))
-            return Data(data[start..<end])
-        }
-    }
-
     /// Decode the printf-style escapes of `--send` and `--expect` text:
     /// `\n`, `\r`, `\t`, `\0`, `\\` and `\xHH`. Any other byte passes through
     /// as UTF-8. Returns nil for an unknown or truncated escape.
@@ -82,23 +70,35 @@ enum NUSOutcome: Equatable {
     case matched
     /// The local input ended and the `--expect` bytes did not arrive in time.
     case expectMissed
-    /// The device disconnected, or a write to it failed: why, and the exit
-    /// code that ends the command when it does not reconnect.
-    case linkLost(String, exitCode: Int32 = BlewExitCode.operationFailed.code)
+    /// The device disconnected, or a write to it failed: why, the exit code
+    /// that ends the command when it does not reconnect, and whether the
+    /// error itself shows the connection is gone (a disconnect, no
+    /// connection, Bluetooth unavailable). When it does not, whether to
+    /// reconnect is decided from the connection state.
+    case linkLost(String, exitCode: Int32 = BlewExitCode.operationFailed.code, linkDown: Bool = false)
 }
 
 /// One connection's worth of bridging: local input goes to the device's RX
 /// characteristic, TX notifications go to `deliver`. The session ends at the
 /// first of: expected bytes received, input ended plus `linger` seconds,
 /// or the link lost. Cancelling the task that runs it ends it too.
+///
+/// The session sends from the port's input buffer one piece (at most
+/// `maxLength` bytes) at a time and consumes a piece only after its write
+/// completed, so what a lost link left unsent stays in the buffer for the
+/// next session. The piece whose write was under way when the link was lost
+/// is sent again by the next session; a device may receive it twice.
 struct NUSSession: Sendable {
-    /// Writes one piece of local input to RX (chunking and flow control are
-    /// the link's job).
+    /// Writes one piece of local input to RX (flow control is the link's job).
     let send: @Sendable (Data) async throws -> Void
+    /// The largest piece `send` is given.
+    let maxLength: Int
+    /// Seconds one `send` may take before the session ends with a timeout.
+    let writeTimeout: TimeInterval
     /// TX notifications; the stream throws why when the connection ends.
     let received: AsyncThrowingStream<Data, Error>
-    /// Local input; finishes when the input ends for good (EOF).
-    let input: AsyncStream<Data>
+    /// Local input, shared with the sessions before and after this one.
+    let input: NUSInputBuffer
     /// Where received bytes go: the local port or the command's output.
     let deliver: @Sendable (Data) -> Void
     let expect: Data?
@@ -120,18 +120,25 @@ struct NUSSession: Sendable {
                 }
                 return .linkLost("device disconnected")
             }
-            group.addTask { [input, send, expect, linger] in
-                for await chunk in input {
-                    do {
-                        try await send(chunk)
-                    } catch {
-                        return .linkLost("write failed", error)
+            group.addTask { [input, send, maxLength, writeTimeout, expect, linger] in
+                do {
+                    while let piece = try await input.next(maxLength: maxLength) {
+                        do {
+                            try await CommandRouter.withDeadline(writeTimeout) { try await send(piece.data) }
+                        } catch {
+                            return .linkLost("write failed", error)
+                        }
+                        input.consume(piece)
                     }
+                    try await Task.sleep(nanoseconds: UInt64(max(linger, 0) * 1_000_000_000))
+                } catch {
+                    // Only cancellation ends the waits above: the session is
+                    // over and another outcome decides it.
+                    return .linkLost("session stopped")
                 }
-                try? await Task.sleep(nanoseconds: UInt64(max(linger, 0) * 1_000_000_000))
                 return expect == nil ? .inputEnded : .expectMissed
             }
-            let first = await group.next() ?? .inputEnded
+            let first = await group.next() ?? .linkLost("session stopped")
             group.cancelAll()
             return first
         }

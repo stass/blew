@@ -118,10 +118,15 @@ struct NUSOptions {
     }
 
     /// After a session: nil means interrupted. A lost link reconnects under
-    /// `--reconnect` only when the device really disconnected; a failure
-    /// while still connected (a subscribe or write error) ends the command,
-    /// since reconnecting would not change it.
-    static func step(after outcome: NUSOutcome?, stillConnected: Bool, linger: TimeInterval, reconnect: Bool) -> Step {
+    /// `--reconnect` only when the connection is gone, as the error itself
+    /// shows (`linkDown`) or the connection state does once it settled
+    /// (`stillConnected`); a failure while still connected (a subscribe or
+    /// write error, a write timeout) ends the command, since reconnecting
+    /// would not change it. A failure that ends the command with input
+    /// still unsent says how much (`unsent` bytes, a lower bound: a stream
+    /// source may hold bytes blew has not read).
+    static func step(after outcome: NUSOutcome?, stillConnected: Bool, linger: TimeInterval,
+                     reconnect: Bool, unsent: Int = 0) -> Step {
         switch outcome {
         case nil:
             return .finish(exitCode: BlewExitCode.interrupted.code, error: nil)
@@ -129,10 +134,29 @@ struct NUSOptions {
             return .finish(exitCode: 0, error: nil)
         case .expectMissed:
             return .finish(exitCode: BlewExitCode.timeout.code, error: "expected text not received within \(linger)s")
-        case .linkLost(let reason, let exitCode):
-            return reconnect && !stillConnected
-                ? .reconnect
-                : .finish(exitCode: exitCode, error: reason)
+        case .linkLost(let reason, let exitCode, let linkDown):
+            if reconnect && (linkDown || !stillConnected) { return .reconnect }
+            return .finish(exitCode: exitCode,
+                           error: unsent > 0 ? "\(reason) (at least \(unsent) bytes of input not sent)" : reason)
+        }
+    }
+
+    /// How long a lost link the error does not explain (a write error, a
+    /// timeout) waits for the disconnect to be reported before deciding
+    /// whether to reconnect. CoreBluetooth reports the failed write and the
+    /// disconnect back to back, so a second covers the gap between them.
+    static let linkSettleTime: TimeInterval = 1
+
+    /// Whether the connection stays up for `window` seconds: false as soon
+    /// as `isConnected` reports it down, checked every `interval` seconds.
+    /// A cancelled wait ends with the last answer.
+    static func linkStaysUp(for window: TimeInterval, interval: TimeInterval = 0.05,
+                            isConnected: @Sendable () async -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(window)
+        while true {
+            guard await isConnected() else { return false }
+            if Date() >= deadline || Task.isCancelled { return true }
+            try? await Task.sleep(nanoseconds: UInt64(max(interval, 0.001) * 1_000_000_000))
         }
     }
 }
@@ -140,11 +164,18 @@ struct NUSOptions {
 extension NUSOutcome {
     /// The link was lost because of `error` (`context` says what was being
     /// done): a BLEError keeps its exit code, so Bluetooth becoming
-    /// unavailable ends `nus` with exit code 3.
+    /// unavailable ends `nus` with exit code 3. A disconnect, no connection
+    /// or Bluetooth becoming unavailable shows the link is gone.
     static func linkLost(_ context: String?, _ error: Error) -> NUSOutcome {
-        let message = (error as? BLEError)?.localizedDescription ?? error.localizedDescription
+        let bleError = error as? BLEError
+        let message = bleError?.localizedDescription ?? error.localizedDescription
         let reason = context.map { "\($0): \(message)" } ?? message
-        return .linkLost(reason, exitCode: (error as? BLEError)?.exitCode ?? BlewExitCode.operationFailed.code)
+        let linkDown: Bool
+        switch bleError {
+        case .connectionFailed, .notConnected, .bluetoothUnavailable: linkDown = true
+        default: linkDown = false
+        }
+        return .linkLost(reason, exitCode: bleError?.exitCode ?? BlewExitCode.operationFailed.code, linkDown: linkDown)
     }
 }
 
@@ -241,7 +272,21 @@ extension CommandRouter {
         case .pty, .tcp: status("bridge", port.label)
         case .stdio, .fixed: break
         }
+        let deliver: @Sendable (Data) -> Void = { data in
+            if let lost = port.deliver(data) {
+                status("dropped", "\(lost) bytes from the device: the local client is not reading or not connected")
+            }
+        }
+        let finished = bridgeNUS(options: options, port: port, deliver: deliver, status: status)
+        let dropped = port.droppedCount
+        if dropped > 0 { status("dropped", "\(dropped) bytes from the device in total") }
+        return finished
+    }
 
+    /// The connect, session and reconnect loop of `runNUS` over `port`.
+    private func bridgeNUS(options: NUSOptions, port: NUSPort, deliver: @escaping @Sendable (Data) -> Void,
+                           status: @escaping @Sendable (String, String) -> Void) -> CommandResult {
+        var result = CommandResult()
         // After the first connection, reconnect only to that device, never
         // to whichever device matching the filter is strongest by then.
         var targeting = options.targeting
@@ -272,15 +317,31 @@ extension CommandRouter {
             connectedOnce = true
             status("connected", device.label)
 
-            let outcome = runNUSSession(options: options, port: port)
-            let stillConnected = outcome != nil && connectedDevice().id != nil
+            var outcome = runNUSSession(options: options, port: port, deliver: deliver)
+            var stillConnected = outcome != nil && connectedDevice().id != nil
+            // A write error can arrive before the disconnect that caused it:
+            // let the connection state settle before deciding to reconnect.
+            if options.reconnect, stillConnected, case .linkLost(_, _, false) = outcome {
+                let up = Locked(true)
+                let manager = self.manager
+                let settled = waitInterruptible {
+                    up.set(await NUSOptions.linkStaysUp(for: NUSOptions.linkSettleTime) {
+                        await manager.status().isConnected
+                    })
+                }
+                if case .interrupted = settled { outcome = nil }
+                stillConnected = outcome != nil && up.value
+            }
             switch NUSOptions.step(after: outcome, stillConnected: stillConnected,
-                                   linger: options.linger, reconnect: options.reconnect) {
+                                   linger: options.linger, reconnect: options.reconnect,
+                                   unsent: port.unsentCount) {
             case .reconnect:
-                if case .linkLost(let reason, _) = outcome { status("disconnected", reason) }
+                if case .linkLost(let reason, _, _) = outcome { status("disconnected", reason) }
                 status("reconnecting", "")
             case .finish(let exitCode, let error):
-                if case .linkLost(let reason, _) = outcome, !stillConnected { status("disconnected", reason) }
+                if case .linkLost(let reason, _, let linkDown) = outcome, linkDown || !stillConnected {
+                    status("disconnected", reason)
+                }
                 result.exitCode = exitCode
                 if let error { result.errors.append(error) }
                 return result
@@ -289,27 +350,32 @@ extension CommandRouter {
     }
 
     /// Run one session on the current connection. Nil when interrupted.
-    private func runNUSSession(options: NUSOptions, port: NUSPort) -> NUSOutcome? {
+    private func runNUSSession(options: NUSOptions, port: NUSPort,
+                               deliver: @escaping @Sendable (Data) -> Void) -> NUSOutcome? {
         let outcome = Locked<NUSOutcome>(.linkLost("session did not start"))
         let manager = self.manager
-        let setupTimeout = globals.timeout ?? 5.0
+        // The operation timeout bounds the subscribe and each write.
+        let operationTimeout = globals.timeout ?? 5.0
         let operation: () async -> Void = {
             do {
-                let received = try await Self.withDeadline(setupTimeout) {
+                let received = try await Self.withDeadline(operationTimeout) {
                     try await manager.subscribe(characteristicUUID: NUS.tx)
                 }
-                // Chunks fit one ATT packet whatever the write type, so the
+                // Pieces fit one ATT packet whatever the write type, so the
                 // device never needs a long (prepared) write.
                 let maxLength = try manager.maximumWriteLength(withResponse: false)
+                guard maxLength > 0 else {
+                    throw BLEError.writeFailed("the connection reports a maximum write length of \(maxLength)")
+                }
                 let session = NUSSession(
-                    send: { data in
-                        for chunk in NUS.chunks(data, maxLength: maxLength) {
-                            try await manager.writeCharacteristic(NUS.rx, data: chunk, type: options.writeType)
-                        }
+                    send: { piece in
+                        try await manager.writeCharacteristic(NUS.rx, data: piece, type: options.writeType)
                     },
+                    maxLength: maxLength,
+                    writeTimeout: operationTimeout,
                     received: received,
                     input: port.input(),
-                    deliver: port.write,
+                    deliver: deliver,
                     expect: options.expect,
                     linger: options.linger)
                 outcome.set(await session.run())
