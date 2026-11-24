@@ -108,11 +108,20 @@ None open.
 - [ ] Codegen backslash escaping is a no-op (`gsub("\\", "\\\\")`).
   `generate-ble-characteristics.rb:164`, `generate-ble-names.rb:31`. "CO2
   Concentration" renders a TAB.
-- [ ] `GATTDecoder` ignores the GSS scale of a value (M, d, b in the
-  characteristic's "Represented values"): 2A6E prints `2340` for 23.40 degrees
-  C, 2A6F `5812` for 58.12 %, 2A6D `1013250` for 101325.0 Pa
-  (`temperature.yaml:46`, `humidity.yaml:46`, `pressure.yaml:46`). Pinned raw
-  in `ExampleConfigTests`.
+- [ ] Many GSS fields name a unit identifier that is not in
+  `assigned_numbers/uuids/units.yaml`, so they decode with no unit:
+  `length.meter` (2A6C Elevation prints `5.00`, not `5.00 metre`),
+  `density.kilogram_per_cubic_meter`, `kelvin_per_second`, `hertz`,
+  `standard_acceleration_due_to_gravity`, and others; some name the wrong
+  dimension (Luminous Energy: `lumen_per_hour` for lumen hours). A reviewed
+  table mapping each to an assigned unit, failing on any new one, would
+  restore them. `generate-ble-characteristics.rb:281` (`scale_and_unit`).
+- [ ] Three GSS fields contradict their own text, so the generator lists
+  them in `CONTRADICTED_SCALES` and they decode raw: High Voltage (b = 6, "a
+  resolution of 1/64V"), Activity Goal Distance (d = 1, "a resolution of 1
+  m") and Recipe Parameters Temperature Gradient (uint8 with "Minimum:
+  -12.8"). Report them to the Bluetooth SIG.
+  `generate-ble-characteristics.rb:200` (`CONTRADICTED_SCALES`).
 - [ ] A value longer than its structure is decoded without a word about the
   extra bytes (`GATTDecoder.swift:145-175`).
 - [ ] Truncated GATT fields are skipped silently. `GATTDecoder.swift:85-98`.

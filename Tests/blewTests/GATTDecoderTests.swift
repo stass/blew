@@ -185,7 +185,8 @@ final class GATTDecoderTests: XCTestCase {
         let data = Data([0x08, 0x00, 0x01, 0x00, 0x00, 0xC8, 0x00])
         XCTAssertEqual(
             GATTDecoder.decode(data, uuid: "2C27"),
-            "Flags: 0x0008 | Cooking Step Index: 1 | Cooking Process Type: 0 | Temperature.Temperature: 200")
+            "Flags: 0x0008 | Cooking Step Index: 1 | Cooking Process Type: 0"
+                + " | Temperature.Temperature: 20.0 degree Celsius")
     }
 
     func testDecodeFieldPresentIfTwoBitsSet() {
@@ -194,7 +195,7 @@ final class GATTDecoderTests: XCTestCase {
         XCTAssertEqual(
             GATTDecoder.decode(data, uuid: "2C27"),
             "Flags: 0x0018 | Cooking Step Index: 1 | Cooking Process Type: 0"
-                + " | Temperature.Temperature: 200 | Temperature Gradient: 5")
+                + " | Temperature.Temperature: 20.0 degree Celsius | Temperature Gradient: 5")
     }
 
     func testInfoDescribesEveryConditionKind() throws {
@@ -326,6 +327,121 @@ final class GATTDecoderTests: XCTestCase {
         // 2A26 = Firmware Revision String, a well-known device info characteristic
         let info = GATTDecoder.info(for: "2A26")
         XCTAssertNotNil(info)
+    }
+
+    // MARK: - Scale and unit (GSS "Represented values")
+
+    /// temperature.yaml: sint16, base unit degree_celsius, M = 1, d = -2, b = 0.
+    func testDecodeTemperatureAppliesDecimalExponentAndUnit() {
+        XCTAssertEqual(GATTDecoder.decode(Data([0x24, 0x09]), uuid: "2A6E"), "23.40 degree Celsius")
+        XCTAssertEqual(GATTDecoder.decode(Data([0xFB, 0xFF]), uuid: "2A6E"), "-0.05 degree Celsius")
+        XCTAssertEqual(GATTDecoder.decode(Data([0x00, 0x00]), uuid: "2A6E"), "0.00 degree Celsius")
+    }
+
+    /// humidity.yaml: uint16, base unit percentage, M = 1, d = -2, b = 0.
+    func testDecodeHumidityAppliesDecimalExponentAndUnit() {
+        XCTAssertEqual(GATTDecoder.decode(Data([0xB4, 0x16]), uuid: "2A6F"), "58.12 percentage")
+    }
+
+    /// pressure.yaml: uint32, base unit pascal, M = 1, d = -1, b = 0.
+    func testDecodePressureAppliesDecimalExponentAndUnit() {
+        XCTAssertEqual(GATTDecoder.decode(Data([0x02, 0x76, 0x0F, 0x00]), uuid: "2A6D"), "101325.0 pascal")
+    }
+
+    /// percentage_8.yaml (uint8, unit percentage) and temperature_8.yaml
+    /// (sint8, unit degree_celsius): M = 1, d = 0, b = -1;
+    /// chromaticity_coordinate.yaml (uint16, unit only in prose): b = -16.
+    /// A binary exponent of -k prints k places, exactly.
+    func testDecodeAppliesBinaryExponentExactly() {
+        XCTAssertEqual(GATTDecoder.decode(Data([201]), uuid: "2B04"), "100.5 percentage")
+        XCTAssertEqual(GATTDecoder.decode(Data([0xFD]), uuid: "2B0D"), "-1.5 degree Celsius")
+        XCTAssertEqual(GATTDecoder.decode(Data([0x00, 0x80]), uuid: "2B1C"), "0.5000000000000000")
+    }
+
+    /// temperature.yaml:49 and humidity.yaml:49: "A value of 0x8000 (0xFFFF)
+    /// represents "value is not known"", shown as that text, not as
+    /// -327.68 or 655.35.
+    func testDecodeSpecialValueShowsItsMeaning() {
+        XCTAssertEqual(GATTDecoder.decode(Data([0x00, 0x80]), uuid: "2A6E"), "value is not known")
+        XCTAssertEqual(GATTDecoder.decode(Data([0xFF, 0xFF]), uuid: "2A6F"), "value is not known")
+        // time_accuracy.yaml (b = -3, second): "A value of 255 means drift is
+        // unknown", a decimal special value; 253 is a number.
+        XCTAssertEqual(GATTDecoder.decode(Data([0xFF]), uuid: "2A12"), "drift is unknown")
+        XCTAssertEqual(GATTDecoder.decode(Data([0xFD]), uuid: "2A12"), "31.625 second")
+        // high_voltage.yaml is in CONTRADICTED_SCALES but keeps its special value.
+        XCTAssertEqual(GATTDecoder.decode(Data([0xFF, 0xFF, 0xFF]), uuid: "2BE0"), "value is not known")
+    }
+
+    /// elevation.yaml: sint24, M = 1, d = -2, b = 0. Its unit,
+    /// `length.meter`, is not an assigned unit, so none is shown.
+    func testDecodeSint24AppliesScale() {
+        XCTAssertEqual(GATTDecoder.decode(Data([0xF4, 0x01, 0x00]), uuid: "2A6C"), "5.00")
+        XCTAssertEqual(GATTDecoder.decode(Data([0x0C, 0xFE, 0xFF]), uuid: "2A6C"), "-5.00")
+    }
+
+    /// The GSS states no negative multiplier or positive exponent on a field
+    /// blew can test through `decode`, so these go to `scaled` directly.
+    func testScaledHandlesNegativeMultiplierAndPositiveExponents() {
+        typealias Scale = GATTCharacteristicDB.Scale
+        XCTAssertEqual(GATTDecoder.scaled(negative: false, magnitude: 7,
+                                          by: Scale(multiplier: -2, decimalExponent: 3, binaryExponent: 0)), "-14000")
+        XCTAssertEqual(GATTDecoder.scaled(negative: true, magnitude: 7,
+                                          by: Scale(multiplier: -2, decimalExponent: -1, binaryExponent: 0)), "1.4")
+        XCTAssertEqual(GATTDecoder.scaled(negative: false, magnitude: 3,
+                                          by: Scale(multiplier: 1, decimalExponent: 0, binaryExponent: 6)), "192")
+        XCTAssertEqual(GATTDecoder.scaled(negative: true, magnitude: 0,
+                                          by: Scale(multiplier: 1, decimalExponent: 2, binaryExponent: 0)), "0")
+        XCTAssertNil(GATTDecoder.scaled(negative: false, magnitude: UInt64.max,
+                                        by: Scale(multiplier: 2, decimalExponent: 0, binaryExponent: 0)))
+    }
+
+    /// battery_level.yaml names the base unit percentage but no scale, so the
+    /// raw value is shown alone.
+    func testDecodeFieldWithoutScaleShowsRawValueAlone() {
+        XCTAssertEqual(GATTDecoder.decode(Data([0x64]), uuid: "2A19"), "100")
+    }
+
+    /// high_voltage.yaml states b = 6 but "a resolution of 1/64V", so the
+    /// generator lists it in CONTRADICTED_SCALES and the raw value is shown.
+    func testDecodeContradictedScaleShowsRawValue() {
+        XCTAssertEqual(GATTDecoder.decode(Data([0x02, 0x00, 0x00]), uuid: "2BE0"), "2")
+    }
+
+    /// blood_pressure_measurement.yaml: the mmHg SFLOATs name their unit;
+    /// the kPa ones state the base unit pascal with d = 3, which blew does
+    /// not apply to a float, so they get no unit.
+    func testDecodeFloatUnitOnlyWithoutScale() {
+        // Flags 0x00 (mmHg): 120, 80, 93.
+        let mmHg = Data([0x00, 0x78, 0x00, 0x50, 0x00, 0x5D, 0x00])
+        XCTAssertEqual(GATTDecoder.decode(mmHg, uuid: "2A35"),
+                       "Flags: 0x00"
+                       + " | Blood Pressure Measurement Compound Value - Systolic (mmHg): 120 millimetre of mercury"
+                       + " | Blood Pressure Measurement Compound Value - Diastolic (mmHg): 80 millimetre of mercury"
+                       + " | Blood Pressure Measurement Compound Value - Mean Arterial Pressure (mmHg): 93 millimetre of mercury")
+        // Flags 0x01 (kPa): 16, 10.6 (mantissa 106, exponent -1), 12.
+        let kPa = Data([0x01, 0x10, 0x00, 0x6A, 0xF0, 0x0C, 0x00])
+        XCTAssertEqual(GATTDecoder.decode(kPa, uuid: "2A35"),
+                       "Flags: 0x01"
+                       + " | Blood Pressure Measurement Compound Value - Systolic (kPa): 16"
+                       + " | Blood Pressure Measurement Compound Value - Diastolic (kPa): 10.6"
+                       + " | Blood Pressure Measurement Compound Value - Mean Arterial Pressure (kPa): 12")
+    }
+
+    func testInfoJSONEncodesScaleAndUnit() throws {
+        let json = try fieldJSON("2A6E", "Temperature")
+        XCTAssertEqual(json["scale"] as? NSDictionary,
+                       ["multiplier": 1, "decimalExponent": -2, "binaryExponent": 0])
+        XCTAssertEqual(json["unit"] as? String, "org.bluetooth.unit.thermodynamic_temperature.degree_celsius")
+        let raw = try fieldJSON("2A19", "Battery Level")
+        XCTAssertNil(raw["scale"])
+        XCTAssertNil(raw["unit"])
+    }
+
+    func testInfoJSONScaleAndUnitRoundTrip() throws {
+        let info = try XCTUnwrap(GATTDecoder.info(for: "2A6E")?.fields.first)
+        let decoded = try JSONDecoder().decode(GATTDecoder.FieldInfo.self, from: JSONEncoder().encode(info))
+        XCTAssertEqual(decoded.scale, info.scale)
+        XCTAssertEqual(decoded.unit, info.unit)
     }
 
     func testDecodeCurrentTimeCharacteristic() {

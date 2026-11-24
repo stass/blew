@@ -286,7 +286,7 @@ Service FFF0
 | Flag | Description |
 |------|-------------|
 | `-d, --descriptors` | Also show descriptors for each characteristic. |
-| `-r, --read` | Read and display values for all readable characteristics inline. Well-known Bluetooth SIG characteristics are decoded to their natural type (e.g. battery level as an integer, manufacturer name as a string); others are shown as hex. |
+| `-r, --read` | Read and display values for all readable characteristics inline. Well-known Bluetooth SIG characteristics are decoded to their natural type (e.g. battery level as an integer, manufacturer name as a string); others are shown as hex. An integer field the Bluetooth SIG GSS gives a scale ("Represented values: M, d, b") is shown scaled, exactly, with one decimal place per negative power of ten or two, and followed by the name of its unit (Temperature `2409` is `23.40 degree Celsius`, Pressure `02760f00` is `101325.0 pascal`); an integer field with no scale is shown raw, with no unit. A raw value the GSS gives a meaning is shown as that meaning (Temperature `0080` is `value is not known`). The unit is the one the GSS names for the field, by its name in the Bluetooth SIG assigned units; a field whose GSS names no unit, several, or one that is not an assigned unit gets none. A medical float (SFLOAT, FLOAT) is followed by its unit only when its GSS states no scale other than M = 1, d = 0, b = 0. |
 
 With `-r`:
 ```
@@ -360,7 +360,7 @@ Structure:
 
 With `-o kv`, one record per field is emitted (for scripting); a conditional field's record has `condition=` with the "present if ..." text.
 
-The MCP tool `ble_gatt_info` returns the same fields as JSON in `structuredContent`, at `characteristicInfo.fields`. A conditional field has two more keys: `conditionDescription`, the "present if ..." text, and `condition`, the same condition as an object. A field that is always present has neither. Part of the result for `char_uuid` `2C27` (Recipe Parameters), with `description` and most fields left out:
+The MCP tool `ble_gatt_info` returns the same fields as JSON in `structuredContent`, at `characteristicInfo.fields`. A conditional field has two more keys: `conditionDescription`, the "present if ..." text, and `condition`, the same condition as an object. A field that is always present has neither. A field the decoder scales has `scale`, `{"multiplier": M, "decimalExponent": d, "binaryExponent": b}` (the value is raw * M * 10^d * 2^b). A field whose decoded value is followed by a unit has `unit`, the unit's identifier (such as `org.bluetooth.unit.thermodynamic_temperature.degree_celsius`). Either can appear without the other. Part of the result for `char_uuid` `2C27` (Recipe Parameters), with `description` and most fields left out:
 
 ```json
 {

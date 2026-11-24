@@ -27,6 +27,7 @@ SWIFT_TYPES = {
   "uint64"      => ".uint64",
   "sint8"       => ".sint8",
   "sint16"      => ".sint16",
+  "sint24"      => ".sint24",
   "sint32"      => ".sint32",
   "boolean[8]"  => ".boolean8",
   "boolean[16]" => ".boolean16",
@@ -140,6 +141,182 @@ def check_external_last(identifier, fields)
   end
 end
 
+# ---------------------------------------------------------------------------
+# Scale and unit
+# ---------------------------------------------------------------------------
+
+# Integer types the decoder can scale, with their width in bits and whether
+# they are signed.
+INTEGER_TYPES = {
+  "uint8" => [8, false], "uint16" => [16, false], "uint24" => [24, false],
+  "uint32" => [32, false], "uint48" => [48, false], "uint64" => [64, false],
+  "sint8" => [8, true], "sint16" => [16, true], "sint24" => [24, true],
+  "sint32" => [32, true],
+}.freeze
+FLOAT_TYPES = %w[medfloat16 medfloat32].freeze
+
+# The GSS states the scale of a numeric field as "Represented values: M = 1,
+# d = -2, b = 0": the value is raw * M * 10^d * 2^b. The vendored files
+# write it with or without the "Represented values:" prefix, with "and"
+# before b (Blood Pressure Measurement), with a space after a minus sign
+# ("d = - 7") or none after an equals sign ("b =0"), and with a trailing
+# period. A line that mentions M or "Represented values" in any other way
+# stops the generation.
+SCALE_MENTION = /Represented values|\bM\s*=/.freeze
+SCALE_PATTERN = /\A(?:Represented values:\s*)?M\s*=\s*(-?\s*\d+),\s*d\s*=\s*(-?\s*\d+),\s*(?:and\s+)?b\s*=\s*(-?\s*\d+)\s*\.?\z/.freeze
+
+# Returns the scale a field's description states, as { m:, d:, b: }, or nil
+# when it states none. A field may state one scale.
+def stated_scale(field, where)
+  lines = field["description"].to_s.lines.map(&:strip).select { |l| l =~ SCALE_MENTION }
+  generation_error("#{where} states #{lines.size} scales") if lines.size > 1
+  return nil if lines.empty?
+  m = SCALE_PATTERN.match(lines[0]) or
+    generation_error("#{where}: unrecognised scale \"#{lines[0]}\"")
+  m_value, d, b = m.captures.map { |s| s.delete(" ").to_i }
+  # The GSS states no M below 1; one would need a decision on rounding
+  # and sign that nothing here has made.
+  generation_error("#{where}: scale with M = #{m_value}") if m_value < 1
+  { m: m_value, d: d, b: b }
+end
+
+# Returns the org.bluetooth.unit identifiers a field's description names,
+# in order and without repeats. The GSS writes them after "Unit:" or
+# "Base Unit:", sometimes on the next line, sometimes with a space after
+# "org.bluetooth.unit." and a trailing period or semicolon.
+def stated_units(field)
+  field["description"].to_s
+       .scan(/org\.bluetooth\.unit\.\s*([A-Za-z0-9_.]*[A-Za-z0-9_])/)
+       .map { |(id)| "org.bluetooth.unit.#{id}" }
+       .uniq
+end
+
+UNITLESS = "org.bluetooth.unit.unitless"
+
+# Fields whose stated scale contradicts their own description. Neither can
+# be chosen from the GSS, so these are shown raw, with no unit. The
+# generation stops when an entry's scale changes or its field is gone, so an
+# entry is removed once the GSS is corrected.
+CONTRADICTED_SCALES = {
+  # "Unit is volt with a resolution of 1/64V", which is b = -6.
+  "org.bluetooth.characteristic.high_voltage: field 'High Voltage'" => { m: 1, d: 0, b: 6 },
+  # "Unit is meter with a resolution of 1 m", which is d = 0.
+  "org.bluetooth.characteristic.activity_goal: field 'Distance'" => { m: 1, d: 1, b: 0 },
+  # A uint8 with "Minimum: -12.8", which only a sint8 can hold.
+  "org.bluetooth.characteristic.recipe_parameters: field 'Temperature Gradient'" => { m: 1, d: -1, b: 0 },
+}.freeze
+CONTRADICTED_SCALES_SEEN = []
+
+# The GSS states a special value of an integer field as "A value of 0x8000
+# represents "value is not known"", with straight, curly or no quotes,
+# "A raw value of", a decimal value ("A value of 255 means drift is
+# unknown"), "represents:", "indicates" or "means", and a trailing period.
+SPECIAL_MENTION = /\bvalue of (?:0x\h+|-?\d+)\b.*\b(?:represents|indicates|means)\b/i.freeze
+SPECIAL_PATTERN = /\A(?:A|The|The special) (?:raw )?value of (0x\h+|-?\d+)(?: for [^:]+?)?:? (?:represents|indicates|means):?\s*(.+?)\.?\z/.freeze
+QUOTES = "\"'\u2018\u2019\u201C\u201D"
+
+# Returns the special values an integer field of `bits` bits states, as
+# { raw unsigned bit pattern => text }. A line that pairs a hex value with
+# "represents" or "indicates" in any other form stops the generation.
+def special_values(field, bits, where)
+  # One sentence at a time: some lines hold several (date_time.yaml's Year).
+  field["description"].to_s.lines.flat_map { |l| l.strip.split(/(?<=\.)\s+/) }
+       .select { |l| l =~ SPECIAL_MENTION }
+       .each_with_object({}) do |line, acc|
+    m = SPECIAL_PATTERN.match(line) or
+      generation_error("#{where}: unrecognised special value \"#{line}\"")
+    raw = m[1].start_with?("0x") ? m[1].to_i(16) : m[1].to_i
+    raw += 2**bits if raw < 0 # a signed value, as its bit pattern
+    text = m[2].sub(/\A[#{QUOTES}]+/, "").sub(/[#{QUOTES}]+\z/, "")
+    if raw < 0 || raw >= 2**bits
+      generation_error("#{where}: special value #{m[1]} does not fit #{bits} bits")
+    end
+    generation_error("#{where}: special value #{m[1]} stated twice") if acc.key?(raw)
+    acc[raw] = text
+  end
+end
+
+# The assigned units, by identifier, with the name blew prints: the text in
+# the outer parentheses of units.yaml's name ("thermodynamic temperature
+# (degree Celsius)" is "degree Celsius"), the name without its parentheses
+# when they hold the rest of the unit ("step (per minute)" is "step per
+# minute"), or the whole name ("percentage").
+def load_unit_names(path)
+  YAML.safe_load(File.read(path, encoding: "utf-8")).fetch("uuids").each_with_object({}) do |u, acc|
+    name = u["name"]
+    m = /\A([^(]*)\((.*)\)\z/.match(name)
+    acc[u["id"]] = if m.nil? then name
+                   elsif m[2].start_with?("per ") then "#{m[1]}#{m[2]}"
+                   else m[2]
+                   end
+  end
+end
+
+# Returns { scale:, unit:, specials: } for a field of GSS type type_str: the
+# scale the decoder applies (nil for none), the unit it names after the
+# value ({ id:, name: } or nil) and the special values it shows as text.
+# Every field's scale statement is checked, whatever its type.
+#
+# - Only numeric fields get any of these. Arrays, structs and other opaque
+#   types are shown as hex.
+# - A unit must be in assigned_numbers/uuids/units.yaml. The GSS also names
+#   identifiers that are not, some with the wrong dimension (Luminous Energy
+#   names lumen_per_hour for lumen hours); those fields get no unit.
+# - A field that names two units (mmHg or kPa, kilograms or litres) has
+#   its unit chosen by a flag, so it gets no unit; an integer field that
+#   also states a scale stops the generation, as the scale may hold for
+#   one unit only.
+# - "unitless" is no unit.
+# - An integer field gets its unit only with a scale: without one the GSS
+#   gives the raw-to-value mapping in prose, if at all (Time Exponential 8
+#   is 1.1^(N-64) seconds), so the raw number is shown alone.
+# - A float (SFLOAT, FLOAT) carries its own exponent. The GSS gives one a
+#   scale only to say it counts a multiple of the base unit (kPa of the
+#   base unit pascal); blew shows the float as sent, so such a field gets
+#   neither the scale nor the base unit. A float with the identity scale
+#   keeps its unit. Its special values are the IEEE 11073 ones.
+# - The scale of an integer field must not overflow the decoder's 64-bit
+#   arithmetic for any raw value of its type, and a scaled unsigned field
+#   must not state a negative minimum.
+def scale_and_unit(field, type_str, where)
+  scale = stated_scale(field, where)
+  integer = INTEGER_TYPES[type_str]
+  specials = integer ? special_values(field, integer[0], where) : {}
+  none = { scale: nil, unit: nil, specials: specials }
+  if CONTRADICTED_SCALES.key?(where)
+    stated = CONTRADICTED_SCALES[where]
+    if scale != stated
+      generation_error("#{where}: scale is #{scale.inspect}, not #{stated.inspect}; " \
+                       "update CONTRADICTED_SCALES")
+    end
+    CONTRADICTED_SCALES_SEEN << where
+    return none
+  end
+  units = stated_units(field)
+  return none unless integer || FLOAT_TYPES.include?(type_str)
+
+  if units.size > 1 && integer && scale
+    generation_error("#{where} states a scale and the units #{units.join(', ')}")
+  end
+  id = units.size == 1 && units[0] != UNITLESS ? units[0] : nil
+  unit = id && UNIT_NAMES.key?(id) ? { id: id, name: UNIT_NAMES[id] } : nil
+  if integer.nil?
+    identity = scale.nil? || scale == { m: 1, d: 0, b: 0 }
+    return { scale: nil, unit: identity ? unit : nil, specials: {} }
+  end
+  return none if scale.nil?
+  bits, signed = integer
+  max_raw = signed ? 2**(bits - 1) : 2**bits - 1
+  factor = scale[:b] < 0 ? 5**-scale[:b] : 2**scale[:b]
+  if max_raw * scale[:m] * factor > 2**64 - 1
+    generation_error("#{where}: scale #{scale} overflows 64 bits for #{type_str}")
+  end
+  if !signed && field["description"].to_s =~ /Minimum:\s*-/
+    generation_error("#{where}: #{type_str} states a negative minimum; list it in CONTRADICTED_SCALES")
+  end
+  { scale: scale, unit: unit, specials: specials }
+end
+
 # Extracts a GSS identifier from the first \autoref that has no /field/ suffix.
 # Returns nil when absent or when the reference is a self-reference.
 def autoref_id(desc)
@@ -147,8 +324,9 @@ def autoref_id(desc)
   m && m[1]
 end
 
-def make_field(name:, type:, size:, conditions:)
-  { name: name, type: type, size: size, conditions: conditions }
+def make_field(name:, type:, size:, conditions:, scale: nil, unit: nil, specials: {})
+  { name: name, type: type, size: size, conditions: conditions, scale: scale, unit: unit,
+    specials: specials }
 end
 
 # ---------------------------------------------------------------------------
@@ -180,7 +358,8 @@ def resolve_struct_field(field_name, desc, size, conditions,
         c[:kind] == :external ? c : c.merge(field: "#{field_name}.#{c[:field]}")
       end
       make_field(name: "#{field_name}.#{f[:name]}", type: f[:type], size: f[:size],
-                 conditions: conditions + inner)
+                 conditions: conditions + inner, scale: f[:scale], unit: f[:unit],
+                 specials: f[:specials])
     end
   end
 end
@@ -192,11 +371,13 @@ def resolve_one_field(field, parent_id, earlier, gss_by_id, visiting)
   desc       = field["description"].to_s
   size       = parse_size(field["size"])
   conditions = presence_conditions(field, parent_id, earlier)
+  numeric = scale_and_unit(field, type_str, "#{parent_id}: field '#{name}'")
 
   if type_str == "struct"
     resolve_struct_field(name, desc, size, conditions, parent_id, gss_by_id, visiting)
   elsif SWIFT_TYPES.key?(type_str)
-    [make_field(name: name, type: SWIFT_TYPES[type_str], size: size, conditions: conditions)]
+    [make_field(name: name, type: SWIFT_TYPES[type_str], size: size, conditions: conditions,
+                scale: numeric[:scale], unit: numeric[:unit], specials: numeric[:specials])]
   else
     # Arrays (uint16[n] etc.), gatt_uuid, bit-field types (uint2), unknown
     [make_field(name: name, type: ".opaque", size: size, conditions: conditions)]
@@ -251,12 +432,21 @@ def condition_swift(c)
 end
 
 def field_swift(f)
-  base = ".init(name: \"#{esc_swift(f[:name])}\", type: #{f[:type]}, size: #{f[:size]}"
-  if f[:conditions].empty?
-    "#{base})"
-  else
-    "#{base}, conditions: [#{f[:conditions].map { |c| condition_swift(c) }.join(', ')}])"
+  args = ["name: \"#{esc_swift(f[:name])}\"", "type: #{f[:type]}", "size: #{f[:size]}"]
+  unless f[:conditions].empty?
+    args << "conditions: [#{f[:conditions].map { |c| condition_swift(c) }.join(', ')}]"
   end
+  if (s = f[:scale])
+    args << "scale: .init(multiplier: #{s[:m]}, decimalExponent: #{s[:d]}, binaryExponent: #{s[:b]})"
+  end
+  if (u = f[:unit])
+    args << "unit: .init(id: \"#{esc_swift(u[:id])}\", name: \"#{esc_swift(u[:name])}\")"
+  end
+  unless f[:specials].empty?
+    pairs = f[:specials].sort.map { |raw, text| format("0x%X: \"%s\"", raw, esc_swift(text)) }
+    args << "specialValues: [#{pairs.join(', ')}]"
+  end
+  ".init(#{args.join(', ')})"
 end
 
 def char_swift(uuid, char, fields)
@@ -278,6 +468,7 @@ end
 # ---------------------------------------------------------------------------
 
 UUIDS_FILE = File.join(SIG_DIR, "assigned_numbers", "uuids", "characteristic_uuids.yaml")
+UNITS_FILE = File.join(SIG_DIR, "assigned_numbers", "uuids", "units.yaml")
 GSS_FILES  = Dir.glob(File.join(SIG_DIR, "gss", "*.yaml"))
 
 if !File.file?(UUIDS_FILE) || GSS_FILES.empty?
@@ -290,6 +481,8 @@ gss_by_id = GSS_FILES.each_with_object({}) do |path, idx|
     generation_error("#{path} has no top-level 'characteristic'")
   idx[char["identifier"]] = char
 end
+
+UNIT_NAMES = load_unit_names(UNITS_FILE)
 
 uuid_map = YAML.safe_load(File.read(UUIDS_FILE, encoding: "utf-8")).fetch("uuids")
               .each_with_object({}) do |entry, acc|
@@ -308,6 +501,9 @@ db_entries = uuid_map
   .join(",\n")
 
 generation_error("no characteristic in #{UUIDS_FILE} has a GSS definition") if db_entries.empty?
+(CONTRADICTED_SCALES.keys - CONTRADICTED_SCALES_SEEN).each do |where|
+  generation_error("CONTRADICTED_SCALES lists #{where}, which no characteristic has")
+end
 
 output = <<~SWIFT
   // BLECharacteristics.generated.swift
@@ -318,7 +514,7 @@ output = <<~SWIFT
   enum GATTCharacteristicDB {
       enum FieldType {
           case uint8, uint16, uint24, uint32, uint48, uint64
-          case sint8, sint16, sint32
+          case sint8, sint16, sint24, sint32
           case boolean8, boolean16, boolean24, boolean32
           case medfloat16, medfloat32
           case utf8s
@@ -337,18 +533,48 @@ output = <<~SWIFT
           case external(String)
       }
 
+      /// The GSS "Represented values" of an integer field: the value is
+      /// raw * multiplier * 10^decimalExponent * 2^binaryExponent. The
+      /// generator checks that this fits 64 bits for every raw value.
+      /// Codable as the `scale` object of `gatt info` JSON; its property
+      /// names are the keys.
+      struct Scale: Equatable, Codable {
+          let multiplier: Int64
+          let decimalExponent: Int
+          let binaryExponent: Int
+      }
+
+      /// An assigned unit: its org.bluetooth.unit identifier and the name
+      /// from units.yaml.
+      struct Unit: Equatable {
+          let id: String
+          let name: String
+      }
+
       struct Field {
           let name: String
           let type: FieldType
           let size: Int
           /// All must hold for the field to be present; empty means always.
           let conditions: [Condition]
+          /// Set only on integer fields; nil shows the raw value.
+          let scale: Scale?
+          /// The unit of a numeric field's value, after scaling; nil when
+          /// the GSS names none, more than one, or one not in units.yaml.
+          let unit: Unit?
+          /// Raw values (the unsigned bit pattern) of an integer field that
+          /// the GSS gives a meaning instead of a number.
+          let specialValues: [UInt64: String]
 
-          init(name: String, type: FieldType, size: Int, conditions: [Condition] = []) {
+          init(name: String, type: FieldType, size: Int, conditions: [Condition] = [],
+               scale: Scale? = nil, unit: Unit? = nil, specialValues: [UInt64: String] = [:]) {
               self.name = name
               self.type = type
               self.size = size
               self.conditions = conditions
+              self.scale = scale
+              self.unit = unit
+              self.specialValues = specialValues
           }
       }
 

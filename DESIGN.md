@@ -553,9 +553,12 @@ Tab completion is registered via `LineNoise.setCompletionCallback`. The callback
   - `name`: field name (struct fields are recursively inlined with dot-separated names, e.g. `"Date Time.Year"`)
   - `type`: a `FieldType` case — `uint8/16/24/32/48/64`, `sint8/16/32`, `boolean8/16/24/32`, `medfloat16/32`, `utf8s`, or `opaque`
   - `size`: byte count when present; `-1` = variable; `-2` = variable-length array
+  - `scale: Scale?`, `unit: Unit?` and `specialValues: [UInt64: String]`: the GSS "Represented values" of an integer field (the value is raw * `multiplier` * 10^`decimalExponent` * 2^`binaryExponent`), the unit of a numeric field's value (its `org.bluetooth.unit` identifier and its name from `assigned_numbers/uuids/units.yaml`; an identifier not in that file is no unit), and the raw values of an integer field the GSS gives a meaning ("A value of 0x8000 represents \"value is not known\""). An integer field gets a unit only with a scale, since without one the GSS gives the raw-to-value mapping in prose if at all. A float field gets no scale, as it carries its own exponent; where the GSS gives it one (kPa as pascal with d = 3), it gets no unit either. A field that names two units (chosen by a flag) gets none.
   - `conditions: [Condition]`: when the field is present; all must hold, and an empty list means always. A condition reads an earlier integer field by name: `.bit(field:bit:set:)` (a bit of a Flags field), `.equals(field:value:)` and `.notEquals(field:value:)` (a selector field). `.external(text)` is a condition outside the value, such as a bit of another characteristic or the service's choice; nothing in the value decides it, so it is allowed only on the last field, which is decoded when bytes remain for it.
 
 The generator parses each field's "Present if ..." and "The presence of this field is defined by ..." sentences in the GSS YAML into conditions. It stops the build on a sentence in a phrasing it does not know, on a condition naming a field that is not an earlier integer field, on an external condition anywhere but the last field, and on a field sized "0 or N" with no condition. Every condition the GSS states is either evaluated or, for an external one, shown by `gatt info`.
+
+In the same way it parses each field's scale line ("Represented values: M = 1, d = -2, b = 0", in the spellings the vendored GSS uses) and stops on a line that mentions M or "Represented values" in any other form, on a field with two scale lines, on a scale whose 64-bit product can overflow for its type, and on an integer field that states a scale and two units, and on a scaled unsigned field with a negative "Minimum". It parses special values the same way, stopping on a sentence that pairs a value with "represents", "indicates" or "means" in a form it does not know. `CONTRADICTED_SCALES` lists the fields whose stated scale contradicts their own description (High Voltage: b = 6 against "1/64V"); they are decoded raw, and the build stops when such a field's scale changes, so a corrected GSS removes the entry.
 
 **Struct resolution**
 
@@ -567,13 +570,14 @@ Reads fields sequentially from the `Data` buffer:
 1. Each decoded unsigned-integer or `boolean[N]` field is kept by name as an unsigned value.
 2. A conditional field is included only when all its conditions hold on those values; a condition on a field that was not decoded does not hold.
 3. Variable-length fields consume all remaining bytes.
-4. Single-field characteristics emit just the value; multi-field characteristics emit `"FieldName: value | FieldName: value"`.
+4. An integer field with a scale is printed exactly: 2^-k is 5^k * 10^-k, so raw * M * 5^k (or * 2^b for b >= 0) is a 64-bit integer, printed with -(d + min(b, 0)) decimal places (2A6E `2340` is `23.40`, a b = -1 field `201` is `100.5`). A raw value in the field's `specialValues` is shown as its text instead. A number, but not "(short)" or a float's special value, is followed by the unit's name (`degree Celsius`, `pascal`).
+5. Single-field characteristics emit just the value; multi-field characteristics emit `"FieldName: value | FieldName: value"`.
 
 Supported types include all standard GATT integer types (`uint8` through `uint64`, `sint8`/`sint16`/`sint32`), IEEE 11073-20601 medical floats (`medfloat16`, `medfloat32`), UTF-8 strings, and hex-encoded opaque blobs.
 
 **Info query** (`GATTDecoder.info(for:)`)
 
-Returns a `CharacteristicInfo` struct for use by `gatt info`, containing the name, description, and a `FieldInfo` array with human-readable type and size descriptions. Each `FieldInfo` keeps the field's `conditions`, the same values the decoder evaluates, and derives both of its condition outputs from them: `conditionDescription` ("present if bit 3 of Flags is 1 and bit 4 of Flags is 1", shown by the text and kv renderers) and, in JSON (MCP `structuredContent`), a `condition` object, which `GATTCharacteristicDB.Condition`'s `Codable` conformance writes with one `kind` per case (`allOf` wraps several). An unconditional field has neither. README.md's `gatt info` section is the schema.
+Returns a `CharacteristicInfo` struct for use by `gatt info`, containing the name, description, and a `FieldInfo` array with human-readable type and size descriptions. Each `FieldInfo` keeps the field's `conditions`, the same values the decoder evaluates, and derives both of its condition outputs from them: `conditionDescription` ("present if bit 3 of Flags is 1 and bit 4 of Flags is 1", shown by the text and kv renderers) and, in JSON (MCP `structuredContent`), a `condition` object, which `GATTCharacteristicDB.Condition`'s `Codable` conformance writes with one `kind` per case (`allOf` wraps several). An unconditional field has neither. It also keeps the decoder's `scale` and `unit`, encoded as a `scale` object and a `unit` identifier when present. README.md's `gatt info` section is the schema.
 
 ### 4.10 BLENames
 
