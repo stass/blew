@@ -176,8 +176,8 @@ final class CommandRouter {
             command("disconnect"),
             command("status"),
             command("gatt", "svcs", arguments: targeting),
-            command("gatt", "tree", arguments: "\(targeting) [-d] [-r]"),
-            command("gatt", "chars", arguments: "\(targeting) [-r] <service>"),
+            command("gatt", "tree", arguments: "\(targeting) [-d] [-r [-f <fmt>]]"),
+            command("gatt", "chars", arguments: "\(targeting) [-r [-f <fmt>]] <service>"),
             command("gatt", "desc", arguments: "\(targeting) <char>"),
             command("gatt", "info", arguments: "<char>"),
             command("read", arguments: "\(targeting) [-f <fmt>] <char>"),
@@ -676,6 +676,13 @@ final class CommandRouter {
         let operand = arguments.positionals.dropFirst().first
         let includeDescriptors = sub == "tree" && arguments.flag(.descriptors)
         let includeValues = (sub == "tree" || sub == "chars") && arguments.flag(.readValues)
+        let valueFormat: ValueFormat?
+        do {
+            // Only `tree` and `chars` take `-f`; asking another syntax for it traps.
+            valueFormat = sub == "tree" || sub == "chars" ? try Self.listingFormat(arguments) : nil
+        } catch {
+            return CommandResult(failing: error)
+        }
 
         let connectResult = ensureConnected(to: target)
         guard connectResult.exitCode == 0 else { return connectResult }
@@ -699,34 +706,15 @@ final class CommandRouter {
                         var treeChars: [GATTTreeCharacteristic] = []
                         for char in service.characteristics {
                             let charName = BLENames.name(for: char.uuid, category: .characteristic)
-                            var value: String? = nil
-                            var valueFields: [LabeledValue]? = nil
-
-                            if includeValues && char.properties.contains("read") {
-                                do {
-                                    let data = try await manager.readCharacteristic(char.uuid)
-                                    let decoded = GATTDecoder.decode(data, uuid: char.uuid)
-                                        ?? DataFormatter.format(data, as: .hex)
-                                    let parts = decoded.components(separatedBy: " | ")
-                                    if parts.count > 1 {
-                                        valueFields = parts.map { Self.splitFieldPart($0) }
-                                    } else {
-                                        value = decoded
-                                    }
-                                } catch is CancellationError {
-                                    throw CancellationError()
-                                } catch {
-                                    value = "(read error)"
-                                }
-                            }
-
+                            let listed = includeValues && char.properties.contains("read")
+                                ? try await readListedValue(char.uuid, format: valueFormat) : nil
                             let descRows = char.descriptors.map { desc in
                                 DescriptorRow(uuid: desc.uuid, name: BLENames.name(for: desc.uuid, category: .descriptor))
                             }
                             treeChars.append(GATTTreeCharacteristic(
                                 uuid: char.uuid, name: charName,
                                 properties: char.properties,
-                                value: value, valueFields: valueFields,
+                                listed: listed,
                                 descriptors: descRows
                             ))
                         }
@@ -753,28 +741,10 @@ final class CommandRouter {
                     var charRows: [CharacteristicRow] = []
                     for char in chars {
                         let name = BLENames.name(for: char.uuid, category: .characteristic)
-                        var value: String? = nil
-                        var valueFields: [LabeledValue]? = nil
-                        if includeValues && char.properties.contains("read") {
-                            do {
-                                let data = try await manager.readCharacteristic(char.uuid)
-                                let decoded = GATTDecoder.decode(data, uuid: char.uuid)
-                                    ?? DataFormatter.format(data, as: .hex)
-                                let parts = decoded.components(separatedBy: " | ")
-                                if parts.count > 1 {
-                                    valueFields = parts.map { Self.splitFieldPart($0) }
-                                } else {
-                                    value = decoded
-                                }
-                            } catch is CancellationError {
-                                throw CancellationError()
-                            } catch {
-                                value = "(read error)"
-                            }
-                        }
+                        let listed = includeValues && char.properties.contains("read")
+                            ? try await readListedValue(char.uuid, format: valueFormat) : nil
                         charRows.append(CharacteristicRow(uuid: char.uuid, name: name,
-                                                          properties: char.properties,
-                                                          value: value, valueFields: valueFields))
+                                                          properties: char.properties, listed: listed))
                     }
                     result.output.append(.characteristics(charRows))
 
@@ -1421,6 +1391,55 @@ extension CommandRouter {
 // MARK: - GATT value display helpers
 
 extension CommandRouter {
+    /// The `-f`/`--format` of `gatt chars|tree`: nil when it is absent, so
+    /// values are decoded by their Bluetooth SIG definition. Throws when it
+    /// is given without `-r` (there is no value to format), for `raw` and
+    /// for an unknown name.
+    static func listingFormat(_ arguments: ParsedArguments) throws -> ValueFormat? {
+        guard let name = arguments.value(.format) else { return nil }
+        guard arguments.flag(.readValues) else {
+            throw InvalidArgument("-f/--format formats read values; it needs -r/--read")
+        }
+        return try ValueFormat(parsingForListing: name)
+    }
+
+    /// Reads `uuid` for a listing. A read the device refuses fails only this
+    /// value (`listedValue(failedRead:)`).
+    func readListedValue(_ uuid: String, format: ValueFormat?) async throws -> ListedValue {
+        let data: Data
+        do {
+            data = try await manager.readCharacteristic(uuid)
+        } catch {
+            return try Self.listedValue(failedRead: error)
+        }
+        return Self.listedValue(data, uuid: uuid, format: format)
+    }
+
+    /// The listing value of a read that threw `error`. Only the device
+    /// refusing this characteristic (`BLEError.readFailed`) fails this row
+    /// alone; any other error (the link lost, Bluetooth off, cancellation)
+    /// is rethrown and ends the listing with its own exit code.
+    static func listedValue(failedRead error: Error) throws -> ListedValue {
+        guard case BLEError.readFailed(let reason) = error else { throw error }
+        return .failed("read failed: \(reason)")
+    }
+
+    /// The listing value of `data` read from `uuid`: in `format` when one
+    /// is given (a value that does not fit it is `.failed`), otherwise
+    /// decoded by its Bluetooth SIG definition, or hex when it has none.
+    static func listedValue(_ data: Data, uuid: String, format: ValueFormat?) -> ListedValue {
+        if let format {
+            do {
+                return .value(try DataFormatter.formatExactly(data, as: format))
+            } catch {
+                return .failed(error.message)
+            }
+        }
+        let decoded = GATTDecoder.decode(data, uuid: uuid) ?? DataFormatter.format(data, as: .hex)
+        let parts = decoded.components(separatedBy: " | ")
+        return parts.count > 1 ? .fields(parts.map { splitFieldPart($0) }) : .value(decoded)
+    }
+
     /// Split a decoded field string like "Outer.Inner.Leaf: 2026" into
     /// a simplified label ("Leaf") and the raw value string ("2026").
     /// The caller is responsible for applying any visual styling to each part.

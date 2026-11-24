@@ -1402,6 +1402,27 @@ final class MCPCommandLineTests: XCTestCase {
             }
             XCTAssertEqual(format["enum"], formats, name)
         }
+        // A listing takes every format but raw.
+        let listing = Value.array(ValueFormat.allCases.filter { $0 != .raw }.map { .string($0.rawValue) })
+        for name in ["ble_gatt_tree", "ble_gatt_chars"] {
+            guard case .object(let schema) = tools[name]?.inputSchema,
+                  case .object(let properties) = schema["properties"],
+                  case .object(let format) = properties["format"] else {
+                XCTFail("\(name) has no format property")
+                continue
+            }
+            XCTAssertEqual(format["enum"], listing, name)
+        }
+    }
+
+    /// `format` reaches `gatt chars|tree` as its `-f`.
+    func testGATTFormatComesFromItsField() throws {
+        for sub in ["tree", "chars"] {
+            var args: [String: Value] = ["read_values": .bool(true), "format": .string("uint8")]
+            if sub == "chars" { args["service_uuid"] = .string("180F") }
+            XCTAssertEqual(try CommandRouter.listingFormat(gatt(sub, args)), .uint8, sub)
+        }
+        XCTAssertNil(try CommandRouter.listingFormat(gatt("tree", ["read_values": .bool(true)])))
     }
 }
 #endif

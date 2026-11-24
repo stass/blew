@@ -308,12 +308,12 @@ extension CommandSyntax {
     /// `gatt`: the options of all its subcommands, read only to find the
     /// subcommand (`subcommand(in:)`); `gattSubcommands` then reads the
     /// arguments again with that subcommand's own options and positionals.
-    static let gatt = CommandSyntax("gatt", OptionSpec.targeting + [.descriptors, .readValues])
+    static let gatt = CommandSyntax("gatt", OptionSpec.targeting + [.descriptors, .readValues, .format])
     static let gattSubcommands: [String: CommandSyntax] = [
         "svcs": CommandSyntax("gatt", OptionSpec.targeting, positionals: [.word("svcs")]),
-        "tree": CommandSyntax("gatt", OptionSpec.targeting + [.descriptors, .readValues],
+        "tree": CommandSyntax("gatt", OptionSpec.targeting + [.descriptors, .readValues, .format],
                               positionals: [.word("tree")]),
-        "chars": CommandSyntax("gatt", OptionSpec.targeting + [.readValues],
+        "chars": CommandSyntax("gatt", OptionSpec.targeting + [.readValues, .format],
                                positionals: [.word("chars"), .required("service")]),
         "desc": CommandSyntax("gatt", OptionSpec.targeting, positionals: [.word("desc"), .required("char")]),
         "info": CommandSyntax("gatt", positionals: [.word("info"), .required("char")]),

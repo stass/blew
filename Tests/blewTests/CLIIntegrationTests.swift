@@ -184,6 +184,25 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertTrue(format.stderr.contains("unknown format 'bogus'"), format.stderr)
     }
 
+    /// `gatt chars|tree -f` is checked before any connection: it needs `-r`,
+    /// and takes every format but `raw`, from the CLI and from `exec`.
+    func testGATTFormatIsCheckedBeforeConnecting() throws {
+        guard blewAvailable() else { throw XCTSkip("blew binary not built") }
+        let cases: [([String], String)] = [
+            (["gatt", "chars", "-f", "hex", "180F"], "needs -r/--read"),
+            (["gatt", "tree", "-r", "-f", "raw"], "not available for a listing"),
+            (["gatt", "tree", "-r", "-f", "bogus"], "bogus"),
+            (["exec", "gatt tree -f utf8"], "needs -r/--read"),
+            (["exec", "gatt chars -r -f raw 180F"], "not available for a listing"),
+            (["exec", "gatt chars -r -f bogus 180F"], "unknown format 'bogus'"),
+        ]
+        for (args, message) in cases {
+            let result = try runBlew(args)
+            XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code, "\(args): \(result.stderr)")
+            XCTAssertTrue(result.stderr.contains(message), "\(args): \(result.stderr)")
+        }
+    }
+
     /// A `;` inside quotes is part of the command, as the tokenizer reads it.
     func testExecKeepsQuotedSemicolon() throws {
         guard blewAvailable() else { throw XCTSkip("blew binary not built") }

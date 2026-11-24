@@ -48,12 +48,16 @@ struct GATTTreeCommand: ParsableCommand {
     @Flag(name: [.customShort("r"), .customLong("read")], help: "Read and display values for readable characteristics.")
     var readValues: Bool = false
 
+    @Option(name: [.customShort("f"), .long], help: "Show every read value in this format (needs -r; not raw).")
+    var format: ValueFormat?
+
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
         var args = targeting.toArgs()
         args.append("tree")
         if descriptors { args.append("-d") }
         if readValues { args.append("-r") }
+        if let format { args += ["-f", format.rawValue] }
         let result = router.runGATT(args)
         router.renderer.renderResult(result)
         if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
@@ -71,6 +75,9 @@ struct GATTCharsCommand: ParsableCommand {
     @Flag(name: [.customShort("r"), .customLong("read")], help: "Read and display values for readable characteristics.")
     var readValues: Bool = false
 
+    @Option(name: [.customShort("f"), .long], help: "Show every read value in this format (needs -r; not raw).")
+    var format: ValueFormat?
+
     @Argument(help: "Service UUID.")
     var service: String
 
@@ -78,6 +85,7 @@ struct GATTCharsCommand: ParsableCommand {
         let router = CommandRouter(globals: GlobalOptions.current)
         var args = targeting.toArgs()
         if readValues { args.append("-r") }
+        if let format { args += ["-f", format.rawValue] }
         args += [CommandSyntax.endOfOptions, "chars", service]
         let result = router.runGATT(args)
         router.renderer.renderResult(result)

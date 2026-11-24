@@ -124,14 +124,22 @@ final class KVRenderer: OutputRenderer {
     // MARK: - Characteristics
 
     private func renderCharacteristics(_ chars: [CharacteristicRow]) {
-        let hasValues = chars.contains { LabeledValue.flattened(value: $0.value, fields: $0.valueFields) != nil }
+        let hasValues = chars.contains {
+            $0.valueError != nil || LabeledValue.flattened(value: $0.value, fields: $0.valueFields) != nil
+        }
         if hasValues {
-            let headers: [ColumnHeader] = ["UUID", "Name", "Properties", "Value"]
-            let rows = chars.map { char -> [String] in
-                [char.uuid, char.name ?? "", char.properties.joined(separator: ","),
-                 LabeledValue.flattened(value: char.value, fields: char.valueFields) ?? ""]
+            // A value that failed has `error=` in place of `value=`, so it
+            // never reads as a value.
+            for char in chars {
+                var pairs: [(KVKey, String)] = [("uuid", char.uuid), ("name", char.name ?? ""),
+                                                ("properties", char.properties.joined(separator: ","))]
+                if let error = char.valueError {
+                    pairs.append(("error", error))
+                } else {
+                    pairs.append(("value", LabeledValue.flattened(value: char.value, fields: char.valueFields) ?? ""))
+                }
+                printKV(pairs)
             }
-            printTable(headers: headers, rows: rows)
         } else {
             let rows = chars.map { char -> [String] in
                 [char.uuid, char.name ?? "", char.properties.joined(separator: ",")]
@@ -162,7 +170,9 @@ final class KVRenderer: OutputRenderer {
                 ]
                 if let name = char.name { charPairs.append(("name", name)) }
                 charPairs.append(("properties", char.properties.joined(separator: ",")))
-                if let value = LabeledValue.flattened(value: char.value, fields: char.valueFields) {
+                if let error = char.valueError {
+                    charPairs.append(("error", error))
+                } else if let value = LabeledValue.flattened(value: char.value, fields: char.valueFields) {
                     charPairs.append(("value", value))
                 }
                 printKV(charPairs)

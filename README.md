@@ -273,7 +273,7 @@ FFF0                         yes
 #### `gatt tree` — Show full GATT tree
 
 ```
-blew gatt tree [-n <name>] [-i <id>] [-d] [-r]
+blew gatt tree [-n <name>] [-i <id>] [-d] [-r [-f <fmt>]]
 ```
 
 Prints services and their characteristics with properties (read / write / notify / indicate). Standard UUIDs show their human-readable name alongside.
@@ -291,7 +291,8 @@ Service FFF0
 | Flag | Description |
 |------|-------------|
 | `-d, --descriptors` | Also show descriptors for each characteristic. |
-| `-r, --read` | Read and display values for all readable characteristics inline. Well-known Bluetooth SIG characteristics are decoded to their natural type (e.g. battery level as an integer, manufacturer name as a string); others are shown as hex. An integer field the Bluetooth SIG GSS gives a scale ("Represented values: M, d, b") is shown scaled, with the decimal places its resolution supports, and followed by the name of its unit (Temperature `2409` is `23.40 degree Celsius`, Pressure `02760f00` is `101325.0 pascal`). A decimal exponent d = -2 gives 2 places, and a binary exponent b = -k adds ceil(k × log10 2): Percentage 8 (b = -1) `c9` is `100.5 percentage`, Chromaticity Coordinate (b = -16) `0080` is `0.50000`. A value with more places than that is rounded half away from zero (`0004` there, 0.015625, is `0.01563`); an integer field with no scale is shown raw, with no unit. A raw value the GSS gives a meaning is shown as that meaning (Temperature `0080` is `value is not known`). The unit is the one the GSS names for the field, by its name in the Bluetooth SIG assigned units; a field whose GSS names no unit, several, or one that is not an assigned unit gets none. A medical float (SFLOAT, FLOAT) is followed by its unit only when its GSS states no scale other than M = 1, d = 0, b = 0. |
+| `-r, --read` | Read and display values for all readable characteristics inline. Well-known Bluetooth SIG characteristics are decoded to their natural type (e.g. battery level as an integer, manufacturer name as a string); others are shown as hex. An integer field the Bluetooth SIG GSS gives a scale ("Represented values: M, d, b") is shown scaled, with the decimal places its resolution supports, and followed by the name of its unit (Temperature `2409` is `23.40 degree Celsius`, Pressure `02760f00` is `101325.0 pascal`). A decimal exponent d = -2 gives 2 places, and a binary exponent b = -k adds ceil(k × log10 2): Percentage 8 (b = -1) `c9` is `100.5 percentage`, Chromaticity Coordinate (b = -16) `0080` is `0.50000`. A value with more places than that is rounded half away from zero (`0004` there, 0.015625, is `0.01563`); an integer field with no scale is shown raw, with no unit. A raw value the GSS gives a meaning is shown as that meaning (Temperature `0080` is `value is not known`). The unit is the one the GSS names for the field, by its name in the Bluetooth SIG assigned units; a field whose GSS names no unit, several, or one that is not an assigned unit gets none. A medical float (SFLOAT, FLOAT) is followed by its unit only when its GSS states no scale other than M = 1, d = 0, b = 0. A characteristic whose read fails shows `(error: read failed: <reason>)` in place of its value; in kv output it has `error=` instead of `value=`. |
+| `-f, --format <fmt>` | With `-r`: show every read value in `<fmt>` instead of decoding it. The formats are those of `read -f` except `raw`: `hex`, `utf8`, `base64`, `uint8`, `uint16le`, `uint32le`, `float32le`. A value whose bytes are not exactly one value of the format (`uint8` takes 1 byte, `uint16le` 2, `uint32le` and `float32le` 4, `utf8` valid UTF-8) shows `(error: uint16le takes 2 bytes, got 5)` in its place, and in kv output has `error=` instead of `value=`; the rest of the listing is shown and the exit code is the one it would be without `-f`. The MCP tools `ble_gatt_tree` and `ble_gatt_chars` take it as `format`, and give a failed value as `valueError` in place of `value`. `-f` without `-r`, `-f raw` and an unknown format exit 6. |
 
 With `-r`:
 ```
@@ -306,14 +307,15 @@ Service 180A  Device Information
 #### `gatt chars` — List characteristics for a service
 
 ```
-blew gatt chars [-n <name>] [-i <id>] [-r] <service-uuid>
+blew gatt chars [-n <name>] [-i <id>] [-r [-f <fmt>]] <service-uuid>
 ```
 
 Output columns: UUID, Name, Properties.
 
 | Flag | Description |
 |------|-------------|
-| `-r, --read` | Read and display values for all readable characteristics. Adds a Value column to the table; non-readable characteristics get an empty cell. |
+| `-r, --read` | Read and display values for all readable characteristics. Adds a Value column to the table; non-readable characteristics get an empty cell. A characteristic whose read fails shows `(error: read failed: <reason>)` in the Value column; in kv output it has `error=` instead of `value=`. |
+| `-f, --format <fmt>` | With `-r`: show every read value in `<fmt>`, as `gatt tree -f` does. |
 
 #### `gatt desc` — List descriptors for a characteristic
 
@@ -406,6 +408,8 @@ The MCP tool `ble_gatt_info` returns the same fields as JSON in `structuredConte
 % blew gatt tree -n "Thingy" -dr       # Descriptors + values
 % blew gatt chars -n "Thingy" 180F
 % blew gatt chars -n "Thingy" -r 180A  # Read values for Device Information
+% blew gatt chars -n "Thingy" -r -f hex 180A    # The same values as hex, not decoded
+% blew gatt tree -n "Thingy" -r -f uint16le     # Every value as a 16-bit integer, or an error marker
 % blew gatt desc -n "Thingy" 2A19
 ```
 

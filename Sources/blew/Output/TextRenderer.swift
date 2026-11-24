@@ -108,7 +108,9 @@ final class TextRenderer: OutputRenderer {
     // MARK: - Characteristics table
 
     private func renderCharacteristics(_ chars: [CharacteristicRow]) {
-        let hasValues = chars.contains { LabeledValue.flattened(value: $0.value, fields: $0.valueFields) != nil }
+        let hasValues = chars.contains {
+            $0.valueError != nil || LabeledValue.flattened(value: $0.value, fields: $0.valueFields) != nil
+        }
         guard hasValues else {
             let rows = chars.map { char -> [String] in
                 [char.uuid, char.name ?? "", char.properties.joined(separator: ",")]
@@ -122,6 +124,9 @@ final class TextRenderer: OutputRenderer {
             let cells = [char.uuid, char.name ?? "", char.properties.joined(separator: ",")]
             if let fields = char.valueFields, fields.count > 1 {
                 return TextTable.Row(cells: cells, continuation: fields.map { fieldLine($0) })
+            }
+            if let error = char.valueError {
+                return TextTable.Row(cells: cells, trailing: valueErrorMarker(error))
             }
             return TextTable.Row(cells: cells, trailing: TextLine(char.value ?? ""))
         }
@@ -161,6 +166,10 @@ final class TextRenderer: OutputRenderer {
                     for lv in fields {
                         write(fieldLine(lv, indent: descIndent + "  "))
                     }
+                } else if let error = char.valueError {
+                    charLine.append("  ")
+                    charLine.append(valueErrorMarker(error))
+                    write(charLine)
                 } else if let value = char.value {
                     charLine.append("  = ", .dim)
                     charLine.append(value)
@@ -310,6 +319,12 @@ final class TextRenderer: OutputRenderer {
         var line = TextLine("\(indent)\(lv.label): ", .dim)
         line.append(lv.value)
         return line
+    }
+
+    /// The cell of a listed value that has none (`ListedValue.failed`):
+    /// `(error: <why>)`, so it never reads as a value.
+    private func valueErrorMarker(_ message: String) -> TextLine {
+        TextLine("(error: \(message))")
     }
 
     private func shortId(_ uuidString: String) -> String {

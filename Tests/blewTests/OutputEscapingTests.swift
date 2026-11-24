@@ -317,7 +317,7 @@ private func mustNotAppearRaw(_ s: Unicode.Scalar) -> Bool {
 }
 
 /// Runs `block` with `fd` redirected to a pipe and returns what it wrote.
-private func captureFD(_ fd: Int32, _ block: () -> Void) -> String {
+func captureFD(_ fd: Int32, _ block: () -> Void) -> String {
     fflush(stdout)
     fflush(stderr)
     let pipe = Pipe()

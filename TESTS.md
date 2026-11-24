@@ -30,6 +30,8 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 
 `DataFormatterTests`, `BLENamesTests`, `GATTDecoderTests` — stateless functions with no I/O. Format and parse all data representations, UUID lookups, GATT characteristic decoding, and the `gatt info` field JSON (each `condition` kind, its omission for unconditional fields, and its round trip). Fast and fully deterministic.
 
+`GATTListingFormatTests` — `gatt chars|tree -r -f`: the formats a listing takes (`-f` needs `-r`; `raw` and unknown names exit 6), a forced format overriding SIG decoding, and a value that does not fit its format failing only its own row in text, kv and the MCP JSON.
+
 **REPL command parsing**
 
 `TokenizerTests` — unit tests for the internal tokenizer in `CommandRouter`. `CommandOptionsTests` — the option reader (`CommandSyntax.parse`: `--`, numbers, combined flags, missing and repeated values, unknown options) and the commands that use it, which fail on bad options before connecting.

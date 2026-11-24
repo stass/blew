@@ -411,6 +411,7 @@ final class BlewMCPServer {
         var result = [sub] + buildTargetingArgs(args)
         if args["descriptors"]?.boolValue == true { result.append("--descriptors") }
         if args["read_values"]?.boolValue == true { result.append("--read") }
+        if let fmt = args["format"]?.stringValue { result += ["-f", fmt] }
         return result + positionals(args["service_uuid"]?.stringValue, args["char_uuid"]?.stringValue)
     }
 
@@ -686,6 +687,7 @@ extension BlewMCPServer {
                 "properties": .object(targetingProperties.merging([
                     "descriptors":  .object(["type": .string("boolean"), "description": .string("Include descriptors in the tree")]),
                     "read_values":  .object(["type": .string("boolean"), "description": .string("Read and include characteristic values")]),
+                    "format":       .object(["type": .string("string"), "enum": listingFormatNames, "description": .string("Show every read value in this format instead of decoding it (needs read_values)")]),
                 ]) { $1 }),
             ]),
             annotations: .init(readOnlyHint: true, openWorldHint: true)
@@ -698,6 +700,7 @@ extension BlewMCPServer {
                 "properties": .object(targetingProperties.merging([
                     "service_uuid": .object(["type": .string("string"), "description": .string("Service UUID to list characteristics for")]),
                     "read_values":  .object(["type": .string("boolean"), "description": .string("Read and include characteristic values")]),
+                    "format":       .object(["type": .string("string"), "enum": listingFormatNames, "description": .string("Show every read value in this format instead of decoding it (needs read_values)")]),
                 ]) { $1 }),
                 "required": .array([.string("service_uuid")]),
             ]),
@@ -852,6 +855,9 @@ extension BlewMCPServer {
 
     /// The `format` values a tool takes: every `ValueFormat`, in its order.
     static let formatNames: Value = .array(ValueFormat.allCases.map { .string($0.rawValue) })
+    /// The `format` values `ble_gatt_tree` and `ble_gatt_chars` take: every
+    /// `ValueFormat.listingFormats`.
+    static let listingFormatNames: Value = .array(ValueFormat.listingFormats.map { .string($0.rawValue) })
 
     static let targetingProperties: [String: Value] = [
         "name":         .object(["type": .string("string"), "description": .string("Device name filter (substring match)")]),

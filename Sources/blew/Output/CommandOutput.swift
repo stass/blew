@@ -34,7 +34,7 @@ enum CommandOutput {
 
 // MARK: - Shared types
 
-struct LabeledValue: Codable {
+struct LabeledValue: Codable, Equatable {
     let label: String
     let value: String
 }
@@ -67,12 +67,45 @@ struct ServiceRow: Codable {
     let isPrimary: Bool
 }
 
+/// The value `gatt chars|tree -r` shows for one characteristic: its value
+/// on one line, its decoded fields, or why it has none (the read failed,
+/// or its bytes do not fit the `-f` format). A failure is this cell's
+/// alone; the listing goes on.
+enum ListedValue: Equatable {
+    case value(String)
+    case fields([LabeledValue])
+    case failed(String)
+
+    /// The stored `value`, `valueFields` and `valueError` of a row, of
+    /// which at most one is set; nil for all three when `listed` is nil (the
+    /// characteristic was not read).
+    static func columns(_ listed: ListedValue?) -> (value: String?, fields: [LabeledValue]?, error: String?) {
+        switch listed {
+        case .value(let value): return (value, nil, nil)
+        case .fields(let fields): return (nil, fields, nil)
+        case .failed(let message): return (nil, nil, message)
+        case nil: return (nil, nil, nil)
+        }
+    }
+}
+
+/// `value`, `valueFields` and `valueError` are the JSON of a `ListedValue`
+/// (`ListedValue.columns`): at most one is set.
 struct CharacteristicRow: Codable {
     let uuid: String
     let name: String?
     let properties: [String]
     let value: String?
     let valueFields: [LabeledValue]?
+    var valueError: String? = nil
+}
+
+extension CharacteristicRow {
+    init(uuid: String, name: String?, properties: [String], listed: ListedValue?) {
+        let columns = ListedValue.columns(listed)
+        self.init(uuid: uuid, name: name, properties: properties,
+                  value: columns.value, valueFields: columns.fields, valueError: columns.error)
+    }
 }
 
 struct DescriptorRow: Codable {
@@ -94,7 +127,17 @@ struct GATTTreeCharacteristic: Codable {
     let properties: [String]
     let value: String?
     let valueFields: [LabeledValue]?
+    var valueError: String? = nil
     let descriptors: [DescriptorRow]
+}
+
+extension GATTTreeCharacteristic {
+    init(uuid: String, name: String?, properties: [String], listed: ListedValue?, descriptors: [DescriptorRow]) {
+        let columns = ListedValue.columns(listed)
+        self.init(uuid: uuid, name: name, properties: properties,
+                  value: columns.value, valueFields: columns.fields, valueError: columns.error,
+                  descriptors: descriptors)
+    }
 }
 
 // MARK: - Info types
