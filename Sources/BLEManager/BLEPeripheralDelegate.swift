@@ -1,20 +1,40 @@
 import Foundation
 import CoreBluetooth
 
+/// A CoreBluetooth request whose callback a caller waits for.
+enum PeripheralRequest: Hashable {
+    case advertising
+    case addService(BLEUUID)
+}
+
+/// Resumes one caller of `BLEPeripheral` with the callback's result. Called
+/// once, on `blew.pm` for a callback and on any thread for a cancellation.
+typealias PeripheralWaiter = (Result<Void, Error>) -> Void
+
 /// CoreBluetooth peripheral manager delegate.
 ///
 /// Read and write requests are answered synchronously within the callback
 /// (required by CoreBluetooth). Events are emitted to `eventContinuation`
 /// after responding, for logging and UI.
+///
+/// Ownership: `callbacks` and `eventContinuation` are guarded by `lock`;
+/// `notifications` is confined to `blew.pm` (the delegate queue, and
+/// `BLEPeripheral`'s `pmQueue.sync` blocks).
 final class BLEPeripheralDelegate: NSObject, @unchecked Sendable {
     let store: GATTStore
     private let lock = NSLock()
 
-    // One-shot continuation for the first poweredOn state transition.
-    // Set by BLEPeripheral when it needs to wait for the manager to power on.
-    private var stateContinuation: CheckedContinuation<Void, Error>?
-    private var advertisingContinuation: CheckedContinuation<Void, Error>?
-    private var pendingServiceContinuations: [BLEUUID: CheckedContinuation<Void, Error>] = [:]
+    private var callbacks = PendingCallbacks<PeripheralRequest, PeripheralWaiter>()
+
+    /// At most this many notifications wait for CoreBluetooth's transmit
+    /// queue; `BLEPeripheral.updateValue` reports an error past it.
+    static let notificationQueueCapacity = 64
+    private var notifications = NotificationQueue<PendingNotification>(capacity: notificationQueueCapacity)
+
+    /// Called on `blew.pm` when Bluetooth reports any state but poweredOn,
+    /// after pending waits have been failed. Set once, before the peripheral
+    /// manager exists.
+    var onLeftPoweredOn: ((CBManagerState) -> Void)?
 
     // AsyncStream continuation for ongoing event delivery to the CLI layer.
     // Access only from `emitEvent` (which guards under lock).
@@ -32,22 +52,52 @@ final class BLEPeripheralDelegate: NSObject, @unchecked Sendable {
         lock.unlock()
     }
 
-    func setStateContinuation(_ cont: CheckedContinuation<Void, Error>) {
+    /// Run `body` on the pending callbacks under the lock. Resume any waiter
+    /// it returns after this returns, outside the lock.
+    func withCallbacks<R>(_ body: (inout PendingCallbacks<PeripheralRequest, PeripheralWaiter>) -> R) -> R {
         lock.lock()
-        stateContinuation = cont
-        lock.unlock()
+        defer { lock.unlock() }
+        return body(&callbacks)
     }
 
-    func setAdvertisingContinuation(_ cont: CheckedContinuation<Void, Error>) {
-        lock.lock()
-        advertisingContinuation = cont
-        lock.unlock()
+    /// Notify `notification`, or queue it while the transmit queue is full.
+    /// Call on `blew.pm`; `send` is the CoreBluetooth `updateValue` call.
+    func submitNotification(
+        _ notification: PendingNotification, send: (PendingNotification) -> Bool
+    ) -> NotificationQueue<PendingNotification>.Outcome {
+        notifications.submit(notification, send: send)
     }
 
-    func setServiceContinuation(uuid: BLEUUID, _ cont: CheckedContinuation<Void, Error>) {
-        lock.lock()
-        pendingServiceContinuations[uuid] = cont
-        lock.unlock()
+    /// Call on `blew.pm`.
+    var pendingNotificationCount: Int { notifications.pendingCount }
+
+    /// Drop queued notifications: every one when the services are removed,
+    /// or those of a characteristic whose last subscriber left (a later
+    /// subscriber must not get a value older than the stored one). Call on
+    /// `blew.pm`.
+    func removeNotifications(for characteristic: BLEUUID? = nil) {
+        notifications.removeAll { notification in
+            characteristic.map { BLEUUID(notification.characteristic.uuid) == $0 } ?? true
+        }
+    }
+
+    /// Bluetooth reported `state`. Below poweredOn, CoreBluetooth stops
+    /// advertising, invalidates the published services and drops every
+    /// central (CBPeripheralManagerDelegate, `peripheralManagerDidUpdateState`),
+    /// so nothing in flight will be answered: fail every pending wait with
+    /// the state's error, drop queued notifications and subscribers, and let
+    /// the owner clear its advertising state. The event is emitted last, so
+    /// a listener that sees it also sees the cleared state. Call on `blew.pm`.
+    func bluetoothStateChanged(_ state: CBManagerState) {
+        if state != .poweredOn {
+            let waiters = withCallbacks { $0.removeAll() }
+            notifications.removeAll()
+            store.removeAllSubscribers()
+            onLeftPoweredOn?(state)
+            let error = BLEError.unavailable(state)
+            for waiter in waiters { waiter(.failure(error)) }
+        }
+        emitEvent(.stateChanged(state))
     }
 
     // MARK: - Private helpers
@@ -64,41 +114,24 @@ final class BLEPeripheralDelegate: NSObject, @unchecked Sendable {
 
 extension BLEPeripheralDelegate: CBPeripheralManagerDelegate {
     func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
-        emitEvent(.stateChanged(peripheral.state))
-
-        lock.lock()
-        let cont = stateContinuation
-        if peripheral.state == .poweredOn {
-            stateContinuation = nil
-        }
-        lock.unlock()
-
-        if peripheral.state == .poweredOn {
-            cont?.resume()
-        } else if peripheral.state == .poweredOff || peripheral.state == .unauthorized {
-            let msg: String
-            switch peripheral.state {
-            case .poweredOff: msg = "Bluetooth is powered off"
-            case .unauthorized: msg = "Bluetooth access unauthorized"
-            case .unsupported: msg = "Bluetooth is not supported"
-            default: msg = "Bluetooth state: \(peripheral.state.rawValue)"
-            }
-            cont?.resume(throwing: BLEError.peripheralUnavailable(msg))
-        }
+        bluetoothStateChanged(peripheral.state)
     }
 
     func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
         emitEvent(.advertisingStarted(error: error?.localizedDescription))
 
-        lock.lock()
-        let cont = advertisingContinuation
-        advertisingContinuation = nil
-        lock.unlock()
-
-        if let error = error {
-            cont?.resume(throwing: BLEError.advertisingFailed(error.localizedDescription))
-        } else {
-            cont?.resume()
+        switch withCallbacks({ $0.complete(.advertising) }) {
+        case .waiter(let waiter):
+            waiter(error.map { .failure(BLEError.advertisingFailed($0.localizedDescription)) } ?? .success(()))
+        case .abandoned(let laterRequests):
+            // The command that asked for this gave up; its cancellation
+            // queued a stop, but advertising that started after it must not
+            // outlive it. A later start owns advertising, so leave it alone.
+            if error == nil && laterRequests == 0 {
+                peripheral.stopAdvertising()
+            }
+        case .unexpected:
+            break
         }
     }
 
@@ -106,14 +139,16 @@ extension BLEPeripheralDelegate: CBPeripheralManagerDelegate {
         let uuid = BLEUUID(service.uuid)
         emitEvent(.serviceAdded(uuid: uuid.string, error: error?.localizedDescription))
 
-        lock.lock()
-        let cont = pendingServiceContinuations.removeValue(forKey: uuid)
-        lock.unlock()
+        // An abandoned add needs nothing here: its cancellation queued
+        // `removeAllServices` after the add.
+        if case .waiter(let waiter) = withCallbacks({ $0.complete(.addService(uuid)) }) {
+            waiter(error.map { .failure(BLEError.serviceRegistrationFailed($0.localizedDescription)) } ?? .success(()))
+        }
+    }
 
-        if let error = error {
-            cont?.resume(throwing: BLEError.serviceRegistrationFailed(error.localizedDescription))
-        } else {
-            cont?.resume()
+    func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
+        _ = notifications.drain { notification in
+            peripheral.updateValue(notification.value, for: notification.characteristic, onSubscribedCentrals: nil)
         }
     }
 
@@ -134,6 +169,9 @@ extension BLEPeripheralDelegate: CBPeripheralManagerDelegate {
     ) {
         let uuid = BLEUUID(characteristic.uuid)
         store.removeSubscriber(central, for: uuid)
+        if store.subscriberList(for: uuid).isEmpty {
+            removeNotifications(for: uuid)
+        }
         emitEvent(.unsubscribed(centralId: central.identifier.uuidString, characteristicUUID: uuid.string))
     }
 
@@ -142,28 +180,40 @@ extension BLEPeripheralDelegate: CBPeripheralManagerDelegate {
         didReceiveRead request: CBATTRequest
     ) {
         let uuid = BLEUUID(request.characteristic.uuid)
-        let value = store.getValue(for: uuid) ?? Data()
-        request.value = value.count > request.offset ? Data(value[request.offset...]) : Data()
-        peripheral.respond(to: request, withResult: .success)
+        switch store.read(uuid, at: request.offset) {
+        case .success(let value):
+            request.value = value
+            peripheral.respond(to: request, withResult: .success)
+        case .failure(let code):
+            peripheral.respond(to: request, withResult: code)
+        }
         emitEvent(.readRequest(centralId: request.central.identifier.uuidString, characteristicUUID: uuid.string))
     }
 
+    /// One Write Request, or every fragment of a long write on Execute
+    /// Write. CoreBluetooth takes one response for the whole array, given
+    /// with its first request: success only if every write applies.
     func peripheralManager(
         _ peripheral: CBPeripheralManager,
         didReceiveWrite requests: [CBATTRequest]
     ) {
-        for request in requests {
-            let uuid = BLEUUID(request.characteristic.uuid)
-            let value = request.value ?? Data()
-            store.setValue(value, for: uuid)
-            emitEvent(.writeRequest(
-                centralId: request.central.identifier.uuidString,
-                characteristicUUID: uuid.string,
-                value: value
-            ))
+        guard let first = requests.first else { return }
+        let writes = requests.map {
+            ATTWrite(characteristic: BLEUUID($0.characteristic.uuid), offset: $0.offset, value: $0.value ?? Data())
         }
-        if let first = requests.first {
+        switch store.write(writes) {
+        case .success(let written):
             peripheral.respond(to: first, withResult: .success)
+            var reported = Set<BLEUUID>()
+            for (request, write) in zip(requests, writes) where reported.insert(write.characteristic).inserted {
+                emitEvent(.writeRequest(
+                    centralId: request.central.identifier.uuidString,
+                    characteristicUUID: write.characteristic.string,
+                    value: written[write.characteristic] ?? Data()
+                ))
+            }
+        case .failure(let code):
+            peripheral.respond(to: first, withResult: code)
         }
     }
 }

@@ -51,9 +51,9 @@ public enum BLEError: Error, Sendable {
         }
     }
 
-    /// Why the central cannot be used while CoreBluetooth reports `state`
-    /// (any state but poweredOn).
-    static func unavailable(_ state: CBManagerState) -> BLEError {
+    /// Why Bluetooth (central or peripheral) cannot be used while
+    /// CoreBluetooth reports `state` (any state but poweredOn).
+    public static func unavailable(_ state: CBManagerState) -> BLEError {
         switch state {
         case .poweredOff: return .bluetoothUnavailable("Bluetooth is powered off")
         case .unauthorized: return .bluetoothUnavailable("Bluetooth access unauthorized")

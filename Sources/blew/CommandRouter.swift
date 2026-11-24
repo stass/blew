@@ -1476,7 +1476,7 @@ extension CommandRouter {
                     try await peripheral.configure(services: servicesWithChars)
 
                     for (uuid, data) in initialValues {
-                        try? peripheral.updateValue(data, forCharacteristic: uuid)
+                        _ = try? peripheral.updateValue(data, forCharacteristic: uuid)
                     }
                 }
 
@@ -1502,6 +1502,7 @@ extension CommandRouter {
             result.exitCode = BlewExitCode.interrupted.code
             return result
         case .timedOut:
+            peripheral.stopAdvertising()
             result.errors.append("advertising failed to start (timed out)")
             result.exitCode = BlewExitCode.timeout.code
             return result
@@ -1620,7 +1621,7 @@ extension CommandRouter {
                 try await peripheral.configure(services: clonedServices)
 
                 for (uuid, data) in initialValues {
-                    try? peripheral.updateValue(data, forCharacteristic: uuid)
+                    _ = try? peripheral.updateValue(data, forCharacteristic: uuid)
                 }
 
                 try await peripheral.startAdvertising(name: clonedName, serviceUUIDs: serviceUUIDs)
@@ -1644,6 +1645,7 @@ extension CommandRouter {
             result.exitCode = BlewExitCode.interrupted.code
             return result
         case .timedOut:
+            peripheral.stopAdvertising()
             result.errors.append("advertising failed to start (timed out)")
             result.exitCode = BlewExitCode.timeout.code
             return result
@@ -1680,19 +1682,44 @@ extension CommandRouter {
         renderer.renderResult(startup)
         var result = CommandResult()
         let semaphore = DispatchSemaphore(value: 0)
+        // Bluetooth leaving poweredOn ends advertising, and with it the
+        // command. Read only after the task signalled `semaphore`.
+        var bluetoothLost: BLEError?
         let eventTask = Task {
             defer { semaphore.signal() }
             let eventStream = peripheral.events()
+            // Bluetooth may have left poweredOn (and come back) before the
+            // stream existed; in a one-shot command nothing else stops
+            // advertising.
+            if !peripheral.isAdvertising() {
+                let state = peripheral.bluetoothState()
+                bluetoothLost = state == .poweredOn
+                    ? .bluetoothUnavailable("Bluetooth was reset and advertising stopped")
+                    : BLEError.unavailable(state)
+                return
+            }
             for await event in eventStream {
                 let ts = ISO8601DateFormatter.shared.string(from: Date())
                 emit(.peripheralEvent(PeriphEventRecord(timestamp: ts, event: event)))
+                if case .stateChanged(let state) = event, state != .poweredOn {
+                    bluetoothLost = BLEError.unavailable(state)
+                    break
+                }
                 if Task.isCancelled { break }
             }
         }
-        if case .interrupted = waitInterruptible(eventTask, semaphore: semaphore) {
+        switch waitInterruptible(eventTask, semaphore: semaphore) {
+        case .interrupted:
             peripheral.stopAdvertising()
             result.output.append(.message("Stopped advertising."))
             result.exitCode = BlewExitCode.interrupted.code
+        case .completed:
+            if let error = bluetoothLost {
+                result.errors.append(error.localizedDescription)
+                result.exitCode = error.exitCode
+            }
+        case .timedOut:
+            break
         }
         return result
     }
@@ -1778,8 +1805,15 @@ extension CommandRouter {
         }
 
         do {
-            try BLEPeripheral.shared.updateValue(data, forCharacteristic: charUUID)
-            result.infos.append("sent notification on \(BLENames.displayUUID(charUUID.string, category: .characteristic))")
+            let name = BLENames.displayUUID(charUUID.string, category: .characteristic)
+            switch try BLEPeripheral.shared.updateValue(data, forCharacteristic: charUUID) {
+            case .notified:
+                result.infos.append("sent notification on \(name)")
+            case .queued(let pending):
+                result.infos.append("queued notification on \(name) (\(pending) waiting for the Bluetooth transmit queue)")
+            case .stored:
+                result.infos.append("set \(name); no central is subscribed, so nothing was notified")
+            }
         } catch let error as BLEError {
             result.errors.append(error.localizedDescription)
             result.exitCode = error.exitCode

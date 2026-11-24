@@ -187,20 +187,16 @@ None open.
 
 ### Peripheral mode
 
-- [ ] **P1. Prepared (long) writes ignore `request.offset`.**
-  `BLEPeripheralDelegate.swift:155-167`. Only the last fragment is kept.
-  Reads past the end return success with empty data instead of an
-  invalid-offset error.
-- [ ] **P2. `updateValue` returning false is ignored.**
-  `BLEPeripheral.swift:131-133`. Implement
-  `peripheralManagerIsReady(toUpdateSubscribers:)`.
-- [ ] **P3. `configure` and `startAdvertising` cannot be cancelled.**
-  `BLEPeripheral.swift:60`, `:91`. A late callback can start advertising
-  after the command reported failure.
-- [ ] **P4. Power-state handling is incomplete.**
-  `BLEPeripheralDelegate.swift:15,35,66-88`. `stateContinuation` is never
-  set. `_isAdvertising` stays true after a power-off. `removeAllSubscribers`
-  is never called.
+- [ ] **P5. A callback CoreBluetooth never sends for an undone request
+  desynchronises the callback FIFO.** `PendingCallbacks.swift` (`complete`),
+  `BLEPeripheralDelegate.swift` (`peripheralManagerDidStartAdvertising`,
+  `didAdd`). A request cancelled after it was issued stays queued as
+  abandoned, on the assumption that CoreBluetooth still answers it once
+  after `stopAdvertising` / `removeAllServices` *(plausible)*. If it does
+  not, the next request's callback is taken for the abandoned one: in the
+  REPL, after one `periph adv` times out, every later `periph adv` times
+  out too until Bluetooth is power-cycled. Confirm the behaviour on a
+  radio; if confirmed, give abandoned entries a deadline.
 
 ## P2: release hygiene (0.3.0)
 

@@ -187,16 +187,15 @@ final class PeripheralUUIDTests: XCTestCase {
         let delegate = BLEPeripheralDelegate(store: GATTStore())
         let configured = try BLEUUID(parsing: "0000180D-0000-1000-8000-00805F9B34FB")
         let added = expectation(description: "service registration completes")
-        Task {
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                delegate.setServiceContinuation(uuid: configured, cont)
-                delegate.peripheralManager(
-                    CBPeripheralManager(),
-                    didAdd: CBMutableService(type: CBUUID(string: "180D"), primary: true),
-                    error: nil)
-            }
-            added.fulfill()
-        }
+        let ticket = delegate.withCallbacks { $0.makeTicket() }
+        XCTAssertTrue(delegate.withCallbacks { $0.add(ticket, { result in
+            if case .success = result { added.fulfill() }
+        }) })
+        XCTAssertTrue(delegate.withCallbacks { $0.issue(ticket, as: .addService(configured)) })
+        delegate.peripheralManager(
+            CBPeripheralManager(),
+            didAdd: CBMutableService(type: CBUUID(string: "180D"), primary: true),
+            error: nil)
         wait(for: [added], timeout: 2)
     }
 

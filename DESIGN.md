@@ -185,13 +185,23 @@ CLI / REPL  ──async/await──►  BLEPeripheral (singleton)
 
 **Key difference from the central path:** Read and write requests from connected centrals must be answered synchronously inside `CBPeripheralManagerDelegate` callbacks. The delegate therefore accesses `GATTStore` directly (under `NSLock`) and calls `respond(to:withResult:)` immediately. Events are emitted to an `AsyncStream<PeripheralEvent>` after responding, purely for logging and REPL feedback. There is no event queue or processor thread on the peripheral side.
 
+**Requests from a remote central** are untrusted and decided by pure functions in `GATTStore`: `read(_:at:)` answers a Read or Read Blob at an offset (Invalid Offset past the end), and `apply(_:to:)` applies the array CoreBluetooth delivers for one Write Request or one Execute Write (every Prepare Write fragment with its offset). A write at offset n keeps the first n bytes and replaces the rest, so fragments assemble a long value; an offset past the current end is Invalid Offset and a value over 512 bytes (the ATT maximum) is Invalid Attribute Value Length. The array is all or nothing, answered once through its first request, as CoreBluetooth requires.
+
+**Waiting for callbacks.** `configure` (`didAdd`) and `startAdvertising` (`didStartAdvertising`) wait through `BLEPeripheral.request`, backed by `PendingCallbacks`, which the delegate owns under its lock. CoreBluetooth answers the requests for one key in order without an identifier, so the waiters per key are a FIFO; a request cancelled after it was issued stays in it as abandoned, so its late callback is not taken for a later request's. Each wait ends exactly once: with the callback, with `CancellationError` when the calling task is cancelled (`waitInterruptible` cancels it on timeout and Ctrl-C), or with the Bluetooth state error. A cancelled wait queues its undo on `blew.pm` after the request (`stopAdvertising`, `removeAllServices`), and an abandoned advertising start that still succeeds is stopped when no later start is in flight. State a request changes (`isAdvertising`, the registered services) is set on `blew.pm` in the same order, so a cancellation always wins over a success that arrives around it.
+
+**Notifications.** `updateValue` runs on `blew.pm` (`pmQueue.sync`). When `CBPeripheralManager.updateValue` reports its transmit queue full, the notification waits in the delegate's `NotificationQueue` (at most 64) and is sent in order from `peripheralManagerIsReady(toUpdateSubscribers:)`; later notifications queue behind it. One that finds the queue full is an error to the caller and leaves the value unchanged; nothing is dropped silently.
+
+**Leaving poweredOn.** CoreBluetooth stops advertising, invalidates the services and drops the centrals when the state drops below poweredOn. `BLEPeripheralDelegate.bluetoothStateChanged` then fails every pending wait with `BLEError.unavailable(state)`, empties the notification queue and the subscribers, and clears `BLEPeripheral`'s advertising and service state before it emits `stateChanged`. A one-shot `periph adv` ends on that event with exit code 3; it also checks, after subscribing to events, that advertising was not already lost.
+
 **New files:**
 
 | File | Role |
 |------|------|
-| `BLEPeripheral.swift` | Public singleton facade. Owns `CBPeripheralManager`, `GATTStore`, delegate. API: `configure`, `startAdvertising`, `stopAdvertising`, `updateValue`, `events()`, `peripheralStatus()`. |
-| `BLEPeripheralDelegate.swift` | `CBPeripheralManagerDelegate`. Answers read/write requests synchronously via `GATTStore`. Emits `PeripheralEvent` to stream. |
-| `GATTStore.swift` | Thread-safe value map + subscriber map. Accessed from `blew.pm` queue (delegate) and any thread (CLI commands). Guarded by `NSLock`. |
+| `BLEPeripheral.swift` | Public singleton facade. Owns `CBPeripheralManager`, `GATTStore`, delegate. API: `configure`, `startAdvertising`, `stopAdvertising`, `updateValue`, `events()`, `peripheralStatus()`, `bluetoothState()`. |
+| `BLEPeripheralDelegate.swift` | `CBPeripheralManagerDelegate`. Answers read/write requests synchronously via `GATTStore`. Owns the pending callbacks and the notification queue. Emits `PeripheralEvent` to stream. |
+| `GATTStore.swift` | Thread-safe value map + subscriber map, and the pure ATT read/write decisions. Accessed from `blew.pm` queue (delegate) and any thread (CLI commands). Guarded by `NSLock`. |
+| `PendingCallbacks.swift` | Pure FIFO of waiters per CoreBluetooth request key, with cancellation. |
+| `NotificationQueue.swift` | Pure bounded FIFO of notifications waiting for the transmit queue; `ValueUpdate`, what `updateValue` did. |
 | `PeripheralTypes.swift` | `ServiceDefinition`, `CharacteristicDefinition`, `CharacteristicProperty`, `PeripheralStatus` — all `Sendable` value types. Decoding a `CharacteristicDefinition` rejects descriptors (see below). |
 | `BLEUUID.swift` | `BLEUUID`, the validated UUID every peripheral definition, table key and API argument uses. |
 | `PeripheralEvent.swift` | `PeripheralEvent` enum: `stateChanged`, `advertisingStarted`, `serviceAdded`, `centralConnected`, `centralDisconnected`, `readRequest`, `writeRequest`, `subscribed`, `unsubscribed`, `notificationSent`. |

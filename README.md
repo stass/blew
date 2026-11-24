@@ -723,7 +723,9 @@ Ctrl-C stops the running command: it stops scanning, subscribing or advertising,
 blew periph adv [-n <name>] [-S <uuid>] [--config <file>]
 ```
 
-Starts advertising, prints what it advertises, and runs until interrupted (Ctrl-C), which stops advertising and exits with code 130. Events (reads, writes, subscriptions) are logged to stdout.
+Starts advertising, prints what it advertises, and runs until interrupted (Ctrl-C), which stops advertising and exits with code 130. Events (reads, writes, subscriptions) are logged to stdout. If Bluetooth is turned off or access is revoked while it advertises, advertising ends, the services are gone, and `periph adv` exits with code 3 ("Bluetooth unavailable: Bluetooth is powered off"). If starting up times out or is interrupted, nothing is left advertising, even when CoreBluetooth confirms the start afterwards.
+
+The GATT server answers a remote central the way ATT specifies. A read at an offset past the end of the value is answered with an Invalid Offset error; at the end, with an empty value. A long (prepared) write is assembled from its fragments in order: a write at offset n keeps the first n bytes of the value and replaces the rest. A write at an offset past the end of the value is rejected with Invalid Offset, and one that would make the value longer than 512 bytes (the ATT maximum) with Invalid Attribute Value Length; a rejected request changes nothing. A `writeRequest` event shows the whole value after the write.
 
 | Flag | Description |
 |------|-------------|
@@ -846,7 +848,7 @@ In REPL and `exec` mode, `periph adv` and `periph clone` run in two phases. The 
 |---------|-------------|
 | `periph stop` | Stop advertising and cancel the background event task. |
 | `periph set [-f <fmt>] <char> <val>` | Update a characteristic's stored value. |
-| `periph notify [-f <fmt>] <char> <val>` | Update value and push a notification to all subscribers. |
+| `periph notify [-f <fmt>] <char> <val>` | Update value and push a notification to all subscribers. When the Bluetooth transmit queue is full, the notification waits and is sent in order once there is room; at most 64 wait, and a notification past that is an error (exit 5) that leaves the value unchanged. With no central subscribed, only the value is updated, and the message says so. |
 | `periph status` | Show advertising state, service/characteristic counts, subscriber count. |
 
 ```
