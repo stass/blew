@@ -1155,15 +1155,22 @@ final class CommandRouter {
     /// command, so a SIGINT between two waits stops the command at its next
     /// wait instead of ending the process. The MCP server runs each tool
     /// call this way.
-    func run<T>(stoppingOn request: StopRequest, _ body: () -> T) -> T {
+    ///
+    /// A stop requested by a signal, or by the exit beginning, while `body`
+    /// ran makes a success 130 (`SignalPolicy.exitCode(after:stopRequested:)`),
+    /// as for a script command. The request's own stop does not: the caller maps its
+    /// outcome (`MCPServer.execute`: no response for a cancelled call, and
+    /// a success that outran its budget stands).
+    func run(stoppingOn request: StopRequest, _ body: () -> CommandResult) -> CommandResult {
         let outer = stopRequest
         stopRequest = request
+        defer { stopRequest = outer }
         signals.commandStarted()
-        defer {
-            signals.commandFinished()
-            stopRequest = outer
-        }
-        return body()
+        var result = body()
+        // Read under the lock that closes the span, as in `runScriptCommand`.
+        let stopRequested = signals.commandFinished()
+        result.exitCode = SignalPolicy.exitCode(after: result.exitCode, stopRequested: stopRequested)
+        return result
     }
 
     /// Whether the running command was asked to stop: by a SIGINT, by a

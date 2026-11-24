@@ -284,8 +284,10 @@ final class ToolCallQueueTests: XCTestCase {
         let stop = StopRequest()
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { stop.stop(.cancelled) }
         let start = Date()
-        let outcome = router.run(stoppingOn: stop) {
-            router.waitInterruptible { try? await Task.sleep(nanoseconds: 30_000_000_000) }
+        var outcome: CommandRouter.CommandOutcome?
+        _ = router.run(stoppingOn: stop) {
+            outcome = router.waitInterruptible { try? await Task.sleep(nanoseconds: 30_000_000_000) }
+            return CommandResult()
         }
         XCTAssertEqual(outcome, .interrupted)
         XCTAssertLessThan(Date().timeIntervalSince(start), 2)
@@ -298,7 +300,11 @@ final class ToolCallQueueTests: XCTestCase {
         let stop = StopRequest()
         stop.stop(.cancelled)
         let ran = DispatchSemaphore(value: 0)
-        let outcome = router.run(stoppingOn: stop) { router.waitInterruptible { ran.signal() } }
+        var outcome: CommandRouter.CommandOutcome?
+        _ = router.run(stoppingOn: stop) {
+            outcome = router.waitInterruptible { ran.signal() }
+            return CommandResult()
+        }
         XCTAssertEqual(outcome, .interrupted)
         XCTAssertEqual(ran.wait(timeout: .now() + 0.2), .timedOut, "an operation started after the stop")
     }
@@ -310,15 +316,42 @@ final class ToolCallQueueTests: XCTestCase {
         let router = CommandRouter(globals: try GlobalOptions.parse([]))
         let stop = StopRequest()
         var secondRan = false
-        let outcomes = router.run(stoppingOn: stop) {
-            (router.waitInterruptible { stop.stop(.cancelled) },
-             router.waitInterruptible { secondRan = true })
+        var outcomes: [CommandRouter.CommandOutcome] = []
+        _ = router.run(stoppingOn: stop) {
+            outcomes.append(router.waitInterruptible { stop.stop(.cancelled) })
+            outcomes.append(router.waitInterruptible { secondRan = true })
+            return CommandResult()
         }
         // .completed when the operation finishes before the 50 ms poll sees
         // the stop (the usual case); .interrupted if the poll wins the race.
-        XCTAssertNotEqual(outcomes.0, .timedOut)
-        XCTAssertEqual(outcomes.1, .interrupted)
+        XCTAssertEqual(outcomes.count, 2)
+        XCTAssertNotEqual(outcomes.first, .timedOut)
+        XCTAssertEqual(outcomes.last, .interrupted)
         XCTAssertFalse(secondRan)
+    }
+
+    /// A Ctrl-C that lands as a call's last step succeeds gives the call
+    /// 130, as it does a one-shot command or a script command.
+    func testACtrlCAsACallSucceedsGives130() throws {
+        let signals = ProcessSignals()
+        let router = CommandRouter(globals: try GlobalOptions.parse([]), signals: signals)
+        let result = router.run(stoppingOn: StopRequest()) {
+            XCTAssertNil(signals.respond(to: .interrupt), "the call had no span open")
+            return CommandResult()
+        }
+        XCTAssertEqual(result.exitCode, BlewExitCode.interrupted.code, "the interrupted call reported success")
+    }
+
+    /// The call's own stop (its budget) leaves a success standing:
+    /// `MCPServer.execute` maps the budget's outcome itself.
+    func testABudgetStopLeavesASuccessStanding() throws {
+        let router = CommandRouter(globals: try GlobalOptions.parse([]), signals: ProcessSignals())
+        let stop = StopRequest()
+        let result = router.run(stoppingOn: stop) {
+            stop.stop(.budgetExhausted)
+            return CommandResult()
+        }
+        XCTAssertEqual(result.exitCode, BlewExitCode.success.code)
     }
 
     /// Subscription setup waits for the device to confirm through

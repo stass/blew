@@ -17,8 +17,14 @@ final class SignalPolicyTests: XCTestCase {
         XCTAssertEqual(SignalPolicy.respond(to: .interrupt, in: .interrupting).response, .exit(130))
     }
 
+    /// Once the exit has begun, a SIGINT ends the process at once, even
+    /// with a span still open (a `blew mcp` call in flight).
+    func testSIGINTOnceTheExitBeganExits() {
+        XCTAssertEqual(SignalPolicy.respond(to: .interrupt, in: .exiting).response, .exit(130))
+    }
+
     func testSIGTERMExits143InEveryPhase() {
-        for phase in [CommandPhase.idle, .running, .interrupting] {
+        for phase in [CommandPhase.idle, .running, .interrupting, .exiting] {
             XCTAssertEqual(SignalPolicy.respond(to: .terminate, in: phase).response, .exit(143), "\(phase)")
         }
     }

@@ -83,7 +83,7 @@ final class CommandSpanTests: XCTestCase {
             code.withLock { $0 = result }
         }
         usleep(200_000)
-        _ = signals.beginSignalExit(BlewExitCode.terminated.code)
+        _ = signals.respond(to: .terminate)
         let deadline = Date().addingTimeInterval(3)
         while code.withLock({ $0 }) == nil && Date() < deadline { usleep(20_000) }
         XCTAssertEqual(code.withLock { $0 }, BlewExitCode.interrupted.code,
@@ -95,7 +95,7 @@ final class CommandSpanTests: XCTestCase {
     func testNoScriptCommandStartsOnceASignalBeganTheExit() throws {
         let signals = ProcessSignals()
         let router = CommandRouter(globals: try GlobalOptions.parse([]), signals: signals)
-        _ = signals.beginSignalExit(BlewExitCode.terminated.code)
+        _ = signals.respond(to: .terminate)
         let returned = OSAllocatedUnfairLock(initialState: false)
         // Parks for good; the thread is left behind when the test ends.
         Thread.detachNewThread {
@@ -115,7 +115,7 @@ final class SignalExitOwnerTests: XCTestCase {
     /// disconnect can take seconds) must not start its command.
     func testNoCommandStartsOnceASignalBeganTheExit() {
         let signals = ProcessSignals()
-        XCTAssertTrue(signals.beginSignalExit(BlewExitCode.interrupted.code).runsCleanup,
+        XCTAssertTrue(signals.respond(to: .interrupt)?.runsCleanup == true,
                       "nothing else was exiting")
         let started = OSAllocatedUnfairLock(initialState: false)
         // Parks for good; the thread is left behind when the test ends.
@@ -133,7 +133,7 @@ final class SignalExitOwnerTests: XCTestCase {
     func testTheFirstToExitRunsTheCleanupAndKeepsItsCode() {
         let signals = ProcessSignals()
         signals.beginOrdinaryExit(with: BlewExitCode.success.code)
-        XCTAssertEqual(signals.beginSignalExit(BlewExitCode.terminated.code),
+        XCTAssertEqual(signals.respond(to: .terminate),
                        ProcessSignals.SignalExit(code: BlewExitCode.success.code, runsCleanup: false))
         XCTAssertTrue(signals.stopRequested, "a command in flight would run beside the exit cleanup")
     }
@@ -144,7 +144,7 @@ final class SignalExitOwnerTests: XCTestCase {
     /// running command is asked to stop.
     func testASignalThatBeganTheExitKeepsItsCode() {
         let signals = ProcessSignals()
-        XCTAssertEqual(signals.beginSignalExit(BlewExitCode.terminated.code),
+        XCTAssertEqual(signals.respond(to: .terminate),
                        ProcessSignals.SignalExit(code: BlewExitCode.terminated.code, runsCleanup: true))
         XCTAssertTrue(signals.stopRequested)
         let returned = OSAllocatedUnfairLock(initialState: false)
@@ -155,6 +155,31 @@ final class SignalExitOwnerTests: XCTestCase {
         }
         usleep(300_000)
         XCTAssertFalse(returned.withLock { $0 }, "main exited on its own after the signal began the exit")
+    }
+
+    /// SIGTERM as a one-shot command returns: the signal's decision to exit
+    /// and its claim of the exit are one step, so the command that finishes
+    /// right after it sees the stop, and its 0 cannot claim the exit.
+    func testASignalClaimsTheExitInTheStepThatDecidesIt() {
+        let signals = ProcessSignals()
+        signals.commandStarted()
+        XCTAssertEqual(signals.respond(to: .terminate),
+                       ProcessSignals.SignalExit(code: BlewExitCode.terminated.code, runsCleanup: true))
+        XCTAssertTrue(signals.commandFinished(),
+                      "the command finished after SIGTERM's decision without seeing a stop, so its 0 could claim the exit")
+    }
+
+    /// A SIGINT during the main thread's exit cleanup while a `blew mcp`
+    /// tool call is still in flight (a span is open) ends the process at
+    /// once with the main thread's code, as any signal during the cleanup.
+    func testASignalAfterTheOrdinaryExitBeganExitsAtOnce() {
+        let signals = ProcessSignals()
+        signals.commandStarted()
+        defer { signals.commandFinished() }
+        signals.beginOrdinaryExit(with: BlewExitCode.success.code)
+        XCTAssertEqual(signals.respond(to: .interrupt),
+                       ProcessSignals.SignalExit(code: BlewExitCode.success.code, runsCleanup: false),
+                       "the SIGINT only stopped the call and the cleanup went on")
     }
 }
 

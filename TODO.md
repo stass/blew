@@ -37,6 +37,21 @@ None open.
 
 ## P3: later (after 0.3.0)
 
+- [ ] **SG1. A SIGINT's 130 on an MCP call whose budget ran out is
+  reported as a timeout.** `Sources/blew/MCP/MCPServer.swift` (`execute`,
+  `.budgetExhausted`) rewrites any nonzero code to 4 with "did not finish
+  within its budget", and cannot tell a SIGINT's 130 from the budget's own
+  stop. Scenario: a call outruns its budget, its last operation still
+  succeeds, and a `kill -INT` lands while its span is open:
+  `CommandRouter.run(stoppingOn:)` makes the success 130, and the client
+  gets 4 and "did not finish" for a call that finished. Related: the stop
+  rule counts the `StopRequest`'s reason in `runScriptCommand`
+  (`CommandRouter.swift`, `stopRequest?.reason`) but not in
+  `run(stoppingOn:)`; no MCP tool runs a script, so the term is unused, but
+  a script-running tool would turn a success past its budget into 4 the
+  same way. Fix: carry the signal's stop to `execute` beside the result,
+  and state the request's stop once (in `MCPServer.execute`).
+
 - [ ] **S15. Every distinct device identifier is kept, without bound.**
   `Sources/BLEManager/BLEDelegate.swift:30` keeps a CBPeripheral for every
   identifier discovered, for the life of the process (never cleared);
