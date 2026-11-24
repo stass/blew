@@ -5,11 +5,14 @@ import BLEManager
 
 @main
 struct Blew: AsyncParsableCommand {
+    /// The release version, reported by `--version` and the MCP handshake.
+    static let version = "0.3.0"
+
     static let configuration = CommandConfiguration(
         commandName: "blew",
         abstract: "macOS BLE CLI workbench",
         discussion: "Global options must be placed before the subcommand name.",
-        version: "0.2.0",
+        version: Blew.version,
         subcommands: Blew.subcommandList
     )
 

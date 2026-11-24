@@ -60,9 +60,7 @@ None open.
 
 ## P2: release hygiene (0.3.0)
 
-- [ ] **R1. The version string is out of date.** `Sources/blew/Blew.swift:16`
-  says `0.2.0`; the latest tag is `v0.2.2`. Set it to `0.3.0` for the
-  release.
+None open.
 
 ## P3: later (after 0.3.0)
 
