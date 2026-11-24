@@ -19,12 +19,12 @@ enum HandledSignal: CaseIterable {
 
 /// Whether a command is running that a SIGINT can stop. A command runs
 /// inside a span: a whole one-shot CLI command or `exec` script (opened by
-/// `Blew.main`), a whole piped REPL script, an interactive REPL command
-/// from Enter to the next prompt, an MCP tool call, and each
-/// `CommandRouter.waitInterruptible` within them.
+/// `Blew.main`), a REPL command from the line read to the next read, an
+/// MCP tool call, and each `CommandRouter.waitInterruptible` within them.
 enum CommandPhase: Equatable {
-    /// No span is open: at the interactive REPL prompt, between MCP tool
-    /// calls, or parsing a CLI command's arguments.
+    /// No span is open: at the interactive REPL prompt, while a piped REPL
+    /// script waits for its next line, between MCP tool calls, or parsing a
+    /// CLI command's arguments.
     case idle
     /// A span is open and its command stops when asked.
     case running
@@ -85,8 +85,15 @@ final class ProcessSignals: @unchecked Sendable {
     }
     private var exitHook: (() -> Void)?
     private var sources: [DispatchSourceSignal] = []
+    /// Who is ending the process. The first to claim the exit owns it: the
+    /// main thread returning from its command (`beginOrdinaryExit`) or the
+    /// signal queue (`exitProcess`).
+    private var exitOwner = ExitOwner.none
 
-    private init() {}
+    private enum ExitOwner { case none, ordinary, signal }
+
+    /// Internal so tests can use an instance of their own; blew uses `shared`.
+    init() {}
 
     /// Take over SIGINT and SIGTERM. Called once, at startup, before any
     /// command runs.
@@ -111,19 +118,30 @@ final class ProcessSignals: @unchecked Sendable {
     // MARK: - Interruptible waits
 
     /// A command span opens. A SIGINT while any span is open stops the
-    /// command instead of ending the process.
+    /// command instead of ending the process. Once a signal has begun the
+    /// exit, no command starts: the caller waits for the exit instead.
     func commandStarted() {
-        lock.withLock {
+        let exitBegun: Bool = lock.withLock {
+            if exitOwner == .signal { return true }
             if openSpans == 0 { interrupted = false }
             openSpans += 1
+            return false
         }
+        if exitBegun { waitForSignalExit() }
     }
 
-    /// The span that `commandStarted` opened has closed.
-    func commandFinished() {
+    /// The span that `commandStarted` opened has closed. Returns whether a
+    /// stop is requested as it closes; for the outermost span, whether a
+    /// SIGINT asked the command to stop while it was open. The answer is
+    /// read under the same lock as the close, so a SIGINT that arrives after
+    /// it finds the span closed and is not lost between the two.
+    @discardableResult
+    func commandFinished() -> Bool {
         lock.withLock {
+            let wasInterrupted = interrupted
             openSpans -= 1
             if openSpans == 0 { interrupted = false }
+            return wasInterrupted
         }
     }
 
@@ -135,6 +153,43 @@ final class ProcessSignals: @unchecked Sendable {
     }
 
     // MARK: - Exit
+
+    /// The main thread is about to end the process the ordinary way.
+    /// Returns true to the first caller, which then runs the exit cleanup,
+    /// and false to later ones. When a signal has already begun the exit,
+    /// it never returns, so the signal's cleanup finishes and its exit code
+    /// is the one the process ends with.
+    func beginOrdinaryExit() -> Bool {
+        let before: ExitOwner = lock.withLock {
+            let before = exitOwner
+            if before == .none { exitOwner = .ordinary }
+            return before
+        }
+        switch before {
+        case .none: return true
+        case .ordinary: return false
+        case .signal: waitForSignalExit()
+        }
+    }
+
+    /// The signal queue begins the exit. From here on no command starts
+    /// and the main thread does not exit on its own. Returns whether the
+    /// signal queue runs the exit cleanup: not when the main thread already
+    /// began its ordinary exit, which runs it. Internal for tests;
+    /// `exitProcess` is the caller.
+    func beginSignalExit() -> Bool {
+        lock.withLock {
+            let ownsCleanup = exitOwner == .none
+            exitOwner = .signal
+            return ownsCleanup
+        }
+    }
+
+    /// Block the calling thread until the signal queue's `_exit` ends the
+    /// process.
+    private func waitForSignalExit() -> Never {
+        while true { sleep(60) }
+    }
 
     /// Work that must happen before the process exits on a signal, such as
     /// saving the REPL history; nil removes it. It runs on the signal queue
@@ -156,8 +211,9 @@ final class ProcessSignals: @unchecked Sendable {
         }
     }
 
-    /// Give the terminal back, run the exit hook, stop advertising and
-    /// disconnect, flush standard output and exit. Restoring the terminal
+    /// Claim the exit, give the terminal back, run the exit hook, stop
+    /// advertising and disconnect (unless the main thread's ordinary exit
+    /// is already doing that), flush standard output and exit. Restoring the terminal
     /// keeps its lock, so from then on the REPL cannot enter raw mode again
     /// and reads no more input.
     ///
@@ -167,10 +223,11 @@ final class ProcessSignals: @unchecked Sendable {
     /// blew from exiting. Output is line-buffered, so at most a partial
     /// line is lost.
     private func exitProcess(_ code: Int32) -> Never {
+        let ownsCleanup = beginSignalExit()
         LineNoise.restoreTerminalForExit()
         let hook = lock.withLock { exitHook }
         hook?()
-        cleanupBeforeExit()
+        if ownsCleanup { exitCleanup() }
         StandardOutput.flushUnlessLocked()
         _exit(code)
     }

@@ -38,7 +38,7 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 
 `LineNoiseTests` — drive the vendored line editor through pipes: raw-mode key handling (UTF-8 input assembly, invalid sequences, Ctrl-T, backspace and delete around multibyte characters), the bytes written to the terminal, and non-TTY input (one line per command, end of input, invalid UTF-8, read errors). A pseudo-terminal checks the newline written after a raw-mode line.
 
-`REPLScriptTests` — the REPL with a pipe as standard input: a script runs to end of input without touching the history, and the first failing command, an invalid UTF-8 line and an unreadable input end it with codes 6, 6 and 5.
+`REPLScriptTests` — the REPL with a pipe as standard input: a script runs to end of input without touching the history, and the first failing command, an invalid UTF-8 line and an unreadable input end it with codes 6, 6 and 5; a Ctrl-C during a line stops the script after it with 130. `CommandSpanTests` — `main` opens an outer span for every command except the REPL and `blew mcp`; a Ctrl-C as one step of a command finishes keeps the next step from starting, and one as a script command finishes stops `exec`, also with `-k`, before the next command.
 
 **Command routing and scripting**
 
@@ -93,7 +93,7 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 
 `CLIIntegrationTests` — launches the compiled `.build/debug/blew` binary as a subprocess using `Process` and checks exit codes and stdout/stderr content. Tests are skipped automatically if the binary has not been built. Covers: `--help`, `--version`, `gatt info` (known and unknown UUIDs), `exec --dry-run`, and invalid subcommands.
 
-`SignalIntegrationTests` — launches the binary and signals it mid-command, without a radio (`exec "gatt info 2A19; sleep 0"`): with stdout piped, output printed before the signal reaches the reader, SIGINT exits 130 and SIGTERM 143, and Ctrl-C stops an `exec -k` script. The REPL runs on a pseudo-terminal: SIGTERM and SIGINT at the prompt exit 143 and 130 and leave the terminal in cooked mode, SIGTERM exits 143 even when the terminal's reader has stopped reading its output, and SIGINT during `sleep 0` returns to the prompt. The commands use no device, but `cleanupBeforeExit` creates the CoreBluetooth managers. `SignalPolicyTests` covers the pure `SignalPolicy.respond(to:in:)` for each signal and phase.
+`SignalIntegrationTests` — launches the binary and signals it mid-command, without a radio (`exec "gatt info 2A19; sleep 0"`): with stdout piped, output printed before the signal reaches the reader, SIGINT exits 130 and SIGTERM 143, and Ctrl-C stops an `exec -k` script. With a script piped to the REPL whose writer stays open, SIGINT while the REPL waits for the next line exits 130. The REPL runs on a pseudo-terminal: SIGTERM and SIGINT at the prompt exit 143 and 130 and leave the terminal in cooked mode, SIGTERM exits 143 even when the terminal's reader has stopped reading its output, and SIGINT during `sleep 0` returns to the prompt. The commands use no device, but `cleanupBeforeExit` creates the CoreBluetooth managers. `SignalPolicyTests` covers the pure `SignalPolicy.respond(to:in:)` for each signal and phase.
 
 **MCP server**
 

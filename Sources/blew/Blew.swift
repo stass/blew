@@ -92,17 +92,17 @@ struct Blew: AsyncParsableCommand {
     }
 }
 
-/// Whether `cleanupBeforeExit` has run; it runs once, on the main thread
-/// or on the signal queue, whichever exits first.
-private let cleanupOnce = OSAllocatedUnfairLock(initialState: false)
-
-/// Best-effort disconnect and stop advertising on process exit.
+/// The main thread's cleanup on its way out: stop advertising and
+/// disconnect, once. When a signal is already ending the process, it waits
+/// for that exit instead (`ProcessSignals.beginOrdinaryExit`).
 func cleanupBeforeExit() {
-    let alreadyRan = cleanupOnce.withLock { ran in
-        defer { ran = true }
-        return ran
-    }
-    if alreadyRan { return }
+    guard ProcessSignals.shared.beginOrdinaryExit() else { return }
+    exitCleanup()
+}
+
+/// Best-effort disconnect and stop advertising on process exit. Run once,
+/// by whichever of the main thread and the signal queue owns the exit.
+func exitCleanup() {
     if BLEPeripheral.shared.isAdvertising() {
         BLEPeripheral.shared.stopAdvertising()
     }

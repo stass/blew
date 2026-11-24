@@ -591,7 +591,7 @@ The REPL provides:
 - **Persistent history** — saved to `~/.config/blew/history` across sessions
 - **Tab completion** — commands, known UUIDs after GATT discovery, and format names
 
-When standard input is not a terminal, the REPL runs it as a script, the way `exec` runs one: one command per line, without a prompt, banner or line editing, until end of input. The first failing command ends the run with its exit code; a line that is not valid UTF-8 exits with code 6, and an unreadable standard input with code 5. A script neither reads nor writes the history file.
+When standard input is not a terminal, the REPL runs it as a script, the way `exec` runs one: one command per line, without a prompt, banner or line editing, until end of input. The first failing command ends the run with its exit code; a line that is not valid UTF-8 exits with code 6, and an unreadable standard input with code 5. Ctrl-C ends the script with code 130, also while it waits for its next line. A script neither reads nor writes the history file.
 
 ```sh
 % printf 'gatt info 2A19\n' | blew

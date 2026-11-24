@@ -318,33 +318,3 @@ final class ToolCallQueueTests: XCTestCase {
     }
 }
 #endif
-
-/// One-shot CLI commands and `exec` have no span of their own: `main` opens
-/// one around the whole command, so a Ctrl-C that one wait misses still
-/// stops the command's next step.
-final class CommandSpanTests: XCTestCase {
-
-    func testMainOpensAnOuterSpanExceptForTheREPLAndMCP() throws {
-        XCTAssertTrue(Blew.opensOuterSpan(for: try WriteCommand.parse(["fff1", "01"])))
-        XCTAssertTrue(Blew.opensOuterSpan(for: try ExecCommand.parse(["status"])))
-        XCTAssertFalse(Blew.opensOuterSpan(for: try Blew.parse([])))
-        #if MCP_ENABLED
-        XCTAssertFalse(Blew.opensOuterSpan(for: try MCPCommand.parse([])))
-        #endif
-    }
-
-    /// The `write -n X` case: the Ctrl-C lands as auto-connect finishes, so
-    /// that wait completes, and the write must then not start.
-    func testACtrlCAtTheEndOfOneStepStopsTheNextStep() throws {
-        let router = CommandRouter(globals: try GlobalOptions.parse([]))
-        let signals = ProcessSignals.shared
-        signals.commandStarted()
-        defer { signals.commandFinished() }
-        var writeRan = false
-        let connect = router.waitInterruptible { signals.handle(.interrupt) }
-        let write = router.waitInterruptible { writeRan = true }
-        XCTAssertNotEqual(connect, .timedOut)
-        XCTAssertEqual(write, .interrupted)
-        XCTAssertFalse(writeRan, "the write started after Ctrl-C")
-    }
-}

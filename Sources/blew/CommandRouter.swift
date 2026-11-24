@@ -59,6 +59,10 @@ final class CommandRouter {
                     return result.exitCode
                 }
             }
+            // A stop that arrived as the command finished: its result
+            // stands, and the next command, which may have no wait to see
+            // the stop, does not start.
+            if isStopRequested { return BlewExitCode.interrupted.code }
         }
         return firstError
     }
@@ -1129,6 +1133,12 @@ final class CommandRouter {
         return body()
     }
 
+    /// Whether the running command was asked to stop, by a SIGINT or by
+    /// the `StopRequest` attached with `run(stoppingOn:_:)`.
+    private var isStopRequested: Bool {
+        ProcessSignals.shared.interruptRequested || stopRequest?.reason != nil
+    }
+
     enum CommandOutcome { case completed, interrupted, timedOut }
 
     /// Run `operation` in a Task and block the calling thread until it
@@ -1153,15 +1163,14 @@ final class CommandRouter {
         let signals = ProcessSignals.shared
         signals.commandStarted()
         defer { signals.commandFinished() }
-        let stopRequested = { signals.interruptRequested || self.stopRequest?.reason != nil }
-        if stopRequested() { return .interrupted }
+        if isStopRequested { return .interrupted }
         let finished = DispatchSemaphore(value: 0)
         let task = Task {
             defer { finished.signal() }
             await operation()
         }
         while finished.wait(timeout: .now() + 0.05) == .timedOut {
-            if stopRequested() {
+            if isStopRequested {
                 task.cancel()
                 _ = finished.wait(timeout: .now() + 2.0)
                 return .interrupted

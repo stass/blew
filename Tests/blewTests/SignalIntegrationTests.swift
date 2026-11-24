@@ -41,6 +41,26 @@ final class SignalIntegrationTests: XCTestCase {
         XCTAssertFalse(child.stdout.contains("2A37"), "the script went on after Ctrl-C: \(child.stdout)")
     }
 
+    // MARK: - REPL reading a script from a pipe
+
+    /// A piped REPL script waiting for its next line has no command running,
+    /// so the first SIGINT ends it, as at the interactive prompt. The pipe's
+    /// writer stays open, so the read would otherwise wait for ever.
+    func testSIGINTWhileAPipedScriptWaitsForInputExits130() throws {
+        let input = Pipe()
+        defer { try? input.fileHandleForWriting.close() }
+        let child = try PipedBlew([], standardInput: input)
+        input.fileHandleForWriting.write(Data("gatt info 2A19\n".utf8))
+        XCTAssertTrue(child.waitForStdout(containing: "Battery Level"),
+                      "gatt info output did not arrive before the signal: \(child.stdout)")
+        // Let the REPL finish the line and block reading the next one.
+        usleep(300_000)
+        child.process.interrupt()
+        let status = try child.waitForExit()
+        XCTAssertEqual(status.reason, .exit, "blew died of the signal instead of exiting")
+        XCTAssertEqual(status.code, 130)
+    }
+
     // MARK: - REPL on a terminal
 
     func testSIGTERMAtREPLPromptRestoresTerminalAndExits143() throws {
@@ -176,14 +196,15 @@ private final class PipedBlew {
         eventually { lock.withLock { reachedEOF } }
     }
 
-    init(_ args: [String]) throws {
+    /// Standard input is `standardInput`, or with none, end of input at once.
+    init(_ args: [String], standardInput: Pipe? = nil) throws {
         guard let path = blewBinaryPath() else { throw XCTSkip("blew binary not built") }
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = args
         let out = Pipe()
         process.standardOutput = out
         process.standardError = FileHandle.nullDevice
-        process.standardInput = FileHandle.nullDevice
+        process.standardInput = standardInput ?? FileHandle.nullDevice
         out.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if data.isEmpty { handle.readabilityHandler = nil }

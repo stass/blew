@@ -56,12 +56,6 @@ final class REPL {
             }
         }
 
-        // Piped input is a script: it runs inside one span, like `exec`, so
-        // a Ctrl-C seen by any line stops the lines after it.
-        let scriptSpan = !isInteractive
-        if scriptSpan { ProcessSignals.shared.commandStarted() }
-        defer { if scriptSpan { ProcessSignals.shared.commandFinished() } }
-
         while true {
             do {
                 // LineNoise writes the prompt straight to the terminal, so
@@ -78,14 +72,18 @@ final class REPL {
                     break
                 }
 
-                // Ctrl-C from here to the next prompt stops the command.
+                // Ctrl-C from here to the next read stops the command.
+                // While `getLine` waits no span is open, so a Ctrl-C there
+                // ends blew with 130: at the prompt, and in a piped script
+                // whose next line has not arrived.
                 ProcessSignals.shared.commandStarted()
                 let result = router.dispatch(trimmed)
-                ProcessSignals.shared.commandFinished()
+                let interrupted = ProcessSignals.shared.commandFinished()
                 if !isInteractive {
                     if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
-                    // The line's last operation finished as Ctrl-C arrived.
-                    if ProcessSignals.shared.interruptRequested { throw BlewExitCode.interrupted }
+                    // A Ctrl-C the line's operations did not see (it arrived
+                    // as the last one finished) still ends the script.
+                    if interrupted { throw BlewExitCode.interrupted }
                 }
 
             } catch LinenoiseError.CTRL_C {
