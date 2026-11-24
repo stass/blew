@@ -278,6 +278,9 @@ end
 # - The scale of an integer field must not overflow the decoder's 64-bit
 #   arithmetic for any raw value of its type, and a scaled unsigned field
 #   must not state a negative minimum.
+# - A scale must not combine a positive decimal exponent with a negative
+#   binary one: the decoder prints max(0, -d) + ceil(-b * log10 2) places,
+#   which is the resolution's precision only when d <= 0.
 def scale_and_unit(field, type_str, where)
   scale = stated_scale(field, where)
   integer = INTEGER_TYPES[type_str]
@@ -305,6 +308,9 @@ def scale_and_unit(field, type_str, where)
     return { scale: nil, unit: identity ? unit : nil, specials: {} }
   end
   return none if scale.nil?
+  if scale[:d] > 0 && scale[:b] < 0
+    generation_error("#{where}: scale #{scale} has d > 0 with b < 0, which the decoder cannot print at its resolution")
+  end
   bits, signed = integer
   max_raw = signed ? 2**(bits - 1) : 2**bits - 1
   factor = scale[:b] < 0 ? 5**-scale[:b] : 2**scale[:b]
