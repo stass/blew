@@ -20,33 +20,17 @@ None open.
 
 ### Subscriptions and continuations
 
-- [ ] **S1. Running `sub -b X` again orphans a subscription.**
-  `CommandRouter.swift:920-936`, `BLEManager.swift:466-475`,
-  `BLEEventProcessor.swift:139-143`. The old task's cleanup removes the new
-  task's `backgroundSubTasks` entry, off the main thread. Its
-  `onTermination` can nil the new stream and send `setNotifyValue(false)`.
-  Afterwards `sub stop` cannot find the subscription, or notifications go
-  quiet. A foreground `sub X` during `sub -b X` collides the same way, and
-  so does a foreground `sub X` that times out during `sub -b X`: the given-up
-  subscribe turns notifications off (`BLEManager.swift`, `subscribe`) under
-  the background stream, which stays listed but goes silent. An error on
-  the acknowledgement of turning them off fails the next subscribe waiting
-  on the same characteristic (`BLEEventProcessor.swift`, the
-  `didUpdateNotificationState` case), whose own request then enables
-  notifications with no stream. Fix: one owner per characteristic that
-  refuses a second subscribe while one is pending or active, and matches
-  acknowledgements to requests.
+- [ ] **S13. Notification streams buffer without bound.**
+  `BLEManager.swift` (`subscribe`, `AsyncThrowingStream.makeStream()` with the
+  default unbounded policy). A device that notifies faster than a subscriber
+  reads (a terminal paused with Ctrl-S, `sub` piped to a slow reader) grows
+  blew's memory without limit, once per subscriber of the characteristic.
+  Fix: bound each stream (`.bufferingNewest(k)`) and report the drops, as
+  the NUS bridge does for its input.
 - [ ] **S5. A scan's timeout task outlives the scan.**
   `BLEManager.swift:97-108`. Interrupt a scan, start another, and the old
   timer stops the new one early. Starting a scan during `watch` replaces the
   stream without finishing it (`:67-79`).
-- [ ] **S6. The notification stream is registered only after
-  `setNotifyValue` is acknowledged.** `BLEManager.swift:466`. An immediate
-  notification is dropped. A disconnect in that window installs a stream that
-  never finishes. When the confirmation resumes the wait just before
-  `CommandRouter.withDeadline` gives up, the returned stream is discarded but
-  stays registered, so notifications stay on and buffer without bound until
-  the disconnect.
 - [ ] **S8. When the event queue is full, the newest event is dropped
   silently** *(plausible)*. `Sources/BLEManager/BLEEventQueue.swift:42-45`.
   A dropped `didConnect` or `didWriteValue` under an `allowDuplicates` scan
@@ -86,23 +70,6 @@ None open.
   reads it) and `beginConnect`, `beginDisconnect` and `submit` fail at
   once with `BLEError.unavailable(state)` when it is not poweredOn (a GATT
   request whose link already ended fails with `notConnected`, exit 5).
-- [ ] **S12. A GATT request CoreBluetooth never answers jams its
-  callback's queue** *(plausible)*. `BLEEventProcessor.swift` (`submit`),
-  `BLEManager.swift` (`readCharacteristic`, `writeCharacteristic`,
-  `subscribe`). Requests are matched to answers in issue order, and a
-  cancelled one stays queued until its answer arrives. If CoreBluetooth
-  drops a request without a callback (candidates: a read or write the
-  characteristic's properties do not allow, a value longer than 512 bytes,
-  `setNotifyValue(true)` while already notifying), every later answer on
-  that characteristic is taken by the request before it until the
-  disconnect: sequential requests each time out, and concurrent ones get
-  each other's answers, so a write the device never acknowledged can
-  report success. Fix: refuse before issuing any request the
-  characteristic's properties do not allow and any write longer than the
-  ATT maximum, after the TESTS.md check shows what CoreBluetooth does.
-  Waiting writes without response are also woken in hash order
-  (`Array(writePolls.values)`), so one can be overtaken repeatedly.
-
 ### Exit codes and README contract
 
 - [ ] **E2. A scan that Bluetooth turning off ends exits 0.**

@@ -101,10 +101,20 @@ struct PendingCallbacks<Key: Hashable, Waiter> {
         return nil
     }
 
-    /// Whether the ticket's request was issued and its callback has not
-    /// arrived yet, so cancelling it leaves it queued as abandoned.
-    func isIssued(_ ticket: Ticket) -> Bool {
-        issued.values.contains { $0.contains { $0.id == ticket.id } }
+    /// The waiters attached and not issued, oldest ticket first.
+    func unissuedWaiters() -> [Waiter] {
+        unissued.sorted { $0.key < $1.key }.compactMap {
+            if case .waiting(let waiter) = $0.value { return waiter }
+            return nil
+        }
+    }
+
+    /// Withdraw the ticket's waiter when it is attached, not issued, and
+    /// `accept` takes it; otherwise change nothing.
+    mutating func withdrawUnissued(_ ticket: Ticket, if accept: (Waiter) -> Bool) -> Waiter? {
+        guard case .waiting(let waiter) = unissued[ticket.id], accept(waiter) else { return nil }
+        unissued[ticket.id] = nil
+        return waiter
     }
 
     /// The callback for `key` arrived: take the oldest request for it.

@@ -416,6 +416,8 @@ Reads the value of a characteristic and prints it in the requested format. Conne
 
 Reading a characteristic that is subscribed at the same time (`sub -b`) is ambiguous: CoreBluetooth reports read results and notifications the same way and does not say which a value is. The read then prints the first value the device sends after the read was issued, which may be a notification, and the subscription also shows the value that answers the read. A characteristic blew has not subscribed to does not normally notify, so its values are read results.
 
+A characteristic whose properties do not include `read` is not read: `read` fails with exit code 5 and names its properties (shown by `char`).
+
 | Flag | Description |
 |------|-------------|
 | `-f, --format <fmt>` | Output format (see table below; any other is an error, exit code 6). Default: `hex`. |
@@ -448,7 +450,9 @@ Reading a characteristic that is subscribed at the same time (`sub -b`) is ambig
 blew write [-n <name>] [-i <id>] [-f <format>] [-r|-w] <char-uuid> <data>
 ```
 
-Writes data to a characteristic. Connects automatically if no connection is active. Write mode (with or without response) is auto-selected based on the characteristic's properties unless overridden.
+Writes data to a characteristic. Connects automatically if no connection is active. Write mode (with or without response) is auto-selected based on the characteristic's properties unless overridden: without response when the characteristic allows it, with response otherwise.
+
+A write the characteristic does not allow is not sent and fails with exit code 5, naming its properties: `-r` to one without `write`, `-w` to one without `writeNoResp`, any write to one with neither, and a value longer than one write of that kind carries (512 bytes with response; the connection's ATT MTU minus 3 without).
 
 | Flag | Description |
 |------|-------------|
@@ -474,7 +478,9 @@ Writes data to a characteristic. Connects automatically if no connection is acti
 blew sub [-n <name>] [-i <id>] [-f <format>] [-d <sec>] [-c <count>] <char-uuid>
 ```
 
-Subscribes to a characteristic and streams received values to stdout, one event per line. Connects automatically if no connection is active. Stops on `Ctrl-C`, or when a duration/count limit is reached. If the connection ends first, `sub` fails: exit code 5 when the device disconnects, 3 when Bluetooth is turned off or blew loses Bluetooth permission. If the device does not confirm that notifications are on within the operation timeout (`-t`, default 5 seconds), `sub` fails with exit code 4. A background subscription reports the same as a `sub error` line.
+Subscribes to a characteristic and streams received values to stdout, one event per line. Connects automatically if no connection is active. Stops on `Ctrl-C`, or when a duration/count limit is reached. If the connection ends first, `sub` fails: exit code 5 when the device disconnects, 3 when Bluetooth is turned off or blew loses Bluetooth permission. If the device does not confirm that notifications are on within the operation timeout (`-t`, default 5 seconds), `sub` fails with exit code 4. A characteristic that neither notifies nor indicates is not subscribed to: `sub` fails with exit code 5. A background subscription reports the same as a `sub error` line.
+
+Several subscriptions to one characteristic (`sub -b X` and a foreground `sub X`, or an MCP subscribe beside them) each receive every value. Notifications stay on until the last of them ends, so one ending, timing out or being stopped does not silence the others. `sub -b X` while `X` already has a background subscription replaces it; `sub status` lists each background subscription until it ends or is stopped.
 
 | Flag | Description |
 |------|-------------|

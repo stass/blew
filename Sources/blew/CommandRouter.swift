@@ -16,7 +16,7 @@ final class CommandRouter {
     /// SIGINT; set only inside `run(stoppingOn:_:)`.
     private var stopRequest: StopRequest?
     private var backgroundPeriphTask: Task<Void, Never>?
-    private var backgroundSubTasks: [String: Task<Void, Never>] = [:]
+    private let backgroundSubscriptions = BackgroundSubscriptions()
 
     init(globals: GlobalOptions, manager: BLECentral? = nil, isInteractiveMode: Bool = false,
          renderer: OutputRenderer? = nil) {
@@ -953,9 +953,8 @@ final class CommandRouter {
                 result.exitCode = BlewExitCode.invalidArguments.code
                 return result
             }
-            backgroundSubTasks[charUUID]?.cancel()
             let capturedRenderer = self.renderer
-            backgroundSubTasks[charUUID] = Task {
+            backgroundSubscriptions.start(charUUID) {
                 do {
                     let stream = try await Self.withDeadline(setupTimeout) {
                         try await manager.subscribe(characteristicUUID: charUUID)
@@ -968,7 +967,6 @@ final class CommandRouter {
                 } catch {
                     capturedRenderer.renderLive("sub error [\(charUUID)]: \(error.localizedDescription)")
                 }
-                backgroundSubTasks.removeValue(forKey: charUUID)
             }
             let displayUUID = BLENames.displayUUID(charUUID, category: .characteristic)
             result.output.append(.message("Subscribing to \(displayUUID) in background. Use 'sub stop \(charUUID)' to stop."))
@@ -1013,21 +1011,17 @@ final class CommandRouter {
                 return result
             case .notFound: charUUID = charInput
             }
-            guard backgroundSubTasks[charUUID] != nil else {
+            guard backgroundSubscriptions.stop(charUUID) else {
                 result.errors.append("no background subscription for '\(charUUID)'")
                 result.exitCode = BlewExitCode.notFound.code
                 return result
             }
-            backgroundSubTasks[charUUID]?.cancel()
-            backgroundSubTasks.removeValue(forKey: charUUID)
             result.output.append(.message("Stopped subscription for \(BLENames.displayUUID(charUUID, category: .characteristic))."))
         } else {
-            guard !backgroundSubTasks.isEmpty else {
+            guard backgroundSubscriptions.stopAll() else {
                 result.output.append(.message("No active background subscriptions."))
                 return result
             }
-            for (_, task) in backgroundSubTasks { task.cancel() }
-            backgroundSubTasks.removeAll()
             result.output.append(.message("Stopped all background subscriptions."))
         }
         return result
@@ -1035,7 +1029,7 @@ final class CommandRouter {
 
     func runSubStatus(_ args: [String]) -> CommandResult {
         var result = CommandResult()
-        let uuids = backgroundSubTasks.keys.sorted()
+        let uuids = backgroundSubscriptions.characteristics
         result.output.append(.subscriptionList(uuids))
         return result
     }

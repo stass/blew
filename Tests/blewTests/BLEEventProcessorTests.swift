@@ -58,32 +58,256 @@ final class BLEEventProcessorTests: XCTestCase {
         return effects.isEmpty
     }
 
-    /// Turning notifications off is acknowledged with isNotifying false.
-    /// That acknowledgement, of a subscribe that was given up, settles no
-    /// subscribe: one waiting for its own confirmation keeps waiting.
-    func testNotificationsOffAcknowledgementDoesNotSettleASubscribe() {
-        let processor = connected(to: deviceB)
-        let subscribe = start(processor) { .subscribe(characteristic: "TX", $0) }
-        let off = BLEEvent.didUpdateNotificationState(peripheralId: deviceB, characteristicUUID: "TX",
-                                                      isNotifying: false, error: nil)
-        XCTAssertTrue(ignores(processor, off), "notifications turning off settled a subscribe")
-        let on = BLEEvent.didUpdateNotificationState(peripheralId: deviceB, characteristicUUID: "TX",
-                                                     isNotifying: true, error: nil)
-        XCTAssertFalse(ignores(processor, on), "the confirmation did not settle the subscribe")
-        XCTAssertNotNil(subscribe.wait.outcome())
+    /// A subscriber registered the way BLECentral.subscribe registers one:
+    /// its stream's termination handler unsubscribes it, which takes the
+    /// processor's lock. `confirmed` is its wait for notifications to be
+    /// on; `end` ends its stream, as a reader that stops does.
+    private struct Subscriber {
+        let stream: AsyncThrowingStream<Data, Error>
+        let confirmed: Wait<Void>
+        let cancel: () -> Void
+        let end: () -> Void
     }
 
-    /// A notification stream registered the way BLEManager.subscribe does:
-    /// its termination handler deregisters it, which takes the processor's
-    /// lock. `finished` is signalled once the stream has ended.
+    /// Subscribe to `char` of the connected peripheral (or `peripheral`);
+    /// each setNotifyValue call the processor makes is appended to `calls`.
+    /// `cancelledFirst` gives the subscribe up before it registers.
+    private func subscribe(_ p: BLEEventProcessor, _ char: String = "TX", calls: SharedBox<[Bool]>,
+                           to peripheral: UUID? = nil, cancelledFirst: Bool = false,
+                           finished: DispatchSemaphore? = nil) -> Subscriber {
+        let id = p.makeSubscriberID()
+        if cancelledFirst { p.unsubscribe(id) }
+        let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+        continuation.onTermination = { _ in
+            p.unsubscribe(id)
+            finished?.signal()
+        }
+        let target = peripheral ?? p.connectedPeripheralId ?? UUID()
+        let confirmed = Wait<Void> { cont in
+            p.subscribe(id, to: char, stream: continuation, confirmation: cont, peripheral: target,
+                        on: self.gattQueue) { enable in calls.update { $0.append(enable) } }
+        }
+        gattQueue.sync {}
+        return Subscriber(stream: stream, confirmed: confirmed, cancel: { p.unsubscribe(id) },
+                          end: { continuation.finish() })
+    }
+
+    private func notifying(_ isOn: Bool, _ char: String = "TX", error: String? = nil) -> BLEEvent {
+        .didUpdateNotificationState(peripheralId: deviceB, characteristicUUID: char, isNotifying: isOn, error: error)
+    }
+
+    /// The setNotifyValue calls made so far, once the ones queued on the
+    /// stand-in for blew.cb have run.
+    private func made(_ calls: SharedBox<[Bool]>) -> [Bool] {
+        gattQueue.sync {}
+        return calls.get()
+    }
+
+    /// A notification stream registered and confirmed the way
+    /// BLECentral.subscribe registers one. `finished` is signalled once the
+    /// stream has ended.
     private func registerStream(_ processor: BLEEventProcessor, finished: DispatchSemaphore) -> AsyncThrowingStream<Data, Error> {
-        AsyncThrowingStream<Data, Error> { continuation in
-            processor.setNotificationContinuation(forChar: "TX", continuation)
-            continuation.onTermination = { _ in
-                processor.setNotificationContinuation(forChar: "TX", nil)
-                finished.signal()
+        let subscriber = subscribe(processor, calls: SharedBox([]), finished: finished)
+        processor.dispatch(.didUpdateNotificationState(peripheralId: processor.connectedPeripheralId ?? deviceB,
+                                                       characteristicUUID: "TX", isNotifying: true, error: nil))
+        if case .success = subscriber.confirmed.outcome() {} else { XCTFail("the subscribe was not confirmed") }
+        return subscriber.stream
+    }
+
+    /// Reads a stream in a task, collecting its values and how it ended.
+    private final class Reader: @unchecked Sendable {
+        private let collected = SharedBox<[Data]>([])
+        private let ended = DispatchSemaphore(value: 0)
+        private let task: Task<Void, Never>
+
+        init(_ stream: AsyncThrowingStream<Data, Error>) {
+            let collected = self.collected, ended = self.ended
+            task = Task {
+                do { for try await value in stream { collected.update { $0.append(value) } } } catch {}
+                ended.signal()
             }
         }
+
+        /// The values read once there are `count`, or after a second.
+        func values(_ count: Int) -> [Data] {
+            let deadline = Date().addingTimeInterval(1)
+            while collected.get().count < count && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+            return collected.get()
+        }
+
+        /// Stop reading, as `sub` does when it is done; that ends the stream.
+        func stop() {
+            task.cancel()
+            _ = ended.wait(timeout: .now() + 1)
+        }
+    }
+
+    // MARK: - Notification subscribers
+
+    /// Two subscribers of one characteristic (`sub -b X` and a foreground
+    /// `sub X`): notifications are turned on once, both get every value, the
+    /// first one leaving leaves them on for the other, and the last one
+    /// leaving turns them off.
+    func testSubscribersShareNotificationsUntilTheLastLeaves() {
+        let processor = connected(to: deviceB)
+        let calls = SharedBox<[Bool]>([])
+        let first = subscribe(processor, calls: calls)
+        processor.dispatch(notifying(true))
+        if case .success = first.confirmed.outcome() {} else { return XCTFail("the first subscribe was not confirmed") }
+        let second = subscribe(processor, calls: calls)
+        if case .success = second.confirmed.outcome() {} else { return XCTFail("the second subscribe was not confirmed") }
+        XCTAssertEqual(made(calls), [true], "notifications were turned on twice")
+        XCTAssertEqual(processor.subscribedCharacteristicCount, 1)
+
+        let firstReader = Reader(first.stream), secondReader = Reader(second.stream)
+        processor.dispatch(value("TX", [1]))
+        XCTAssertEqual(firstReader.values(1), [Data([1])], "the first subscriber lost the notification")
+        XCTAssertEqual(secondReader.values(1), [Data([1])])
+
+        firstReader.stop()
+        XCTAssertEqual(made(calls), [true], "the first subscriber leaving turned notifications off for the other")
+        processor.dispatch(value("TX", [2]))
+        XCTAssertEqual(secondReader.values(2), [Data([1]), Data([2])], "the remaining subscriber went silent")
+
+        secondReader.stop()
+        XCTAssertEqual(made(calls), [true, false], "the last subscriber leaving did not turn notifications off")
+        XCTAssertEqual(processor.subscribedCharacteristicCount, 0)
+    }
+
+    /// The stream is registered before notifications are turned on, so a
+    /// notification right after the confirmation reaches it.
+    func testNotificationRightAfterTheConfirmationReachesTheStream() {
+        let processor = connected(to: deviceB)
+        let subscriber = subscribe(processor, calls: SharedBox([]))
+        processor.dispatch(notifying(true))
+        processor.dispatch(value("TX", [5]))
+        if case .success = subscriber.confirmed.outcome() {} else { return XCTFail("the subscribe was not confirmed") }
+        XCTAssertEqual(Reader(subscriber.stream).values(1), [Data([5])], "the first notification was dropped")
+    }
+
+    /// A disconnect while notifications are being turned on fails the
+    /// subscribe and ends its stream; nothing is left registered.
+    func testDisconnectWhileEnablingFailsTheSubscribeAndEndsTheStream() {
+        let processor = connected(to: deviceB)
+        let subscriber = subscribe(processor, calls: SharedBox([]))
+        processor.dispatch(.didDisconnect(peripheralId: deviceB, error: "link lost"))
+        if case .failure(BLEError.connectionFailed)? = subscriber.confirmed.outcome() {} else {
+            XCTFail("the subscribe did not fail with the disconnect")
+        }
+        guard case .failure(BLEError.connectionFailed) = streamEnd(subscriber.stream) else {
+            return XCTFail("the stream outlived the connection")
+        }
+        XCTAssertEqual(processor.subscribedCharacteristicCount, 0)
+    }
+
+    /// A subscribe given up while notifications are being turned on (a
+    /// timed-out `sub`) leaves at once. They are turned off only after the
+    /// device confirmed them on, and that acknowledgement settles nothing
+    /// else; the next subscribe turns them on again.
+    func testSubscribeGivenUpWhileEnablingTurnsThemOffAfterTheConfirmation() {
+        let processor = connected(to: deviceB)
+        let calls = SharedBox<[Bool]>([])
+        let abandoned = subscribe(processor, calls: calls)
+        abandoned.cancel()
+        XCTAssertTrue(isCancellation(abandoned.confirmed.outcome()))
+        XCTAssertEqual(made(calls), [true], "notifications were turned off before the device confirmed them on")
+        processor.dispatch(notifying(true))
+        XCTAssertEqual(made(calls), [true, false])
+        let next = subscribe(processor, calls: calls)
+        XCTAssertEqual(made(calls), [true, false], "a call was made while another was in flight")
+        processor.dispatch(notifying(false))
+        XCTAssertEqual(made(calls), [true, false, true])
+        XCTAssertNil(next.confirmed.outcome(timeout: 0.2), "turning notifications off confirmed the next subscribe")
+        processor.dispatch(notifying(true))
+        if case .success = next.confirmed.outcome() {} else { XCTFail("the next subscribe was not confirmed") }
+    }
+
+    /// A second subscribe that gives up (a foreground `sub` timing out
+    /// beside `sub -b`) leaves the live subscription on.
+    func testSecondSubscribeGivenUpLeavesTheFirstOn() {
+        let processor = connected(to: deviceB)
+        let calls = SharedBox<[Bool]>([])
+        let live = subscribe(processor, calls: calls)
+        processor.dispatch(notifying(true))
+        _ = live.confirmed.outcome()
+        let other = subscribe(processor, calls: calls)
+        if case .success = other.confirmed.outcome() {} else { return XCTFail("the second subscribe was not confirmed") }
+        // Cancelled after its confirmation, before it returned: its stream
+        // still ends, so no reader waits on it forever.
+        other.cancel()
+        guard case .failure(is CancellationError) = streamEnd(other.stream) else {
+            return XCTFail("a subscribe cancelled after its confirmation left its stream open")
+        }
+        XCTAssertEqual(made(calls), [true], "the second subscribe leaving turned notifications off")
+        let reader = Reader(live.stream)
+        processor.dispatch(value("TX", [3]))
+        XCTAssertEqual(reader.values(1), [Data([3])])
+        reader.stop()
+    }
+
+    /// Turning notifications off fails: they are still on, so a subscribe
+    /// waiting meanwhile is confirmed rather than failed.
+    func testFailedTurningOffConfirmsTheNextSubscribe() {
+        let processor = connected(to: deviceB)
+        let calls = SharedBox<[Bool]>([])
+        let first = subscribe(processor, calls: calls)
+        processor.dispatch(notifying(true))
+        _ = first.confirmed.outcome()
+        first.end()
+        XCTAssertEqual(made(calls), [true, false])
+        let next = subscribe(processor, calls: calls)
+        processor.dispatch(notifying(true, error: "Unlikely error"))
+        if case .success = next.confirmed.outcome() {} else { XCTFail("a failed turning off failed the next subscribe") }
+        XCTAssertEqual(made(calls), [true, false], "a failed turning off was retried")
+    }
+
+    /// A failed turning-off with no subscriber left is not retried, so a
+    /// device that keeps refusing is not asked again and again.
+    func testFailedTurningOffIsNotRetried() {
+        let processor = connected(to: deviceB)
+        let calls = SharedBox<[Bool]>([])
+        let only = subscribe(processor, calls: calls)
+        processor.dispatch(notifying(true))
+        _ = only.confirmed.outcome()
+        only.end()
+        XCTAssertEqual(made(calls), [true, false])
+        processor.dispatch(notifying(true, error: "Unlikely error"))
+        XCTAssertEqual(made(calls), [true, false], "a failed turning off was retried")
+    }
+
+    /// The device refusing to turn notifications on fails every subscribe
+    /// waiting for it and ends their streams; the next one asks again.
+    func testRefusedConfirmationFailsEverySubscribeWaiting() {
+        let processor = connected(to: deviceB)
+        let calls = SharedBox<[Bool]>([])
+        let first = subscribe(processor, calls: calls)
+        let second = subscribe(processor, calls: calls)
+        processor.dispatch(notifying(false, error: "Insufficient authentication"))
+        for subscriber in [first, second] {
+            if case .failure(BLEError.subscribeFailed)? = subscriber.confirmed.outcome() {} else {
+                XCTFail("a subscribe waiting for the refused confirmation did not fail")
+            }
+            guard case .failure(BLEError.subscribeFailed) = streamEnd(subscriber.stream) else {
+                return XCTFail("a refused subscriber's stream did not end")
+            }
+        }
+        XCTAssertEqual(made(calls), [true])
+        _ = subscribe(processor, calls: calls)
+        XCTAssertEqual(made(calls), [true, true])
+    }
+
+    /// A subscribe given up before it registers ends at once, and one for a
+    /// peripheral that is not connected fails; neither makes a call.
+    func testSubscribeCancelledFirstOrNotConnectedMakesNoCall() {
+        let processor = connected(to: deviceB)
+        let calls = SharedBox<[Bool]>([])
+        let early = subscribe(processor, calls: calls, cancelledFirst: true)
+        XCTAssertTrue(isCancellation(early.confirmed.outcome()))
+        let elsewhere = subscribe(processor, calls: calls, to: deviceA)
+        if case .failure(BLEError.notConnected)? = elsewhere.confirmed.outcome() {} else {
+            XCTFail("a subscribe to a peripheral that is not connected did not fail with notConnected")
+        }
+        XCTAssertEqual(made(calls), [])
     }
 
     /// A disconnect finishes the notification streams and runs the
@@ -431,15 +655,15 @@ final class BLEEventProcessorTests: XCTestCase {
     /// call; `cancelledFirst` cancels the ticket before the wait registers.
     private func start<T: Sendable>(
         _ p: BLEEventProcessor, to peripheral: UUID? = nil, cancelledFirst: Bool = false,
-        undo: (@Sendable () -> Void)? = nil, call: @escaping @Sendable () -> Void = {},
+        call: @escaping @Sendable () -> Void = {},
         _ makeRequest: @escaping @Sendable (CheckedContinuation<T, Error>) -> CentralRequest
     ) -> Started<T> {
         let ticket = p.makeTicket()
-        if cancelledFirst { p.cancel(ticket, undo: undo) }
+        if cancelledFirst { p.cancel(ticket) }
         let target = peripheral ?? p.connectedPeripheralId ?? UUID()
         let wait = Wait<T> { p.submit(ticket, makeRequest($0), to: target, on: self.gattQueue, call: call) }
         gattQueue.sync {}
-        return Started(wait: wait, cancel: { p.cancel(ticket, undo: undo) })
+        return Started(wait: wait, cancel: { p.cancel(ticket) })
     }
 
     private func startRead(_ p: BLEEventProcessor, _ char: String, cancelledFirst: Bool = false) -> Started<Data> {
@@ -592,62 +816,38 @@ final class BLEEventProcessorTests: XCTestCase {
         XCTAssertFalse(issued.get())
     }
 
-    /// A subscribe given up after its request went out queues the undo
-    /// (turning notifications off); one given up before it went out is
-    /// never issued, so there is nothing to undo.
-    func testCancelledSubscribeUndoesOnlyAnIssuedRequest() {
-        let processor = connected(to: deviceB)
-        let undone = SharedBox(0)
-        let issued = SharedBox(0)
-        let early = start(processor, cancelledFirst: true, undo: { undone.update { $0 += 1 } },
-                          call: { issued.update { $0 += 1 } }) { .subscribe(characteristic: "TX", $0) }
-        XCTAssertTrue(isCancellation(early.wait.outcome()))
-        XCTAssertEqual(issued.get(), 0, "a subscribe cancelled first was issued")
-        XCTAssertEqual(undone.get(), 0)
-
-        let late = start(processor, undo: { undone.update { $0 += 1 } },
-                         call: { issued.update { $0 += 1 } }) { .subscribe(characteristic: "TX", $0) }
-        late.cancel()
-        XCTAssertTrue(isCancellation(late.wait.outcome()))
-        XCTAssertEqual(issued.get(), 1)
-        XCTAssertEqual(undone.get(), 1, "an issued subscribe that was given up was not undone")
-    }
-
     /// A cancellation that lands after the wait registered but before the
     /// request went out on blew.cb ends the wait, and the request is never
-    /// made, so there is nothing to undo.
+    /// made.
     func testRequestCancelledBeforeItGoesOutIsNotIssued() {
         let processor = connected(to: deviceB)
         let issued = SharedBox(false)
-        let undone = SharedBox(false)
         let ticket = processor.makeTicket()
         gattQueue.suspend()
-        let wait = Wait<Void> {
-            processor.submit(ticket, .subscribe(characteristic: "TX", $0), to: self.deviceB,
+        let wait = Wait<Data> {
+            processor.submit(ticket, .read(characteristic: "2A19", $0), to: self.deviceB,
                              on: self.gattQueue) { issued.set(true) }
         }
-        processor.cancel(ticket) { undone.set(true) }
+        processor.cancel(ticket)
         gattQueue.resume()
         gattQueue.sync {}
         XCTAssertTrue(isCancellation(wait.outcome()))
         XCTAssertFalse(issued.get(), "a request cancelled before it went out was issued")
-        XCTAssertFalse(undone.get())
     }
 
-    /// A subscribe given up after its request went out keeps its place: the
-    /// device's late confirmation is its own, not the next subscribe's.
-    func testAbandonedSubscribesLateConfirmationDoesNotSettleTheNextSubscribe() {
+    /// Writes without response waiting for room are woken oldest first, so
+    /// none is overtaken again and again by later ones.
+    func testWritesWithoutResponseAreWokenOldestFirst() {
         let processor = connected(to: deviceB)
-        let abandoned = start(processor) { .subscribe(characteristic: "TX", $0) }
-        abandoned.cancel()
-        XCTAssertTrue(isCancellation(abandoned.wait.outcome()))
-        let next = start(processor) { .subscribe(characteristic: "TX", $0) }
-        let on = BLEEvent.didUpdateNotificationState(peripheralId: deviceB, characteristicUUID: "TX",
-                                                     isNotifying: true, error: nil)
-        processor.dispatch(on)
-        XCTAssertNil(next.wait.outcome(timeout: 0.2), "the abandoned subscribe's confirmation settled the next one")
-        processor.dispatch(on)
-        XCTAssertNotNil(next.wait.outcome())
+        let ready = SharedBox(false)
+        let order = SharedBox<[Int]>([])
+        let writes = (0..<16).map { index in
+            startWriteWithoutResponse(processor, ready: { ready.get() }, sent: { order.update { $0.append(index) } })
+        }
+        ready.set(true)
+        processor.dispatch(.isReadyToSendWriteWithoutResponse(peripheralId: deviceB))
+        XCTAssertEqual(order.get(), Array(0..<16), "writes without response were not woken oldest first")
+        for write in writes { XCTAssertNotNil(write.wait.outcome()) }
     }
 
     /// A write without response waiting for room fails when the connection

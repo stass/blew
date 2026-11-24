@@ -20,7 +20,6 @@ public final class BLECentral: @unchecked Sendable {
     private var connectedPeripheralName: String?
     private var discoveredServices: [CBService] = []
     private var discoveredCharacteristics: [CBCharacteristic] = []
-    private var activeSubscriptions: Set<String> = []
     private var lastError: String?
     private var cbState: CBManagerState = .unknown
 
@@ -234,7 +233,6 @@ public final class BLECentral: @unchecked Sendable {
             connectedPeripheralName = nil
             discoveredServices = []
             discoveredCharacteristics = []
-            activeSubscriptions = []
         }
     }
 
@@ -251,7 +249,7 @@ public final class BLECentral: @unchecked Sendable {
                 deviceName: connectedPeripheralName,
                 servicesCount: discoveredServices.count,
                 characteristicsCount: discoveredCharacteristics.count,
-                subscriptionsCount: activeSubscriptions.count,
+                subscriptionsCount: processor.subscribedCharacteristicCount,
                 lastError: lastError
             )
         }
@@ -351,16 +349,8 @@ public final class BLECentral: @unchecked Sendable {
         guard let peripheral = try getConnectedPeripheral() else {
             throw BLEError.notConnected
         }
-
-        let char = stateLock.withLock {
-            discoveredCharacteristics.first {
-                $0.uuid.uuidString.lowercased() == charUUID.lowercased()
-            }
-        }
-
-        guard let c = char else {
-            throw BLEError.characteristicNotFound(charUUID)
-        }
+        let c = try characteristic(charUUID)
+        try CharacteristicAccess.checkRead(c.properties, of: c.uuid.uuidString)
 
         return try await request({ .read(characteristic: c.uuid.uuidString, $0) }, to: peripheral) {
             peripheral.readValue(for: c)
@@ -369,30 +359,17 @@ public final class BLECentral: @unchecked Sendable {
 
     // MARK: - Write
 
+    /// Write `data` to `charUUID`. A write type the characteristic does not
+    /// allow, or a value longer than one write of that type carries, is
+    /// refused before it is issued (`CharacteristicAccess`).
     public func writeCharacteristic(_ charUUID: String, data: Data, type: WriteType = .auto) async throws {
         guard let peripheral = try getConnectedPeripheral() else {
             throw BLEError.notConnected
         }
-
-        let char = stateLock.withLock {
-            discoveredCharacteristics.first {
-                $0.uuid.uuidString.lowercased() == charUUID.lowercased()
-            }
-        }
-
-        guard let c = char else {
-            throw BLEError.characteristicNotFound(charUUID)
-        }
-
-        let cbType: CBCharacteristicWriteType
-        switch type {
-        case .withResponse:
-            cbType = .withResponse
-        case .withoutResponse:
-            cbType = .withoutResponse
-        case .auto:
-            cbType = c.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
-        }
+        let c = try characteristic(charUUID)
+        let cbType = try CharacteristicAccess.writeType(type, c.properties, of: c.uuid.uuidString)
+        let maximum = cbQueue.sync { peripheral.maximumWriteValueLength(for: cbType) }
+        try CharacteristicAccess.checkWriteLength(data.count, maximum: maximum, of: c.uuid.uuidString)
 
         if cbType == .withResponse {
             try await request({ .write(characteristic: c.uuid.uuidString, $0) }, to: peripheral) {
@@ -437,55 +414,52 @@ public final class BLECentral: @unchecked Sendable {
 
     // MARK: - Subscribe
 
-    /// Enable notifications of `charUUID` and stream its values. The stream
-    /// throws the reason when the connection ends (a disconnect, Bluetooth
-    /// becoming unavailable); ending the iteration turns notifications off.
+    /// Subscribe to `charUUID`'s notifications (or indications) and stream
+    /// its values, once the device has confirmed them on. Several
+    /// subscribers of one characteristic each get their own stream of every
+    /// value; notifications are turned on for the first and off when the
+    /// last one's stream ends (`NotificationSubscriptions`). The stream is
+    /// registered before notifications are turned on, so none is lost after
+    /// the confirmation, and it throws the reason when the connection ends
+    /// (a disconnect, Bluetooth becoming unavailable). A subscribe given up
+    /// (cancelled, or stopped by a caller's deadline) leaves at once; a
+    /// stream that is dropped unread also leaves.
     public func subscribe(characteristicUUID charUUID: String) async throws -> AsyncThrowingStream<Data, Error> {
         guard let peripheral = try getConnectedPeripheral() else {
             throw BLEError.notConnected
         }
+        let c = try characteristic(charUUID)
+        let uuid = c.uuid.uuidString
+        try CharacteristicAccess.checkSubscribe(c.properties, of: uuid)
 
-        let char = stateLock.withLock {
-            discoveredCharacteristics.first {
-                $0.uuid.uuidString.lowercased() == charUUID.lowercased()
-            }
-        }
-
-        guard let c = char else {
-            throw BLEError.characteristicNotFound(charUUID)
-        }
-
-        // Enable notifications and wait for the device to confirm. A wait
-        // that is given up (cancelled, or stopped by a caller's deadline)
-        // after the request went out queues turning notifications off,
-        // after the request to turn them on and before any subscribe
-        // started after the cancellation. A device that confirms late is
-        // then not left notifying a connection that no stream reads, and its
-        // late confirmation is the abandoned request's, not a later one's.
-        let turnOff: @Sendable () -> Void = {
-            if peripheral.state == .connected { peripheral.setNotifyValue(false, for: c) }
-        }
-        try await request({ .subscribe(characteristic: c.uuid.uuidString, $0) }, to: peripheral, undo: turnOff) {
-            peripheral.setNotifyValue(true, for: c)
-        }
-
-        stateLock.withLock { _ = activeSubscriptions.insert(charUUID.uppercased()) }
-
-        let stream = AsyncThrowingStream<Data, Error> { continuation in
-            self.processor.setNotificationContinuation(forChar: c.uuid.uuidString, continuation)
-            continuation.onTermination = { _ in
-                self.processor.setNotificationContinuation(forChar: c.uuid.uuidString, nil)
-                self.cbQueue.async {
-                    peripheral.setNotifyValue(false, for: c)
+        let processor = self.processor
+        let cbQueue = self.cbQueue
+        let id = processor.makeSubscriberID()
+        let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+        continuation.onTermination = { _ in processor.unsubscribe(id) }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (confirmation: CheckedContinuation<Void, Error>) in
+                processor.subscribe(id, to: uuid, stream: continuation, confirmation: confirmation,
+                                    peripheral: peripheral.identifier, on: cbQueue) { enable in
+                    peripheral.setNotifyValue(enable, for: c)
                 }
-                self.stateLock.withLock { _ = self.activeSubscriptions.remove(charUUID.uppercased()) }
             }
+        } onCancel: {
+            processor.unsubscribe(id)
         }
-
         return stream
     }
 
     // MARK: - Private helpers
+
+    /// The discovered characteristic `uuid` names, in any case.
+    private func characteristic(_ uuid: String) throws -> CBCharacteristic {
+        let found = stateLock.withLock {
+            discoveredCharacteristics.first { $0.uuid.uuidString.lowercased() == uuid.lowercased() }
+        }
+        guard let found else { throw BLEError.characteristicNotFound(uuid) }
+        return found
+    }
 
     private func getConnectedId() -> UUID? {
         processor.connectedPeripheralId
@@ -507,13 +481,11 @@ public final class BLECentral: @unchecked Sendable {
     /// blew.cb once the processor has queued the request, unless the wait
     /// was cancelled first or the peripheral is no longer connected. A wait
     /// cancelled after the request went out ends at once; the request stays
-    /// queued as abandoned until its answer arrives, and `undo`, the
-    /// CoreBluetooth call that reverses it, is queued on blew.cb, after
-    /// `call` (see `BLEEventProcessor.cancel`).
+    /// queued as abandoned until its answer arrives (see
+    /// `BLEEventProcessor.cancel`).
     private func request<T>(
         _ makeRequest: (CheckedContinuation<T, Error>) -> CentralRequest,
         to peripheral: CBPeripheral,
-        undo: (@Sendable () -> Void)? = nil,
         call: @escaping @Sendable () -> Void
     ) async throws -> T {
         let processor = self.processor
@@ -523,8 +495,7 @@ public final class BLECentral: @unchecked Sendable {
                 processor.submit(ticket, makeRequest(cont), to: peripheral.identifier, on: cbQueue, call: call)
             }
         } onCancel: {
-            let cbQueue = self.cbQueue
-            processor.cancel(ticket, undo: undo.map { undo in { cbQueue.async(execute: undo) } })
+            processor.cancel(ticket)
         }
     }
 
@@ -575,15 +546,6 @@ public final class BLECentral: @unchecked Sendable {
     }
 
     private func propertiesList(_ props: CBCharacteristicProperties) -> [String] {
-        var list: [String] = []
-        if props.contains(.read) { list.append("read") }
-        if props.contains(.write) { list.append("write") }
-        if props.contains(.writeWithoutResponse) { list.append("writeNoResp") }
-        if props.contains(.notify) { list.append("notify") }
-        if props.contains(.indicate) { list.append("indicate") }
-        if props.contains(.broadcast) { list.append("broadcast") }
-        if props.contains(.authenticatedSignedWrites) { list.append("signedWrite") }
-        if props.contains(.extendedProperties) { list.append("extended") }
-        return list
+        CharacteristicAccess.propertyNames(props)
     }
 }

@@ -37,16 +37,16 @@ final class BLEEventProcessor: @unchecked Sendable {
     private var disconnectCallbacks: [(UUID) -> Void] = []
     private var disconnectContinuation: CheckedContinuation<Void, Error>?
     /// The GATT requests in flight and their waits, queued per answering
-    /// callback in the order they were issued (see `submit`).
+    /// callback in the order they were issued (see `submit`), and the writes
+    /// without response waiting to be sent (see `waitToWrite`).
     private var callbacks = PendingCallbacks<CentralCallback, CentralWaiter>()
-    /// The poll of each write without response waiting to be sent, run
-    /// again on every ready event (see `waitToWrite`).
-    private var writePolls: [Ticket: () -> Void] = [:]
+    /// The notification subscribers of each characteristic, and whether the
+    /// device has notifications on (see `subscribe`). Their streams finish
+    /// with the error that ended the connection.
+    private var subscriptions = NotificationSubscriptions()
 
     // Streams for continuous data
     private var scanContinuation: AsyncStream<DiscoveredDevice>.Continuation?
-    /// Finished with the error that ended the connection.
-    private var notificationContinuations: [String: AsyncThrowingStream<Data, Error>.Continuation] = [:]
 
     init(eventQueue: BLEEventQueue) {
         self.eventQueue = eventQueue
@@ -180,15 +180,16 @@ final class BLEEventProcessor: @unchecked Sendable {
     }
 
     /// Wait until the connected `peripheral` can take a write without
-    /// response. `poll` runs now and again on every ready event; it checks
-    /// the peripheral on blew.cb and, when it can take the write, sends it
+    /// response. `poll` runs now and again on every ready event, the waiting
+    /// writes' polls in the order their tickets were made; it checks the
+    /// peripheral on blew.cb and, when it can take the write, sends it
     /// through `sendIfWaiting`. Fails with `CancellationError` when the
     /// ticket was cancelled first, and `notConnected` when `peripheral` is
     /// not connected.
     func waitToWrite(_ ticket: Ticket, _ cont: CheckedContinuation<Void, Error>, to peripheral: UUID,
                      poll: @escaping @Sendable () -> Void) {
         lock.lock()
-        guard callbacks.add(ticket, .readyToWrite(cont)) else {
+        guard callbacks.add(ticket, .readyToWrite(cont, poll: poll)) else {
             lock.unlock()
             cont.resume(throwing: CancellationError())
             return
@@ -199,30 +200,80 @@ final class BLEEventProcessor: @unchecked Sendable {
             cont.resume(throwing: BLEError.notConnected)
             return
         }
-        writePolls[ticket] = poll
         lock.unlock()
         poll()
     }
 
     /// Run `send` (the CoreBluetooth write) and resume the wait, when the
     /// write without response of `ticket` still waits; a no-op once it was
-    /// sent, cancelled or failed. Call on blew.cb, after finding the
-    /// peripheral ready.
+    /// sent, cancelled or failed, and for a ticket of any other request.
+    /// Call on blew.cb, after finding the peripheral ready.
     func sendIfWaiting(_ ticket: Ticket, send: () -> Void) {
-        // Only a waiting write without response has a poll; any other
-        // ticket is left alone.
         let waiter = lock.withLock {
-            writePolls.removeValue(forKey: ticket) == nil ? nil : callbacks.cancel(ticket)
+            callbacks.withdrawUnissued(ticket) {
+                if case .readyToWrite = $0 { return true }
+                return false
+            }
         }
-        guard case .readyToWrite(let cont)? = waiter else { return }
+        guard case .readyToWrite(let cont, _)? = waiter else { return }
         send()
         cont.resume()
     }
 
-    func setNotificationContinuation(forChar uuid: String, _ cont: AsyncThrowingStream<Data, Error>.Continuation?) {
+    // MARK: - Notifications
+
+    typealias SubscriberID = NotificationSubscriptions.ID
+
+    /// Reserve the ID of one subscriber, before it is registered, so a
+    /// cancellation that comes first is not lost.
+    func makeSubscriberID() -> SubscriberID {
+        lock.withLock { subscriptions.makeID() }
+    }
+
+    /// Register a subscriber of `characteristic` of the connected
+    /// `peripheral`: `stream` gets every notification of it from now on, and
+    /// `confirmation` resumes once the device has confirmed notifications
+    /// on, which it is asked to do when this is the first subscriber.
+    /// `setNotify` is the CoreBluetooth call (`setNotifyValue`); it runs on
+    /// `queue` (blew.cb), and not at all once `peripheral` is no longer
+    /// connected. Fails (the confirmation throws and the stream finishes)
+    /// with `CancellationError` when `unsubscribe` came first, with
+    /// `notConnected` when `peripheral` is not connected, with the device's
+    /// error when it refuses, and with the reason when the connection ends.
+    func subscribe(_ id: SubscriberID, to characteristic: String,
+                   stream: AsyncThrowingStream<Data, Error>.Continuation,
+                   confirmation: CheckedContinuation<Void, Error>,
+                   peripheral: UUID, on queue: DispatchQueue,
+                   setNotify: @escaping @Sendable (Bool) -> Void) {
+        let issue: @Sendable (Bool) -> Void = { [self] enable in
+            queue.async {
+                guard self.lock.withLock({ if case .connected(peripheral) = self.link { return true }; return false })
+                else { return }
+                setNotify(enable)
+            }
+        }
         lock.lock()
-        notificationContinuations[uuid] = cont
+        let effects: [() -> Void]
+        if case .connected(peripheral) = link {
+            effects = subscriptions.add(id, to: characteristic, stream: stream, confirmation: confirmation,
+                                        setNotify: issue)
+        } else {
+            effects = subscriptions.refuse(id, stream: stream, confirmation: confirmation, BLEError.notConnected)
+        }
         lock.unlock()
+        for effect in effects { effect() }
+    }
+
+    /// The subscriber leaves: its subscribe was cancelled or its stream
+    /// ended. Notifications are turned off when it was the last subscriber.
+    func unsubscribe(_ id: SubscriberID) {
+        let effects = lock.withLock { subscriptions.remove(id) }
+        for effect in effects { effect() }
+    }
+
+    /// The number of characteristics with at least one subscriber.
+    var subscribedCharacteristicCount: Int {
+        lock.withLock { subscriptions.subscribedCount }
     }
 
     // MARK: - Cancellation
@@ -258,20 +309,12 @@ final class BLEEventProcessor: @unchecked Sendable {
 
     /// Give up the request of `ticket`: its wait ends with
     /// `CancellationError`. A request already issued stays queued as
-    /// abandoned, so its late answer is not taken for a later request's,
-    /// and `undo` then runs here. The request was queued and its CoreBluetooth
-    /// call made in one block on blew.cb, so an `undo` that queues work on
-    /// blew.cb runs after that call and before any request submitted after
-    /// this returns. One not yet issued is never issued, and `undo` does not
-    /// run.
-    func cancel(_ ticket: Ticket, undo: (() -> Void)? = nil) {
-        lock.lock()
-        let issued = callbacks.isIssued(ticket)
-        let waiter = callbacks.cancel(ticket)
-        writePolls[ticket] = nil
-        lock.unlock()
+    /// abandoned, so its late answer is not taken for a later request's.
+    /// One not yet issued (also a write without response still waiting) is
+    /// never issued.
+    func cancel(_ ticket: Ticket) {
+        let waiter = lock.withLock { callbacks.cancel(ticket) }
         waiter?.fail(CancellationError())
-        if issued { undo?() }
     }
 
     // MARK: - Processing loop
@@ -359,15 +402,15 @@ final class BLEEventProcessor: @unchecked Sendable {
         case .didUpdateValue(_, let charUUID, let value, let error):
             // One callback carries both read answers and notifications, and
             // nothing tells them apart. A value with an error answers a read.
-            // A value without one goes to the notification stream if there
-            // is one, so no notification is lost to a read; it also answers
-            // the oldest read in flight, if any. While notifications are on,
-            // a read therefore completes with the first value after it was
-            // issued, which may be a notification, and its own answer then
-            // reaches the stream.
+            // A value without one goes to every subscriber's stream, so no
+            // notification is lost to a read; it also answers the oldest
+            // read in flight, if any. While notifications are on, a read
+            // therefore completes with the first value after it was issued,
+            // which may be a notification, and its own answer then reaches
+            // the streams.
             var effects: [() -> Void] = []
-            if error == nil, let value, let stream = notificationContinuations[charUUID] {
-                effects.append { stream.yield(value) }
+            if error == nil, let value {
+                effects += subscriptions.streams(of: charUUID).map { stream in { stream.yield(value) } }
             }
             if case .waiter(.request(.read(_, let cont))) = callbacks.complete(.value(characteristic: charUUID)) {
                 effects.append { Self.settle(cont, error.map(BLEError.readFailed), value ?? Data()) }
@@ -380,19 +423,18 @@ final class BLEEventProcessor: @unchecked Sendable {
             return [{ Self.settle(cont, error.map(BLEError.writeFailed), ()) }]
 
         case .isReadyToSendWriteWithoutResponse:
-            // Every waiting write checks again; each that finds the
-            // peripheral ready is sent, the others keep waiting.
-            return Array(writePolls.values)
+            // Every waiting write checks again, oldest first; each that
+            // finds the peripheral ready is sent, the others keep waiting.
+            // The polls queue their checks on blew.cb in this order.
+            return callbacks.unissuedWaiters().compactMap {
+                if case .readyToWrite(_, let poll) = $0 { return poll }
+                return nil
+            }
 
-        case .didUpdateNotificationState(_, let charUUID, let isNotifying, let error):
-            // A subscribe waits for notifications to turn on, or for an
-            // error. Notifications turning off acknowledge the undo of a
-            // subscribe that was given up, or the end of a stream, which no
-            // request waits for.
-            guard isNotifying || error != nil,
-                  case .waiter(.request(.subscribe(_, let cont))) =
-                    callbacks.complete(.notificationState(characteristic: charUUID)) else { return [] }
-            return [{ Self.settle(cont, error.map(BLEError.subscribeFailed), ()) }]
+        case .didUpdateNotificationState(_, let charUUID, _, let error):
+            // Answers the one setNotifyValue call in flight for the
+            // characteristic, whichever way it turned them.
+            return subscriptions.acknowledge(charUUID, error: error.map(BLEError.subscribeFailed))
         }
     }
 
@@ -407,12 +449,10 @@ final class BLEEventProcessor: @unchecked Sendable {
         let id = ended.peripheralId
         var effects: [() -> Void] = disconnectCallbacks.map { cb in { cb(id) } }
         // End the notification streams, so `for try await` loops throw why.
-        effects += notificationContinuations.values.map { stream in { stream.finish(throwing: error) } }
-        notificationContinuations.removeAll()
+        effects += subscriptions.removeAll(error)
 
         if case .connecting(_, let cont) = ended { effects.append { cont.resume(throwing: error) } }
         effects += callbacks.removeAll().map { waiter in { waiter.fail(error) } }
-        writePolls.removeAll()
         // Last, so disconnect returns with the connection forgotten and its
         // streams and waits ended.
         if let cont = Self.take(&disconnectContinuation) {

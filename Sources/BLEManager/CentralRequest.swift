@@ -16,9 +16,6 @@ enum CentralCallback: Hashable, Sendable {
     case value(characteristic: String)
     /// `didWriteValueFor` the characteristic, answering a write with response.
     case write(characteristic: String)
-    /// `didUpdateNotificationStateFor` the characteristic turning
-    /// notifications on (or failing to), answering `setNotifyValue(true)`.
-    case notificationState(characteristic: String)
 }
 
 /// A GATT request of the central with the wait for its answer. The callback
@@ -30,7 +27,6 @@ enum CentralRequest: Sendable {
     case discoverDescriptors(characteristic: String, CheckedContinuation<[String], Error>)
     case read(characteristic: String, CheckedContinuation<Data, Error>)
     case write(characteristic: String, CheckedContinuation<Void, Error>)
-    case subscribe(characteristic: String, CheckedContinuation<Void, Error>)
 
     var answeredBy: CentralCallback {
         switch self {
@@ -39,7 +35,6 @@ enum CentralRequest: Sendable {
         case .discoverDescriptors(let characteristic, _): return .descriptors(characteristic: characteristic)
         case .read(let characteristic, _): return .value(characteristic: characteristic)
         case .write(let characteristic, _): return .write(characteristic: characteristic)
-        case .subscribe(let characteristic, _): return .notificationState(characteristic: characteristic)
         }
     }
 
@@ -50,23 +45,25 @@ enum CentralRequest: Sendable {
         case .discoverDescriptors(_, let cont): cont.resume(throwing: error)
         case .read(_, let cont): cont.resume(throwing: error)
         case .write(_, let cont): cont.resume(throwing: error)
-        case .subscribe(_, let cont): cont.resume(throwing: error)
         }
     }
 }
 
 /// What waits in the processor's `PendingCallbacks`: a GATT request, or a
 /// write without response waiting until the peripheral can take it. The
-/// latter is never queued as issued; it is woken by every
-/// `isReadyToSendWriteWithoutResponse` and sent by the poll it registered.
+/// latter is never queued as issued: on every
+/// `isReadyToSendWriteWithoutResponse` the waiting writes run their `poll`,
+/// oldest first, and a poll sends its write when the peripheral has room.
+/// Notifications are not requests here; `NotificationSubscriptions` owns
+/// them.
 enum CentralWaiter: Sendable {
     case request(CentralRequest)
-    case readyToWrite(CheckedContinuation<Void, Error>)
+    case readyToWrite(CheckedContinuation<Void, Error>, poll: @Sendable () -> Void)
 
     func fail(_ error: Error) {
         switch self {
         case .request(let request): request.fail(error)
-        case .readyToWrite(let cont): cont.resume(throwing: error)
+        case .readyToWrite(let cont, _): cont.resume(throwing: error)
         }
     }
 }
