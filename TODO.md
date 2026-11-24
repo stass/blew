@@ -18,33 +18,24 @@ None open.
 
 ## P1: important (0.3.0)
 
-### Peripheral mode
-
-- [ ] **P5. An add CoreBluetooth never answers desynchronises the
-  service-callback FIFO.** `Sources/BLEManager/PendingCallbacks.swift`
-  (`complete`), `Sources/BLEManager/BLEPeripheralDelegate.swift`
-  (`peripheralManager(_:didAdd:error:)`), `BLEPeripheral.configure`. A
-  request cancelled after it was issued stays queued as abandoned, on the
-  assumption that CoreBluetooth still answers it. On a radio (macOS 27,
-  the TESTS.md check "Cancelled peripheral requests"), that holds for
-  `startAdvertising` followed at once by `stopAdvertising`: 18 of 18 such
-  requests got their `didStartAdvertising`. It does not hold for `add`
-  followed at once by `removeAllServices`: 0 of 16 got a `didAdd`. The
-  next `periph adv -c` then has its `didAdd` taken by the abandoned
-  entry, times out after 15 s (exit 4, "advertising failed to start (timed
-  out)") and leaves its own entry abandoned, so in the REPL or `blew mcp`
-  every later `periph adv -c` with the same service UUID times out until the process restarts. The cancel lands before the
-  answer when `configure` times out or is interrupted while CoreBluetooth
-  is slow to answer (on an idle Mac `didAdd` comes back within 1 ms, so
-  `-t` alone does not reach the window). Fix direction: since
-  `removeAllServices` is the undo of every add, have it drop the abandoned
-  `addService` entries instead of leaving them to wait for a callback.
+None open.
 
 ## P2: release hygiene (0.3.0)
 
 None open.
 
 ## P3: later (after 0.3.0)
+
+- [ ] **P6. `periph adv` without GATT services keeps the previous
+  command's services published.** `Sources/blew/CommandRouter.swift:1522`
+  calls `configure` only when some service has characteristics, and
+  `configure` is what removes the earlier services. Scenario: in the REPL,
+  `periph adv -c Examples/health-thermometer.json`, `periph stop`, then
+  `periph adv -n Sensor -S 180F`: the Mac advertises only 180F, but a
+  central that connects still finds the Health Thermometer service and its
+  characteristics, and `periph status` counts them. Unverified on a radio.
+  Fix: remove the services whenever `periph adv` starts, or state in
+  README.md that they stay until the next configuration.
 
 - [ ] **SG1. A SIGINT's 130 on an MCP call whose budget ran out is
   reported as a timeout.** `Sources/blew/MCP/MCPServer.swift` (`execute`,

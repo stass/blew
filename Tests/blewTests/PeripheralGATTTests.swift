@@ -227,6 +227,23 @@ final class PendingCallbacksTests: XCTestCase {
         XCTAssertNil(callbacks.cancel(ticket))
     }
 
+    func testDiscardIssuedDropsTheMatchingKeysOnly() {
+        var callbacks = Callbacks()
+        _ = issued(&callbacks, "svc", "S1")
+        _ = callbacks.cancel(issued(&callbacks, "svc", "S2"))
+        _ = issued(&callbacks, "adv", "A")
+        _ = issued(&callbacks, "svc", "S3")
+        let unissued = callbacks.makeTicket()
+        XCTAssertTrue(callbacks.add(unissued, "U"))
+
+        XCTAssertEqual(callbacks.discardIssued { $0 == "svc" }, ["S1", "S3"])
+
+        XCTAssertEqual(callbacks.complete("svc"), .unexpected)
+        XCTAssertEqual(callbacks.complete("adv"), .waiter("A"))
+        XCTAssertTrue(callbacks.issue(unissued, as: "svc"))
+        XCTAssertEqual(callbacks.complete("svc"), .waiter("U"))
+    }
+
     func testRemoveAllReturnsEveryWaiterStillWaiting() {
         var callbacks = Callbacks()
         _ = issued(&callbacks, "svc", "S")
@@ -250,21 +267,27 @@ final class PendingCallbacksTests: XCTestCase {
     }
 }
 
+/// The results the waiters of peripheral requests were resumed with.
+private final class Results: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Result<Void, Error>] = []
+    func append(_ r: Result<Void, Error>) { lock.withLock { values.append(r) } }
+    var all: [Result<Void, Error>] { lock.withLock { values } }
+}
+
+/// A request issued to CoreBluetooth whose waiter records into `results`.
+@discardableResult
+private func pendingRequest(
+    _ delegate: BLEPeripheralDelegate, _ key: PeripheralRequest, into results: Results
+) -> PendingCallbacks<PeripheralRequest, PeripheralWaiter>.Ticket {
+    let ticket = delegate.withCallbacks { $0.makeTicket() }
+    XCTAssertTrue(delegate.withCallbacks { $0.add(ticket, { results.append($0) }) })
+    XCTAssertTrue(delegate.withCallbacks { $0.issue(ticket, as: key) })
+    return ticket
+}
+
 /// What the peripheral delegate does when Bluetooth leaves poweredOn.
 final class PeripheralPowerStateTests: XCTestCase {
-    private final class Results: @unchecked Sendable {
-        private let lock = NSLock()
-        private var values: [Result<Void, Error>] = []
-        func append(_ r: Result<Void, Error>) { lock.withLock { values.append(r) } }
-        var all: [Result<Void, Error>] { lock.withLock { values } }
-    }
-
-    private func pendingRequest(_ delegate: BLEPeripheralDelegate, _ key: PeripheralRequest,
-                                into results: Results) {
-        let ticket = delegate.withCallbacks { $0.makeTicket() }
-        XCTAssertTrue(delegate.withCallbacks { $0.add(ticket, { results.append($0) }) })
-        XCTAssertTrue(delegate.withCallbacks { $0.issue(ticket, as: key) })
-    }
 
     private func notification() -> PendingNotification {
         PendingNotification(
@@ -328,5 +351,73 @@ final class PeripheralPowerStateTests: XCTestCase {
         }
         waiter(.success(()))
         XCTAssertEqual(results.all.count, 1)
+    }
+}
+
+/// What undoing a peripheral request does to the callbacks still due. On a
+/// radio (TESTS.md, "Cancelled peripheral requests") CoreBluetooth answers a
+/// `startAdvertising` that `stopAdvertising` undid, but not an `add` that
+/// `removeAllServices` undid.
+final class PeripheralUndoTests: XCTestCase {
+    private let thermometer = PeripheralRequest.addService(BLEUUID(CBUUID(string: "1809")))
+
+    /// Cancel `ticket` as `BLEPeripheral.request` does.
+    private func cancel(_ delegate: BLEPeripheralDelegate, _ ticket: PendingCallbacks<PeripheralRequest, PeripheralWaiter>.Ticket) {
+        let waiter = delegate.withCallbacks { $0.cancel(ticket) }
+        waiter?(.failure(CancellationError()))
+    }
+
+    func testAnAddUndoneBeforeItsAnswerDoesNotTakeTheNextAddsAnswer() {
+        let delegate = BLEPeripheralDelegate(store: GATTStore())
+        let results = Results()
+        cancel(delegate, pendingRequest(delegate, thermometer, into: results))
+        delegate.servicesRemoved()
+        pendingRequest(delegate, thermometer, into: results)
+
+        guard case .waiter(let waiter) = delegate.withCallbacks({ $0.complete(thermometer) }) else {
+            return XCTFail("the didAdd answers the add issued after the services were removed")
+        }
+        waiter(.success(()))
+        XCTAssertEqual(results.all.count, 2)
+        guard case .success = results.all.last else { return XCTFail("the second add succeeds") }
+    }
+
+    func testAnAddWaitingWhenTheServicesAreRemovedFails() {
+        let delegate = BLEPeripheralDelegate(store: GATTStore())
+        let results = Results()
+        pendingRequest(delegate, thermometer, into: results)
+
+        delegate.servicesRemoved()
+
+        XCTAssertEqual(results.all.count, 1)
+        guard case .failure(BLEError.serviceRegistrationFailed) = results.all.first else {
+            return XCTFail("expected serviceRegistrationFailed, got \(results.all)")
+        }
+        guard case .unexpected = delegate.withCallbacks({ $0.complete(thermometer) }) else {
+            return XCTFail("no add is left waiting")
+        }
+    }
+
+    func testRemovingTheServicesLeavesAdvertisingRequestsInPlace() {
+        let delegate = BLEPeripheralDelegate(store: GATTStore())
+        let results = Results()
+        cancel(delegate, pendingRequest(delegate, .advertising, into: results))
+        pendingRequest(delegate, .advertising, into: results)
+        delegate.servicesRemoved()
+
+        XCTAssertEqual(results.all.count, 1, "only the cancelled start has ended")
+        XCTAssertEqual(delegate.withCallbacks { $0.complete(.advertising) }.isAbandoned(laterRequests: 1), true)
+        guard case .waiter(let waiter) = delegate.withCallbacks({ $0.complete(.advertising) }) else {
+            return XCTFail("the second didStartAdvertising answers the second request")
+        }
+        waiter(.success(()))
+        XCTAssertEqual(results.all.count, 2)
+    }
+}
+
+private extension PendingCallbacks.Completion {
+    func isAbandoned(laterRequests expected: Int) -> Bool {
+        if case .abandoned(let later) = self { return later == expected }
+        return false
     }
 }

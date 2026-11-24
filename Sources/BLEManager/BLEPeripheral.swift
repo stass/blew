@@ -64,10 +64,7 @@ public final class BLEPeripheral: @unchecked Sendable {
         try await waitForPoweredOn(timeout: 5.0)
 
         // Remove previously added services
-        pmQueue.sync {
-            self.peripheralManager.removeAllServices()
-            self.clearServices()
-        }
+        pmQueue.sync { self.removeServices() }
 
         store.reset()
 
@@ -92,10 +89,7 @@ public final class BLEPeripheral: @unchecked Sendable {
                         self.registeredServices.append(mutableService)
                     }
                 },
-                onCancel: {
-                    self.peripheralManager.removeAllServices()
-                    self.clearServices()
-                })
+                onCancel: { self.removeServices() })
         }
     }
 
@@ -228,6 +222,16 @@ public final class BLEPeripheral: @unchecked Sendable {
 
     // MARK: - Private helpers
 
+    /// Remove every published service. The adds CoreBluetooth has not
+    /// answered yet will not be answered, so they end here
+    /// (`BLEPeripheralDelegate.servicesRemoved`). Every service removal goes
+    /// through this. Call on `blew.pm`.
+    private func removeServices() {
+        peripheralManager.removeAllServices()
+        delegate.servicesRemoved()
+        clearServices()
+    }
+
     /// No service is published, so nothing is left to notify. Call on `blew.pm`.
     private func clearServices() {
         delegate.removeNotifications()
@@ -255,7 +259,8 @@ public final class BLEPeripheral: @unchecked Sendable {
     ///   before the caller resumes.
     /// - `onCancel` undoes the request; it runs on `blew.pm` whenever the
     ///   calling task is cancelled during the wait (after `issue` if the
-    ///   request was issued), including after a success the caller has not
+    ///   request was issued, and before any request the caller makes after
+    ///   the cancelled call returns), including after a success the caller has not
     ///   yet seen. It also runs when the request was never issued, so it
     ///   stops advertising or removes services an earlier call set up.
     ///
@@ -294,9 +299,11 @@ public final class BLEPeripheral: @unchecked Sendable {
             // handler has queued the undo, so report the call as cancelled.
             try Task.checkCancellation()
         } onCancel: {
+            // The undo is queued before the waiter resumes, so it is on
+            // `blew.pm` ahead of any request the cancelled caller makes next.
             let waiter = delegate.withCallbacks { $0.cancel(ticket) }
-            waiter?(.failure(CancellationError()))
             pmQueue.async(execute: undo)
+            waiter?(.failure(CancellationError()))
         }
     }
 

@@ -10,7 +10,10 @@ import Foundation
 /// made and carries no request identifier, so the waiters for a key form a
 /// FIFO. A request cancelled after it was issued keeps its place as an
 /// abandoned entry: the callback it still gets is recognised as its own
-/// and does not resume the waiter of a later request.
+/// and does not resume the waiter of a later request. When the request's
+/// undo means CoreBluetooth will not answer it at all, the owner drops it
+/// with `discardIssued` as the undo is made, so no entry waits for a
+/// callback that never comes.
 ///
 /// A ticket moves through these states, each step under the owner's lock:
 /// `makeTicket` reserves it; `add` attaches the waiter (or reports that the
@@ -124,6 +127,18 @@ struct PendingCallbacks<Key: Hashable, Waiter> {
         issued[key] = entries.isEmpty ? nil : entries
         if let waiter = entry.waiter { return .waiter(waiter) }
         return .abandoned(laterRequests: entries.count)
+    }
+
+    /// The requests issued so far under the keys `matches` accepts will not
+    /// be answered: drop them, and return the waiters still waiting, oldest
+    /// ticket first, for the caller to fail. Unissued tickets and other
+    /// keys are kept.
+    mutating func discardIssued(where matches: (Key) -> Bool) -> [Waiter] {
+        var dropped: [Entry] = []
+        for key in issued.keys where matches(key) {
+            dropped += issued.removeValue(forKey: key) ?? []
+        }
+        return dropped.sorted { $0.id < $1.id }.compactMap(\.waiter)
     }
 
     /// Bluetooth left poweredOn: no request in flight will be answered.

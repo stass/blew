@@ -1,9 +1,17 @@
 import Foundation
 import CoreBluetooth
 
-/// A CoreBluetooth request whose callback a caller waits for.
+/// A CoreBluetooth request whose callback a caller waits for, and what its
+/// undo does to that callback (measured on a radio: TESTS.md, "Cancelled
+/// peripheral requests").
 enum PeripheralRequest: Hashable {
+    /// `startAdvertising`, answered by `didStartAdvertising`. CoreBluetooth
+    /// still answers it after `stopAdvertising` undoes it, so a cancelled one
+    /// keeps its place in the FIFO and takes that answer.
     case advertising
+    /// `add(_:)`, answered by `didAdd`. CoreBluetooth did not answer an add
+    /// that `removeAllServices` undid before answering it, so removing the
+    /// services ends every add issued before it (`servicesRemoved`).
     case addService(BLEUUID)
 }
 
@@ -100,6 +108,25 @@ final class BLEPeripheralDelegate: NSObject, @unchecked Sendable {
         emitEvent(.stateChanged(state))
     }
 
+    /// `removeAllServices` was called. CoreBluetooth sent no `didAdd` for an
+    /// add it removed this way before answering it (measured with the add
+    /// removed at once, TESTS.md "Cancelled peripheral requests"), so drop
+    /// the adds still in flight (a cancelled one would otherwise take the
+    /// next add's `didAdd`) and fail the ones still waiting. Call on
+    /// `blew.pm`, right after `removeAllServices`. A `didAdd` already queued
+    /// on `blew.pm` runs before this and completes its own entry; an add
+    /// issued after this is queued after the drop.
+    func servicesRemoved() {
+        let waiters = withCallbacks { callbacks in
+            callbacks.discardIssued { request in
+                if case .addService = request { return true }
+                return false
+            }
+        }
+        let error = BLEError.serviceRegistrationFailed("the services were removed before the add completed")
+        for waiter in waiters { waiter(.failure(error)) }
+    }
+
     // MARK: - Private helpers
 
     private func emitEvent(_ event: PeripheralEvent) {
@@ -140,7 +167,8 @@ extension BLEPeripheralDelegate: CBPeripheralManagerDelegate {
         emitEvent(.serviceAdded(uuid: uuid.string, error: error?.localizedDescription))
 
         // An abandoned add needs nothing here: its cancellation queued
-        // `removeAllServices` after the add.
+        // `removeAllServices` after the add, and this `didAdd` was queued on
+        // `blew.pm` before that ran (see `servicesRemoved`).
         if case .waiter(let waiter) = withCallbacks({ $0.complete(.addService(uuid)) }) {
             waiter(error.map { .failure(BLEError.serviceRegistrationFailed($0.localizedDescription)) } ?? .success(()))
         }
