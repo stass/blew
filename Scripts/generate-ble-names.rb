@@ -15,11 +15,16 @@ data_dir    = ARGV[0]
 output_file = ARGV[1]
 
 def load_gss(path)
+  unless File.file?(path)
+    abort "generate-ble-names.rb: #{path} not found. The Bluetooth numbers database is a " \
+          "git submodule: run `git submodule update --init` in the blew checkout."
+  end
   raw = JSON.parse(File.read(path, encoding: 'utf-8'))
   # Use a hash to deduplicate by UUID (last entry wins, matching JSON semantics).
   pairs = {}
   raw.select { |e| e["source"] == "gss" }
      .each { |e| pairs[e["uuid"].upcase] = e["name"] }
+  abort "generate-ble-names.rb: #{path} has no Bluetooth SIG (source \"gss\") entries" if pairs.empty?
   pairs.sort_by { |uuid, _| uuid }
 end
 
@@ -32,8 +37,6 @@ def escape(str)
 end
 
 def dict_literal(pairs)
-  return "    static let _ = [String: String]()" if pairs.empty?
-
   lines = pairs.map { |uuid, name| "        \"#{uuid}\": \"#{escape(name)}\"" }
   "[\n#{lines.join(",\n")}\n    ]"
 end

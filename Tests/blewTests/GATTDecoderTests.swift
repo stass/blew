@@ -63,7 +63,7 @@ final class GATTDecoderTests: XCTestCase {
     func testInfoAlwaysPresentFieldHasNilCondition() {
         let info = GATTDecoder.info(for: "2A19")
         guard let fields = info?.fields else { return XCTFail("No info") }
-        // Battery Level has only one field, flagBit == -1 means always present
+        // Battery Level has one field, always present
         XCTAssertTrue(fields.allSatisfy { $0.conditionDescription == nil })
     }
 
@@ -160,22 +160,91 @@ final class GATTDecoderTests: XCTestCase {
         XCTAssertEqual(result, "Apple Inc.")
     }
 
-    // MARK: - Medfloat16 special values
+    // MARK: - Conditional fields
 
-    func testDecodeMedfloat16NaN() {
-        // NaN: mantissa = 0x07FF → raw = (0 << 12) | 0x07FF = 0x07FF
-        var raw: UInt16 = 0x07FF
-        let data = withUnsafeBytes(of: &raw) { Data($0) }
-        // We test via a characteristic that uses medfloat16
-        // 2A1C = Temperature Measurement uses FLOAT (medfloat32)
-        // 2A75 = Pollen Concentration may use medfloat... let's verify 2A58 (Aerobic Heart Rate Lower Limit)
-        // Actually, the easiest way is to test via known-medfloat16 UUID
-        // Let's just check the medfloat16 decoding indirectly
-        // Since we can't call private formatValue, we rely on decode()'s output
-        // Battery Level is uint8, not medfloat16. We cannot test medfloat16 decoding without
-        // a real characteristic DB entry using medfloat16. So we test it conceptually
-        // by verifying we handle it without crashing for an empty data condition.
-        XCTAssertNotNil(data)  // at least we have data
+    func testDecodeBatteryLevelStatusSkipsFieldsItsFlagsClear() {
+        // 2BED Battery Level Status: Flags 0x06 selects Battery Level (bit 1)
+        // and Additional Status (bit 2) but not Identifier (bit 0).
+        let data = Data([0x06, 0x00, 0x00, 0x50, 0x01])
+        XCTAssertEqual(
+            GATTDecoder.decode(data, uuid: "2BED"),
+            "Flags: 0x06 | Power State: 0x0000 | Battery Level: 80 | Additional Status: 0x01")
+    }
+
+    func testDecodeFieldSelectedByValue() {
+        // 2B4D High Intensity Exercise Threshold: Field Selector 3 selects
+        // the Percentage of Maximum Heart Rate field.
+        XCTAssertEqual(
+            GATTDecoder.decode(Data([0x03, 90]), uuid: "2B4D"),
+            "Field Selector: 3 | Threshold as Percentage of Maximum Heart Rate: 90")
+    }
+
+    func testDecodeFieldPresentIfValueIsNotZero() {
+        // 2C27 Recipe Parameters: Cooking Process Type 0 leaves out Duration;
+        // Flags bit 3 alone selects Temperature but not Temperature Gradient.
+        let data = Data([0x08, 0x00, 0x01, 0x00, 0x00, 0xC8, 0x00])
+        XCTAssertEqual(
+            GATTDecoder.decode(data, uuid: "2C27"),
+            "Flags: 0x0008 | Cooking Step Index: 1 | Cooking Process Type: 0 | Temperature.Temperature: 200")
+    }
+
+    func testDecodeFieldPresentIfTwoBitsSet() {
+        // 2C27 Recipe Parameters: Temperature Gradient needs bits 3 and 4.
+        let data = Data([0x18, 0x00, 0x01, 0x00, 0x00, 0xC8, 0x00, 0x05])
+        XCTAssertEqual(
+            GATTDecoder.decode(data, uuid: "2C27"),
+            "Flags: 0x0018 | Cooking Step Index: 1 | Cooking Process Type: 0"
+                + " | Temperature.Temperature: 200 | Temperature Gradient: 5")
+    }
+
+    func testInfoDescribesEveryConditionKind() throws {
+        func condition(_ uuid: String, _ field: String) throws -> String? {
+            let info = try XCTUnwrap(GATTDecoder.info(for: uuid))
+            return try XCTUnwrap(info.fields.first { $0.name == field }).conditionDescription
+        }
+        XCTAssertEqual(try condition("2BED", "Identifier"), "present if bit 0 of Flags is 1")
+        XCTAssertEqual(try condition("2C27", "Temperature Gradient"),
+                       "present if bit 3 of Flags is 1 and bit 4 of Flags is 1")
+        XCTAssertEqual(try condition("2C27", "Duration"), "present if Cooking Process Type is not 0")
+        XCTAssertEqual(try condition("2B4D", "Threshold as Heart Rate"), "present if Field Selector is 4")
+        XCTAssertEqual(try condition("2AA9", "E2E-CRC"),
+                       "present if E2E-CRC Supported bit in CGM Feature characteristic is set to 1")
+        XCTAssertEqual(try condition("2B36", "E2E-CRC"),
+                       "present if the service using this characteristic defines it")
+        XCTAssertEqual(try condition("2C27", "Cooking Step Index"), nil)
+    }
+
+    // MARK: - SFLOAT and FLOAT (IEEE 11073-20601)
+
+    private func sfloat(_ raw: UInt16) -> String {
+        GATTDecoder.decodeMedfloat16(Data([UInt8(raw & 0xFF), UInt8(raw >> 8)]))
+    }
+
+    private func float(_ raw: UInt32) -> String {
+        GATTDecoder.decodeMedfloat32(Data((0..<4).map { UInt8((raw >> ($0 * 8)) & 0xFF) }))
+    }
+
+    func testSFLOATSpecialValuesNeedExponentZero() {
+        XCTAssertEqual(sfloat(0x07FF), "NaN")
+        XCTAssertEqual(sfloat(0x0800), "NRes")
+        XCTAssertEqual(sfloat(0x07FE), "+Inf")
+        XCTAssertEqual(sfloat(0x0802), "-Inf")
+        XCTAssertEqual(sfloat(0x0801), "Reserved")
+        // The same mantissas with a nonzero exponent are ordinary numbers.
+        XCTAssertEqual(sfloat(0x17FF), "20470")
+        XCTAssertEqual(sfloat(0xF7FE), "204.6")
+        XCTAssertEqual(sfloat(0x1800), "-20480")
+        XCTAssertEqual(sfloat(0x1801), "-20470")
+    }
+
+    func testFLOATSpecialValuesNeedExponentZero() {
+        XCTAssertEqual(float(0x007F_FFFF), "NaN")
+        XCTAssertEqual(float(0x0080_0000), "NRes")
+        XCTAssertEqual(float(0x007F_FFFE), "+Inf")
+        XCTAssertEqual(float(0x0080_0002), "-Inf")
+        XCTAssertEqual(float(0x0080_0001), "Reserved")
+        XCTAssertEqual(float(0x017F_FFFF), "83886070")
+        XCTAssertEqual(float(0xFF7F_FFFE), "838860.6")
     }
 
     // MARK: - GATTDecoder.info: manufacturer name is utf8

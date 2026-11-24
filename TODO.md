@@ -191,26 +191,6 @@ None open.
   subscriptions on the old device with no sign in its output. Fix: carry the
   notice in the command's result (MCP `content`) and show it without `-v`.
 
-### Decoding and code generation
-
-- [ ] **D1. 44 conditional fields are decoded as always present.**
-  `Scripts/generate-ble-characteristics.rb:67`. The regex misses "of the
-  Flags field" and "of Presence Flags field". This affects 14
-  characteristics, including Battery Level Status, Battery Energy Status,
-  CGM Status and Blood Pressure Record.
-- [ ] **D2. SFLOAT and FLOAT special values ignore the exponent.**
-  `Sources/blew/GATTDecoder.swift:224-228`, `:244-248`. 0x17FF shows as NaN
-  instead of 20470, and the reserved values are missed.
-- [ ] **D3. `shortUUID` drops the upper bits of 32-bit UUIDs.**
-  `Sources/blew/BLENames.swift:25-28`. `12342A19` is decoded as Battery
-  Level, and so is `12342A19-0000-1000-8000-00805F9B34FB` (`:30-35`). Fix:
-  derive it from `BLEUUID.key` (`Sources/BLEManager/BLEUUID.swift`), which
-  is 4 digits exactly for a 16-bit UUID.
-- [ ] **D4. The characteristics generator reads its YAML in the locale
-  encoding.** `Scripts/generate-ble-characteristics.rb:209`, `:214`. This is
-  the same bug a3d3d69 fixed in the names script; the build fails under
-  `LANG=C` *(plausible)*.
-
 ### Peripheral mode
 
 - [ ] **P1. Prepared (long) writes ignore `request.offset`.**
@@ -233,11 +213,6 @@ None open.
 - [ ] **R1. The version string is out of date.** `Sources/blew/Blew.swift:16`
   says `0.2.0`; the latest tag is `v0.2.2`. Set it to `0.3.0` for the
   release.
-- [ ] **R3. A fresh clone without submodules fails** with a Ruby `ENOENT`
-  backtrace. `Plugins/GenerateBLENames/plugin.swift:9-17`,
-  `Scripts/generate-ble-names.rb:26`. Check for the submodules with a clear
-  message, and document `git submodule update --init` /
-  `git clone --recursive` in the README.
 - [ ] **R4. Bluetooth usage description** *(plausible)*. `Package.swift:42`
   excludes `Info.plist`, and nothing embeds `NSBluetoothAlwaysUsageDescription`.
   Verify how release binaries get it (e.g. `-sectcreate __TEXT __info_plist`).
@@ -255,10 +230,12 @@ None open.
 - [ ] Codegen backslash escaping is a no-op (`gsub("\\", "\\\\")`).
   `generate-ble-characteristics.rb:164`, `generate-ble-names.rb:31`. "CO2
   Concentration" renders a TAB.
-- [ ] Codegen emits Swift that doesn't compile for empty input.
-  `generate-ble-names.rb:35`, `generate-ble-characteristics.rb:267-269`.
-- [ ] GATT flags are taken only from the first boolean field, and truncated
-  fields are skipped. `GATTDecoder.swift:107-126`.
+- [ ] Truncated GATT fields are skipped silently. `GATTDecoder.swift:85-98`.
+- [ ] An E2E-CRC after a variable-length field is never decoded.
+  `GATTDecoder.swift:87-95`. In 2AAC CGM Specific Ops Control Point
+  (Operand) and 2B36 Blood Pressure Record (Recorded Characteristic) the
+  variable field takes all remaining bytes, so the CRC shows inside its hex
+  while `gatt info` lists E2E-CRC as a field of its own.
 - [ ] A single field containing " | " is split as several fields.
   `CommandRouter.swift:601-603`, `GATTDecoder.swift:23`.
 - [ ] `parseHex` accepts signed tokens ("+f", "-0"). `DataFormatter.swift:71`.

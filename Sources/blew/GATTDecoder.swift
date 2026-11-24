@@ -34,8 +34,7 @@ enum GATTDecoder {
                 name: f.name,
                 typeName: typeName(f.type),
                 sizeDescription: sizeDescription(f.size),
-                flagBit: f.flagBit,
-                flagSet: f.flagSet
+                conditionDescription: conditionDescription(f.conditions)
             )
         }
         return CharacteristicInfo(
@@ -52,13 +51,8 @@ enum GATTDecoder {
         let name: String
         let typeName: String
         let sizeDescription: String
-        let flagBit: Int
-        let flagSet: Bool
-
-        var conditionDescription: String? {
-            guard flagBit >= 0 else { return nil }
-            return "present if bit \(flagBit) of Flags is \(flagSet ? "1" : "0")"
-        }
+        /// "present if ..." for a conditional field, nil for one always present.
+        let conditionDescription: String?
     }
 
     struct CharacteristicInfo {
@@ -80,16 +74,13 @@ enum GATTDecoder {
         from data: Data
     ) -> [DecodedField] {
         var offset = data.startIndex
-        var flags: UInt64 = 0
-        var flagsCaptured = false
+        // The unsigned value of each decoded integer field, by name, for the
+        // presence conditions of the fields after it.
+        var integers: [String: UInt64] = [:]
         var result: [DecodedField] = []
 
         for field in fields {
-            // Conditional field: check flag bit
-            if field.flagBit >= 0 {
-                let bitSet = (flags >> UInt64(field.flagBit)) & 1 == 1
-                guard bitSet == field.flagSet else { continue }
-            }
+            guard field.conditions.allSatisfy({ holds($0, integers) }) else { continue }
 
             let remaining = data.distance(from: offset, to: data.endIndex)
 
@@ -107,24 +98,9 @@ enum GATTDecoder {
                 guard field.size > 0, remaining >= field.size else { continue }
                 let endOffset = data.index(offset, offsetBy: field.size)
                 let fieldData = Data(data[offset..<endOffset])
-
-                // Capture flags from the first boolean field for conditional resolution
-                if !flagsCaptured {
-                    switch field.type {
-                    case .boolean8:
-                        flags = UInt64(fieldData[fieldData.startIndex])
-                        flagsCaptured = true
-                    case .boolean16:
-                        flags = fieldData.withUnsafeBytes { UInt64($0.loadUnaligned(as: UInt16.self)) }
-                        flagsCaptured = true
-                    case .boolean32:
-                        flags = fieldData.withUnsafeBytes { UInt64($0.loadUnaligned(as: UInt32.self)) }
-                        flagsCaptured = true
-                    default:
-                        break
-                    }
+                if let value = unsignedValue(fieldData, type: field.type) {
+                    integers[field.name] = value
                 }
-
                 offset = endOffset
                 result.append(DecodedField(
                     name: field.name,
@@ -134,6 +110,57 @@ enum GATTDecoder {
         }
 
         return result
+    }
+
+    /// Whether `condition` holds, given the integer fields decoded so far. A
+    /// condition on a field that was not decoded does not hold.
+    private static func holds(
+        _ condition: GATTCharacteristicDB.Condition,
+        _ integers: [String: UInt64]
+    ) -> Bool {
+        switch condition {
+        case .bit(let field, let bit, let set):
+            guard let value = integers[field] else { return false }
+            return (value >> UInt64(bit)) & 1 == (set ? 1 : 0)
+        case .equals(let field, let value):
+            return integers[field] == value
+        case .notEquals(let field, let value):
+            guard let actual = integers[field] else { return false }
+            return actual != value
+        case .external:
+            return true
+        }
+    }
+
+    /// The little-endian unsigned value of an unsigned-integer or bit-field
+    /// field; nil for every other type.
+    private static func unsignedValue(_ data: Data, type: GATTCharacteristicDB.FieldType) -> UInt64? {
+        switch type {
+        case .uint8, .uint16, .uint24, .uint32, .uint48, .uint64,
+             .boolean8, .boolean16, .boolean24, .boolean32:
+            guard data.count <= 8 else { return nil }
+            return littleEndian(data)
+        default:
+            return nil
+        }
+    }
+
+    /// The little-endian unsigned value of up to 8 bytes.
+    private static func littleEndian(_ data: Data) -> UInt64 {
+        data.reversed().reduce(0) { $0 << 8 | UInt64($1) }
+    }
+
+    private static func conditionDescription(_ conditions: [GATTCharacteristicDB.Condition]) -> String? {
+        guard !conditions.isEmpty else { return nil }
+        let parts = conditions.map { condition -> String in
+            switch condition {
+            case .bit(let field, let bit, let set): return "bit \(bit) of \(field) is \(set ? 1 : 0)"
+            case .equals(let field, let value):     return "\(field) is \(value)"
+            case .notEquals(let field, let value):  return "\(field) is not \(value)"
+            case .external(let text):               return text
+            }
+        }
+        return "present if " + parts.joined(separator: " and ")
     }
 
     // MARK: - Value formatting
@@ -194,6 +221,10 @@ enum GATTDecoder {
             guard data.count >= 2 else { return "(short)" }
             return String(format: "0x%04X", data.withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) })
 
+        case .boolean24:
+            guard data.count >= 3 else { return "(short)" }
+            return String(format: "0x%06X", UInt32(littleEndian(data.prefix(3))))
+
         case .boolean32:
             guard data.count >= 4 else { return "(short)" }
             return String(format: "0x%08X", data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) })
@@ -213,19 +244,23 @@ enum GATTDecoder {
         }
     }
 
-    // IEEE 11073-20601 SFLOAT-16: 4-bit signed exponent, 12-bit signed mantissa
-    private static func decodeMedfloat16(_ data: Data) -> String {
+    // IEEE 11073-20601 SFLOAT-16: 4-bit signed exponent, 12-bit signed
+    // mantissa. The special values are the mantissas 0x07FE to 0x0802 with
+    // exponent 0 (IEEE 11073-20601 is not vendored; the values are from its
+    // SFLOAT-Type definition). With any other exponent they are numbers.
+    static func decodeMedfloat16(_ data: Data) -> String {
         guard data.count >= 2 else { return "(short)" }
         let raw = data.withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) }
         let expRaw = Int(raw >> 12)
         let exp = expRaw > 7 ? expRaw - 16 : expRaw
         let mantRaw = Int(raw & 0x0FFF)
         let mant = mantRaw > 0x07FF ? mantRaw - 0x1000 : mantRaw
-        switch mant {
-        case 0x07FF:  return "NaN"
-        case -0x0800: return "NRes"
-        case 0x07FE:  return "+Inf"
-        case -0x07FE: return "-Inf"
+        switch (exp, mantRaw) {
+        case (0, 0x07FF): return "NaN"
+        case (0, 0x0800): return "NRes"
+        case (0, 0x07FE): return "+Inf"
+        case (0, 0x0802): return "-Inf"
+        case (0, 0x0801): return "Reserved"
         default:
             let value = Double(mant) * pow(10.0, Double(exp))
             return value == value.rounded() && abs(value) < 1e9
@@ -234,18 +269,21 @@ enum GATTDecoder {
         }
     }
 
-    // IEEE 11073-20601 FLOAT-32: 8-bit signed exponent, 24-bit signed mantissa
-    private static func decodeMedfloat32(_ data: Data) -> String {
+    // IEEE 11073-20601 FLOAT-32: 8-bit signed exponent, 24-bit signed
+    // mantissa. The special values are the mantissas 0x007FFFFE to
+    // 0x00800002 with exponent 0, as for SFLOAT.
+    static func decodeMedfloat32(_ data: Data) -> String {
         guard data.count >= 4 else { return "(short)" }
         let raw = data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
         let exp = Int(Int8(bitPattern: UInt8(raw >> 24)))
         let mantRaw = Int(raw & 0x00FFFFFF)
         let mant = mantRaw > 0x007FFFFF ? mantRaw - 0x01000000 : mantRaw
-        switch mant {
-        case 0x007FFFFF:  return "NaN"
-        case -0x00800000: return "NRes"
-        case 0x007FFFFE:  return "+Inf"
-        case -0x007FFFFE: return "-Inf"
+        switch (exp, mantRaw) {
+        case (0, 0x007FFFFF): return "NaN"
+        case (0, 0x00800000): return "NRes"
+        case (0, 0x007FFFFE): return "+Inf"
+        case (0, 0x00800002): return "-Inf"
+        case (0, 0x00800001): return "Reserved"
         default:
             let value = Double(mant) * pow(10.0, Double(exp))
             return value == value.rounded() && abs(value) < 1e12
@@ -269,6 +307,7 @@ enum GATTDecoder {
         case .sint32:     return "sint32"
         case .boolean8:   return "boolean[8]"
         case .boolean16:  return "boolean[16]"
+        case .boolean24:  return "boolean[24]"
         case .boolean32:  return "boolean[32]"
         case .medfloat16: return "medfloat16"
         case .medfloat32: return "medfloat32"

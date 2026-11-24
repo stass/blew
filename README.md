@@ -101,7 +101,11 @@ swift build -c release
 cp .build/release/blew /usr/local/bin/blew
 ```
 
-`--recurse-submodules` is required — the Bluetooth SIG name and characteristic databases are included as git submodules under `Vendor/`. The Swift build generates all data files automatically from the submodule data.
+`--recurse-submodules` is required — the Bluetooth SIG name and characteristic databases are included as git submodules under `Vendor/`. The Swift build generates all data files automatically from the submodule data, and stops with an error naming the missing file when the submodules are not checked out. In a clone made without `--recurse-submodules`, fetch them with:
+
+```bash
+git submodule update --init
+```
 
 On first run, macOS will prompt for Bluetooth permission. Grant it in **System Settings → Privacy & Security → Bluetooth**.
 

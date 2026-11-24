@@ -45,6 +45,19 @@ final class BLENamesTests: XCTestCase {
         XCTAssertNil(BLENames.shortUUID(""))
     }
 
+    func testShortUUIDKeepsUpperBitsOf32BitUUID() {
+        XCTAssertNil(BLENames.shortUUID("12342A19"))
+        XCTAssertNil(BLENames.shortUUID("12342A19-0000-1000-8000-00805F9B34FB"))
+        XCTAssertNil(BLENames.name(for: "12342A19", category: .characteristic))
+        XCTAssertNil(GATTDecoder.decode(Data([85]), uuid: "12342A19-0000-1000-8000-00805F9B34FB"))
+    }
+
+    func testShortUUIDRejectsMalformedBaseUUID() {
+        XCTAssertNil(BLENames.shortUUID("0000180F-0000-1000-8000-00805F9B34FB "))
+        XCTAssertNil(BLENames.shortUUID("ZZZZ180F-0000-1000-8000-00805F9B34FB"))
+        XCTAssertNil(BLENames.shortUUID("\u{FF11}80F"))
+    }
+
     func testShortUUIDNonHexFourCharReturnsNil() {
         // The check is allSatisfy isHexDigit; "ZZZZ" won't pass
         XCTAssertNil(BLENames.shortUUID("ZZZZ"))

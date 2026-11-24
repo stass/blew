@@ -387,7 +387,7 @@ final class MCPStructuredResultTests: XCTestCase {
     }
 
     func testCharacteristicInfoRoundTrip() throws {
-        let field = GATTDecoder.FieldInfo(name: "Level", typeName: "uint8", sizeDescription: "1 byte", flagBit: -1, flagSet: false)
+        let field = GATTDecoder.FieldInfo(name: "Level", typeName: "uint8", sizeDescription: "1 byte", conditionDescription: nil)
         let info = GATTCharInfo(uuid: "2A19", name: "Battery Level", description: "Battery %", fields: [field])
         let original = StructuredResult.characteristicInfo(info)
         let json = try jsonString(original)
@@ -572,7 +572,7 @@ final class MCPEncodeStructuredContentTests: XCTestCase {
     }
 
     func testCharacteristicInfoMapped() {
-        let field = GATTDecoder.FieldInfo(name: "Level", typeName: "uint8", sizeDescription: "1 byte", flagBit: -1, flagSet: false)
+        let field = GATTDecoder.FieldInfo(name: "Level", typeName: "uint8", sizeDescription: "1 byte", conditionDescription: nil)
         let info = GATTCharInfo(uuid: "2A19", name: "Battery Level", description: "Battery %", fields: [field])
         let result = server.encodeStructuredContent([.characteristicInfo(info)])
         guard case .characteristicInfo(let i) = result else {

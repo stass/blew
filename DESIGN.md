@@ -513,9 +513,11 @@ Tab completion is registered via `LineNoise.setCompletionCallback`. The callback
 - `name` and `description` from the Bluetooth SIG GSS YAML files
 - `fields: [Field]` — a flat ordered list of fully resolved fields, each with:
   - `name`: field name (struct fields are recursively inlined with dot-separated names, e.g. `"Date Time.Year"`)
-  - `type`: a `FieldType` case — `uint8/16/24/32/48/64`, `sint8/16/32`, `boolean8/16/32`, `medfloat16/32`, `utf8s`, or `opaque`
+  - `type`: a `FieldType` case — `uint8/16/24/32/48/64`, `sint8/16/32`, `boolean8/16/24/32`, `medfloat16/32`, `utf8s`, or `opaque`
   - `size`: byte count when present; `-1` = variable; `-2` = variable-length array
-  - `flagBit`/`flagSet`: conditional field presence (`flagBit == -1` means always present; `flagBit >= 0` means present only when that bit of the first boolean/flags field has the value `flagSet`)
+  - `conditions: [Condition]`: when the field is present; all must hold, and an empty list means always. A condition reads an earlier integer field by name: `.bit(field:bit:set:)` (a bit of a Flags field), `.equals(field:value:)` and `.notEquals(field:value:)` (a selector field). `.external(text)` is a condition outside the value, such as a bit of another characteristic or the service's choice; nothing in the value decides it, so it is allowed only on the last field, which is decoded when bytes remain for it.
+
+The generator parses each field's "Present if ..." and "The presence of this field is defined by ..." sentences in the GSS YAML into conditions. It stops the build on a sentence in a phrasing it does not know, on a condition naming a field that is not an earlier integer field, on an external condition anywhere but the last field, and on a field sized "0 or N" with no condition. Every condition the GSS states is either evaluated or, for an external one, shown by `gatt info`.
 
 **Struct resolution**
 
@@ -524,8 +526,8 @@ Many GSS characteristics embed sub-structures defined in other characteristics (
 **Decoding** (`GATTDecoder.decode(_:uuid:)`)
 
 Reads fields sequentially from the `Data` buffer:
-1. The first `boolean[N]` field is decoded and stored as a flags bitmap.
-2. Each subsequent conditional field (`flagBit >= 0`) is included or skipped based on that bitmap.
+1. Each decoded unsigned-integer or `boolean[N]` field is kept by name as an unsigned value.
+2. A conditional field is included only when all its conditions hold on those values; a condition on a field that was not decoded does not hold.
 3. Variable-length fields consume all remaining bytes.
 4. Single-field characteristics emit just the value; multi-field characteristics emit `"FieldName: value | FieldName: value"`.
 
