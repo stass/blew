@@ -248,7 +248,7 @@ Before any mode exits, `cleanupBeforeExit()` stops advertising and performs a be
 
 `Blew.main()` sets standard output to line buffering when it is not a terminal, so piped and redirected output reaches its reader one line at a time, and calls `ProcessSignals.shared.install()` before parsing, so every mode handles signals the same way.
 
-**Signals** (`ProcessSignals.swift`). SIGINT and SIGTERM are set to `SIG_IGN` and delivered through `DispatchSource` signal sources on the `blew.signals` serial queue, so their handling is ordinary code on that queue, never code inside a C signal handler. `ProcessSignals` counts open command spans under a lock. Each `CommandRouter.waitInterruptible` is a span, and so is a whole REPL command, from Enter to the next prompt, so a Ctrl-C while the REPL renders a result or waits outside `waitInterruptible` still only stops the command. Spans nest and may run at once (MCP tool calls). The phase is `idle` (no span open), `running`, or `interrupting` (a SIGINT asked the open spans to stop; the flag stays set until the outermost span closes, so an interrupted REPL command stops at its next wait). The decision is the pure `SignalPolicy.respond(to:in:)`:
+**Signals** (`ProcessSignals.swift`). SIGINT and SIGTERM are set to `SIG_IGN` and delivered through `DispatchSource` signal sources on the `blew.signals` serial queue, so their handling is ordinary code on that queue, never code inside a C signal handler. `ProcessSignals` counts open command spans under a lock. Each `CommandRouter.waitInterruptible` is a span, and so is a whole REPL command, from Enter to the next prompt, so a Ctrl-C while the REPL renders a result or waits outside `waitInterruptible` still only stops the command. Spans nest (a REPL command and its waits). MCP tool calls run one at a time (see 4.12), so at most one call has a span open. The phase is `idle` (no span open), `running`, or `interrupting` (a SIGINT asked the open spans to stop; the flag stays set until the outermost span closes, so an interrupted REPL command stops at its next wait). The decision is the pure `SignalPolicy.respond(to:in:)`:
 
 | Signal | Phase | Response |
 |--------|-------|----------|
@@ -601,7 +601,7 @@ Custom vendor UUIDs that do not follow the Bluetooth Base pattern return `nil`.
 The MCP swift-sdk dependency declares `swift-tools-version:6.1` and uses concurrency APIs (the parameterless `withThrowingTaskGroup` overload) introduced in Swift 6.1, so it cannot be built with Swift 6.0.x (Xcode 16.0–16.2). To keep blew buildable on those toolchains, MCP support is gated behind compiler-version detection:
 
 - `Package.swift` uses `#if compiler(>=6.1)` to decide whether to add the swift-sdk package dependency, the `MCP` product dependency (on both the `blew` and `blewTests` targets), and the `MCP_ENABLED` swift define. The package's own `swift-tools-version` stays at `6.0` so the manifest itself loads under the older toolchain.
-- All MCP source is wrapped in `#if MCP_ENABLED`: `MCPServer.swift`, `MCPCommand.swift`, and `MCPTests.swift` compile to nothing when the flag is absent. `Blew.subcommandList` appends `MCPCommand.self` only under `#if MCP_ENABLED`, so the `mcp` subcommand simply does not exist on a Swift 6.0 build.
+- All MCP source is wrapped in `#if MCP_ENABLED`: the files in `Sources/blew/MCP/`, `MCPCommand.swift`, `MCPTests.swift` and `MCPCallTests.swift` compile to nothing when the flag is absent. `Blew.subcommandList` appends `MCPCommand.self` only under `#if MCP_ENABLED`, so the `mcp` subcommand simply does not exist on a Swift 6.0 build.
 
 When built with Swift 6.1+ everything below applies; on Swift 6.0.x the `mcp` subcommand is absent and every other command is unchanged.
 
@@ -632,11 +632,25 @@ CallTool.Result { content: [.text(...)], structuredContent: Value, isError: Bool
 |------|------|
 | `Sources/blew/Commands/MCPCommand.swift` | `AsyncParsableCommand` entry point for `blew mcp` |
 | `Sources/blew/MCP/MCPServer.swift` | MCP server: tool definitions, call dispatch, `CommandOutput` to JSON conversion |
+| `Sources/blew/MCP/ToolArguments.swift` | Checks a call's arguments against the tool's input schema |
+| `Sources/blew/MCP/ToolCallQueue.swift` | Runs tool calls one at a time on a dedicated serial queue, with cancellation and a time budget |
+| `Sources/blew/StopRequest.swift` | A caller's request to stop one command (cancelled, or out of budget), which `waitInterruptible` honours like SIGINT |
 | `Sources/blew/Output/NullRenderer.swift` | `OutputRenderer` that discards all output (prevents any command output from reaching the JSON-RPC stdout) |
 
 **Tool dispatch:**
 
-The MCP server calls `CommandRouter.run*()` methods directly (not through `dispatch()`) to avoid automatic rendering to stdout. Non-streaming commands return their full output in `CommandResult.output`. For streaming commands (`sub`, `periph adv/clone`), the server passes a collecting closure as the `emit` parameter — items are accumulated in a local `StreamCollector`, then prepended to `CommandResult.output` before JSON encoding.
+The MCP server calls `CommandRouter.run*()` methods directly (not through `dispatch()`) to avoid automatic rendering to stdout. Non-streaming commands return their full output in `CommandResult.output`. For streaming commands (`sub`, `nus`, `periph adv/clone`), the server passes a collecting closure as the `emit` parameter: items are accumulated in a per-call `StreamCollector` (under a lock), which is closed when the command returns and its items prepended to `CommandResult.output` before JSON encoding. Closing matters for `periph adv`, whose background task keeps emitting events after the call has returned; they are dropped instead of piling up in a collector nobody reads.
+
+The router is built from the global options the process was started with (`GlobalOptions.current`), so `blew -t 30 mcp` and `blew -v mcp` apply to every call.
+
+**A call's path.** `handleToolCall` handles one `tools/call` request in four steps:
+
+1. *Validate.* `ToolArguments.validate` checks the arguments against the tool's `inputSchema`, the one description of what each tool accepts: every argument is a declared property of the declared JSON type, inside its `enum`, `minimum` and `maximum` (array items against `items`), and every `required` property is present. A mismatch is an error result with exit code 6; no argument is ignored or coerced. The argument builders run after validation, so they read only values of the declared types.
+2. *Build.* `makeCommand` turns the arguments into a `ToolCommand`: the router work, and the duration the call itself asks for (the `ble_scan` `timeout`, the `ble_subscribe` or `ble_nus` `duration`, zero otherwise). `ble_subscribe` always passes `-d`: the call's `duration`, or `defaultSubscribeDuration` (10 s); `count` is optional and ends it earlier. It calls `runSub(foregroundOnly: true)`, so no argument text (a `name` of `-b`) can start a background subscription that outlives the call and mutates router state off the queue. Errors in the `ble_nus` options are argument errors too and return before the call is queued. The schemas cap these durations at `maxCallDuration` (300 s).
+3. *Queue.* `ToolCallQueue.run` executes the work on its own serial `DispatchQueue` (`blew.mcp.calls`), so calls never overlap: each starts after the one before it returned. Requests a client pipelines without waiting for replies reach the queue in either order, because the swift-sdk's per-request Tasks race until they enqueue; the server's instructions tell clients to send a dependent call after the reply. The swift-sdk handles each request in its own Task; without the queue, concurrent calls would share the single-slot operation waits of `BLEEventProcessor`, the router's state (`lastScanResults`, `backgroundSubTasks`) and the connection, and one call's auto-connect could replace the device another call is using. The router's commands block their thread on semaphores, so the queue's thread, not a thread of the cooperative pool, is the one that blocks; the request's Task suspends on a continuation until the work returns.
+4. *Stop.* Each call has a `StopRequest`, attached to the router with `run(stoppingOn:)` for the call's duration; `run(stoppingOn:)` also makes the whole call one `ProcessSignals` span. `waitInterruptible` treats a set request like a SIGINT: it cancels the waiting operation and returns `.interrupted`. The request is set to `.cancelled` when the swift-sdk cancels the request's Task (it does on `notifications/cancelled`), and to `.budgetExhausted` when the call's budget runs out: its duration plus `setupAllowance` (60 s), or plus four times `-t` when that is longer, counted from when the call starts. A cancelled call throws `CancellationError`, so the swift-sdk sends no response; a cancelled call still waiting its turn never starts. A call whose budget ran out and that did not succeed fails with exit code 4 and keeps the output it collected.
+
+**SIGINT in MCP mode.** `ProcessSignals` keeps one process-wide interrupt flag. With calls serialized and each call one span, a SIGINT while a call runs stops exactly that call, at its next wait if it is between two, which returns exit code 130 to its client; the server keeps serving. A SIGINT with no call running ends the server with 130, as in every other mode, and SIGTERM ends it with 143.
 
 **Structured content:**
 
@@ -666,7 +680,7 @@ Each tool result includes both `structuredContent` (typed JSON via `Codable`) an
 | `ble_periph_status` | `periph status` | (none) |
 | `ble_nus` | `nus --send` | targeting options, send?, expect?, duration?, with_response? |
 
-**Subscribe behavior:** `ble_subscribe` collects notifications for the specified `duration` or `count`. If neither is specified, defaults to `count: 10` to prevent infinite blocking. All values are returned at once as a `[NotificationValue]` array.
+**Subscribe behavior:** `ble_subscribe` collects notifications for `duration` seconds (10 when not given, at most 300) or until `count` have arrived, whichever comes first. Enabling notifications waits for the device's confirmation for at most the operation timeout (`-t`, else 5 s), in the CLI as well. All values are returned at once as a `[NotificationValue]` array.
 
 **Peripheral commands:** `ble_periph_advertise` and `ble_periph_clone` start the peripheral and return the summary immediately (the `CommandRouter` runs with `isInteractiveMode: true`). Subsequent `ble_periph_status`, `ble_periph_set`, `ble_periph_notify`, `ble_periph_stop` calls operate on the running peripheral.
 
@@ -687,6 +701,9 @@ blew.pm (serial queue)  All CBPeripheralManager calls + delegate callbacks
                         GATTStore reads/writes (under NSLock)
 blew.event-processor    BLEEventQueue drain loop, continuation resumes
 blew.signals            SIGINT / SIGTERM handling (ProcessSignals)
+blew.mcp.calls          MCP tool calls, one at a time (ToolCallQueue);
+                        blocks in DispatchSemaphore waits like the main thread
+blew.mcp.budgets        Timers that stop an MCP call when its budget runs out
 Swift cooperative pool  async Task bodies (BLECentral and BLEPeripheral)
 ```
 

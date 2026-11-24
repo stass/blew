@@ -74,7 +74,7 @@ final class ProcessSignals: @unchecked Sendable {
     private let queue = DispatchQueue(label: "blew.signals")
     private let lock = NSLock()
     /// Open command spans; more than one when spans nest (a REPL command
-    /// and its waits) or run at once (MCP tool calls).
+    /// and its waits). MCP tool calls run one at a time (`ToolCallQueue`).
     private var openSpans = 0
     /// A SIGINT asked the open spans to stop; cleared when the last closes.
     private var interrupted = false

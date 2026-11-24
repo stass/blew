@@ -9,7 +9,7 @@ struct MCPCommand: AsyncParsableCommand {
     )
 
     mutating func run() async throws {
-        let server = BlewMCPServer()
+        let server = BlewMCPServer(globals: GlobalOptions.current)
         try await server.start()
     }
 }

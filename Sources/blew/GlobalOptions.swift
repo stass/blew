@@ -12,6 +12,12 @@ struct GlobalOptions: ParsableArguments {
 
     @Option(name: [.short, .long], help: "Output format: text or kv.")
     var out: OutputFormat = .text
+
+    mutating func validate() throws {
+        if let timeout, !CommandRouter.isValidDuration(timeout) {
+            throw ValidationError("invalid timeout '\(timeout)' (use 0 to \(Int(CommandRouter.maxDuration)) seconds)")
+        }
+    }
 }
 
 /// Device targeting options shared across all commands that need to locate a device.

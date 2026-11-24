@@ -192,9 +192,10 @@ final class ScanArgumentTests: XCTestCase {
         CommandRouter(globals: try! GlobalOptions.parse(globals), renderer: NullRenderer())
     }
 
-    func testWatchRejectsAnUnboundedGlobalTimeout() {
-        XCTAssertEqual(router(["-t", "inf", "-o", "kv"]).runScan(["-w"]).exitCode,
-                       BlewExitCode.invalidArguments.code)
+    /// An unbounded global `-t` is rejected when the global options are
+    /// parsed, before any command (`scan -w`) can use it.
+    func testUnboundedGlobalTimeoutIsRejected() {
+        XCTAssertThrowsError(try GlobalOptions.parse(["-t", "inf", "-o", "kv"]))
     }
 
     func testWatchRejectsAnInvalidScanTimeout() {

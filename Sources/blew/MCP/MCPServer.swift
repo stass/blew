@@ -3,20 +3,56 @@ import Foundation
 import MCP
 import BLEManager
 
-/// Reference-type accumulator for streaming command output.
-/// @unchecked Sendable is safe here: run*() methods are synchronous (semaphore-blocked)
-/// so all emit() calls complete before the collected items are read.
-private final class StreamCollector: @unchecked Sendable {
-    var items: [CommandOutput] = []
-    func collect(_ item: CommandOutput) { items.append(item) }
+/// Collects what a streaming command emits during one tool call. A
+/// command can keep emitting from a background task after the call has
+/// returned (advertising events go on until `ble_periph_stop`); `close`
+/// ends the collection and what arrives afterwards is dropped.
+final class StreamCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [CommandOutput] = []
+    private var isOpen = true
+
+    func collect(_ item: CommandOutput) {
+        lock.withLock {
+            if isOpen { items.append(item) }
+        }
+    }
+
+    /// Stop collecting and return what was collected.
+    func close() -> [CommandOutput] {
+        lock.withLock {
+            isOpen = false
+            defer { items = [] }
+            return items
+        }
+    }
+}
+
+/// One validated tool call, ready to run on the router.
+struct ToolCommand {
+    /// The seconds the call itself asks for: a scan timeout, a subscription
+    /// or NUS duration; zero for the other tools.
+    var duration: TimeInterval
+    var run: (CommandRouter) -> CommandResult
 }
 
 final class BlewMCPServer {
-    private let server: Server
-    private let router: CommandRouter
+    /// The longest `duration` a `ble_subscribe` or `ble_nus` call, and the
+    /// longest `timeout` a `ble_scan` call, may ask for.
+    static let maxCallDuration: TimeInterval = 300
+    /// How long `ble_subscribe` collects when the call gives no `duration`.
+    static let defaultSubscribeDuration: TimeInterval = 10
+    /// The time a call may take beyond its own duration, for connecting,
+    /// discovery and the operation: this, or four times the global `-t`
+    /// when that is longer.
+    static let setupAllowance: TimeInterval = 60
 
-    init() {
-        let globals = try! GlobalOptions.parse([])
+    private let server: Server
+    let router: CommandRouter
+    private let calls = ToolCallQueue()
+
+    /// `globals` are the options given before `mcp` (`blew -t 30 mcp`).
+    init(globals: GlobalOptions) {
         self.router = CommandRouter(
             globals: globals,
             isInteractiveMode: true,
@@ -29,7 +65,9 @@ final class BlewMCPServer {
                 blew is a macOS BLE CLI workbench. Use these tools to scan for BLE devices, \
                 connect to them, explore GATT services/characteristics, read/write values, \
                 subscribe to notifications, and run a BLE peripheral (GATT server). \
-                The server is stateful: connections persist across tool calls.
+                The server is stateful: connections persist across tool calls. \
+                Tool calls never overlap: each starts after the one before it returned. \
+                Send a call after the reply to the one it depends on.
                 """,
             capabilities: .init(tools: .init())
         )
@@ -51,81 +89,146 @@ final class BlewMCPServer {
 
     // MARK: - Tool call dispatch
 
+    /// Validate a call's arguments, then run it on the tool-call queue
+    /// within its budget. Throws `CancellationError` when the client
+    /// cancelled the call, so the swift-sdk sends no response.
     func handleToolCall(_ params: CallTool.Parameters) async throws -> CallTool.Result {
+        guard let tool = Self.toolDefinitions.first(where: { $0.name == params.name }) else {
+            throw MCPError.methodNotFound("Unknown tool: \(params.name)")
+        }
         let args = params.arguments ?? [:]
+        let command: ToolCommand
+        do {
+            try ToolArguments.validate(args, against: tool.inputSchema)
+            command = try makeCommand(params.name, args)
+        } catch let error as ToolArgumentError {
+            return buildMCPResult(CommandRouter.invalidArguments(error.message))
+        }
+        return try await execute(command, name: params.name, budget: callBudget(command))
+    }
 
-        let result: CommandResult
-        switch params.name {
+    /// Run a validated call on the tool-call queue and turn its outcome into
+    /// the call's result.
+    func execute(_ command: ToolCommand, name: String, budget: TimeInterval) async throws -> CallTool.Result {
+        let router = self.router
+        let outcome = await calls.run(budget: budget) { stop in
+            router.run(stoppingOn: stop) { command.run(router) }
+        }
+        switch outcome {
+        case .cancelled:
+            throw CancellationError()
+        case .finished(let result):
+            return buildMCPResult(result)
+        case .budgetExhausted(var result):
+            // A command that still succeeded is reported as it finished.
+            if result.exitCode != 0 {
+                result.exitCode = BlewExitCode.timeout.code
+                result.errors.append("\(name) did not finish within its \(Int(budget))-second budget")
+            }
+            return buildMCPResult(result)
+        }
+    }
+
+    /// The seconds a call may run before it is stopped: its own duration
+    /// plus the setup allowance.
+    func callBudget(_ command: ToolCommand) -> TimeInterval {
+        command.duration + max(Self.setupAllowance, 4 * (router.globals.timeout ?? 0))
+    }
+
+    /// The router work for a call to `name`, a tool of `toolDefinitions`,
+    /// whose arguments passed validation.
+    func makeCommand(_ name: String, _ args: [String: Value]) throws -> ToolCommand {
+        func plain(_ run: @escaping (CommandRouter) -> CommandResult) -> ToolCommand {
+            ToolCommand(duration: 0, run: run)
+        }
+        /// A streaming command: what it emits during the call comes first
+        /// in the result.
+        func streaming(duration: TimeInterval,
+                       _ run: @escaping (CommandRouter, @escaping @Sendable (CommandOutput) -> Void) -> CommandResult)
+            -> ToolCommand
+        {
+            ToolCommand(duration: duration) { router in
+                let collector = StreamCollector()
+                var result = run(router) { collector.collect($0) }
+                result.output = collector.close() + result.output
+                return result
+            }
+        }
+
+        switch name {
         case "ble_scan":
-            result = router.runScan(buildScanArgs(args))
+            let scanArgs = buildScanArgs(args)
+            return ToolCommand(duration: number(args["timeout"]) ?? 0) { $0.runScan(scanArgs) }
         case "ble_connect":
-            result = router.runConnect(buildConnectArgs(args))
+            let connectArgs = buildConnectArgs(args)
+            return plain { $0.runConnect(connectArgs) }
         case "ble_disconnect":
-            result = router.runDisconnect([])
+            return plain { $0.runDisconnect([]) }
         case "ble_status":
-            result = router.runStatus([])
+            return plain { $0.runStatus([]) }
         case "ble_gatt_services":
-            result = router.runGATT(["svcs"] + buildTargetingArgs(args))
+            let gattArgs = ["svcs"] + buildTargetingArgs(args)
+            return plain { $0.runGATT(gattArgs) }
         case "ble_gatt_tree":
             var gattArgs = ["tree"] + buildTargetingArgs(args)
             if args["descriptors"]?.boolValue == true { gattArgs.append("--descriptors") }
             if args["read_values"]?.boolValue == true { gattArgs.append("--read") }
-            result = router.runGATT(gattArgs)
+            return plain { [gattArgs] in $0.runGATT(gattArgs) }
         case "ble_gatt_chars":
             var gattArgs = ["chars"] + buildTargetingArgs(args)
             if let svc = args["service_uuid"]?.stringValue { gattArgs.append(svc) }
             if args["read_values"]?.boolValue == true { gattArgs.append("--read") }
-            result = router.runGATT(gattArgs)
+            return plain { [gattArgs] in $0.runGATT(gattArgs) }
         case "ble_gatt_descriptors":
             var gattArgs = ["desc"] + buildTargetingArgs(args)
             if let char = args["char_uuid"]?.stringValue { gattArgs.append(char) }
-            result = router.runGATT(gattArgs)
+            return plain { [gattArgs] in $0.runGATT(gattArgs) }
         case "ble_gatt_info":
             var gattArgs = ["info"]
             if let char = args["char_uuid"]?.stringValue { gattArgs.append(char) }
-            result = router.runGATT(gattArgs)
+            return plain { [gattArgs] in $0.runGATT(gattArgs) }
         case "ble_read":
-            result = router.runRead(buildReadArgs(args))
+            let readArgs = buildReadArgs(args)
+            return plain { $0.runRead(readArgs) }
         case "ble_write":
-            result = router.runWrite(buildWriteArgs(args))
+            let writeArgs = buildWriteArgs(args)
+            return plain { $0.runWrite(writeArgs) }
         case "ble_subscribe":
-            let collector = StreamCollector()
-            var r = router.runSub(buildSubArgs(args), emit: { collector.collect($0) })
-            r.output = collector.items + r.output
-            result = r
+            let subArgs = buildSubArgs(args)
+            let duration = number(args["duration"]) ?? Self.defaultSubscribeDuration
+            return streaming(duration: duration) { $0.runSub(subArgs, foregroundOnly: true, emit: $1) }
         case "ble_periph_advertise":
-            let collector = StreamCollector()
-            var r = router.runPeriph(buildPeriphAdvArgs(args), emit: { collector.collect($0) })
-            r.output = collector.items + r.output
-            result = r
+            let periphArgs = buildPeriphAdvArgs(args)
+            return streaming(duration: 0) { $0.runPeriph(periphArgs, emit: $1) }
         case "ble_periph_clone":
-            let collector = StreamCollector()
-            var r = router.runPeriph(buildPeriphCloneArgs(args), emit: { collector.collect($0) })
-            r.output = collector.items + r.output
-            result = r
+            let periphArgs = buildPeriphCloneArgs(args)
+            return streaming(duration: 0) { $0.runPeriph(periphArgs, emit: $1) }
         case "ble_periph_stop":
-            result = router.runPeriph(["stop"])
+            return plain { $0.runPeriph(["stop"]) }
         case "ble_periph_set":
-            result = router.runPeriph(buildPeriphSetArgs("set", args))
+            let periphArgs = buildPeriphSetArgs("set", args)
+            return plain { $0.runPeriph(periphArgs) }
         case "ble_periph_notify":
-            result = router.runPeriph(buildPeriphSetArgs("notify", args))
+            let periphArgs = buildPeriphSetArgs("notify", args)
+            return plain { $0.runPeriph(periphArgs) }
         case "ble_periph_status":
-            result = router.runPeriph(["status"])
+            return plain { $0.runPeriph(["status"]) }
         case "ble_nus":
-            let collector = StreamCollector()
-            var r: CommandResult
+            let options: NUSOptions
             do {
-                r = router.runNUS(try buildNUSOptions(args), emit: { collector.collect($0) })
+                options = try buildNUSOptions(args)
             } catch {
-                r = CommandRouter.nusInvalid(error)
+                throw ToolArgumentError(message: "\(error)")
             }
-            r.output = collector.items + r.output
-            result = r
+            return streaming(duration: options.linger) { $0.runNUS(options, emit: $1) }
         default:
-            throw MCPError.methodNotFound("Unknown tool: \(params.name)")
+            preconditionFailure("tool \(name) has a definition but no command")
         }
+    }
 
-        return buildMCPResult(result)
+    /// A validated `number` argument, in seconds.
+    func number(_ value: Value?) -> TimeInterval? {
+        value?.doubleValue ?? value?.intValue.map(Double.init)
     }
 
     // MARK: - Result conversion
@@ -273,7 +376,7 @@ final class BlewMCPServer {
 
     func buildScanArgs(_ args: [String: Value]) -> [String] {
         var result = buildTargetingArgs(args)
-        if let timeout = args["timeout"]?.doubleValue ?? args["timeout"]?.intValue.map(Double.init) {
+        if let timeout = number(args["timeout"]) {
             result += ["-t", "\(timeout)"]
         }
         return result
@@ -307,14 +410,9 @@ final class BlewMCPServer {
     func buildSubArgs(_ args: [String: Value]) -> [String] {
         var result = buildTargetingArgs(args)
         if let fmt = args["format"]?.stringValue { result += ["-f", fmt] }
-        if let dur = args["duration"]?.doubleValue ?? args["duration"]?.intValue.map(Double.init) {
-            result += ["-d", "\(dur)"]
-        }
-        let count = args["count"]?.intValue
-        if let count = count { result += ["-c", "\(count)"] }
-        if count == nil && args["duration"] == nil {
-            result += ["-c", "10"]
-        }
+        let duration = number(args["duration"]) ?? Self.defaultSubscribeDuration
+        result += ["-d", "\(duration)"]
+        if let count = args["count"]?.intValue { result += ["-c", "\(count)"] }
         if let char = args["char_uuid"]?.stringValue { result.append(char) }
         return result
     }
@@ -327,7 +425,7 @@ final class BlewMCPServer {
             targeting: buildTargetingArgs(args),
             sends: args["send"]?.stringValue.map { [$0] } ?? [],
             expect: args["expect"]?.stringValue,
-            duration: args["duration"]?.doubleValue ?? args["duration"]?.intValue.map(Double.init),
+            duration: number(args["duration"]),
             withResponse: withResponse == true,
             withoutResponse: withResponse == false,
             stdinAvailable: false)
@@ -490,7 +588,7 @@ extension BlewMCPServer {
                     "rssi_min":     .object(["type": .string("integer"), "description": .string("Minimum RSSI threshold (e.g. -70)")]),
                     "manufacturer": .object(["type": .string("integer"), "description": .string("Filter by manufacturer ID")]),
                     "pick":         .object(["type": .string("string"), "enum": .array([.string("strongest"), .string("first"), .string("only")]), "description": .string("Return only the device this strategy picks: strongest RSSI, first discovered, or the only match (error when several match)")]),
-                    "timeout":      .object(["type": .string("number"), "description": .string("Scan duration in seconds (default: 5)")]),
+                    "timeout":      .object(["type": .string("number"), "minimum": .int(0), "maximum": .double(maxCallDuration), "description": .string("Scan duration in seconds (default: 5, at most \(Int(maxCallDuration)))")]),
                 ]),
             ]),
             annotations: .init(readOnlyHint: true, openWorldHint: true)
@@ -611,14 +709,14 @@ extension BlewMCPServer {
         ),
         Tool(
             name: "ble_subscribe",
-            description: "Subscribe to notifications on a GATT characteristic. Collects notifications for the specified duration or count (defaults to count=10), then returns all values at once.",
+            description: "Subscribe to notifications on a GATT characteristic. Collects notifications for `duration` seconds (default \(Int(defaultSubscribeDuration)), at most \(Int(maxCallDuration))), or until `count` have arrived when that comes first, then returns all values at once.",
             inputSchema: .object([
                 "type": .string("object"),
                 "properties": .object(targetingProperties.merging([
                     "char_uuid": .object(["type": .string("string"), "description": .string("Characteristic UUID to subscribe to")]),
                     "format":    .object(["type": .string("string"), "enum": .array([.string("hex"), .string("utf8"), .string("uint8"), .string("uint16le"), .string("uint32le"), .string("float32le"), .string("base64"), .string("raw")]), "description": .string("Value format (default: hex)")]),
-                    "duration":  .object(["type": .string("number"), "description": .string("Collection duration in seconds")]),
-                    "count":     .object(["type": .string("integer"), "description": .string("Number of notifications to collect (default: 10)")]),
+                    "duration":  .object(["type": .string("number"), "minimum": .int(0), "maximum": .double(maxCallDuration), "description": .string("Collection duration in seconds (default: \(Int(defaultSubscribeDuration)), at most \(Int(maxCallDuration)))")]),
+                    "count":     .object(["type": .string("integer"), "minimum": .int(1), "description": .string("Stop after this many notifications (default: no limit; the call still ends after `duration`)")]),
                 ]) { $1 }),
                 "required": .array([.string("char_uuid")]),
             ]),
@@ -696,7 +794,7 @@ extension BlewMCPServer {
                 "properties": .object(targetingProperties.merging([
                     "send":          .object(["type": .string("string"), "description": .string("Text to send; printf-style escapes \\n \\r \\t \\0 \\\\ \\xHH are decoded. No newline is added.")]),
                     "expect":        .object(["type": .string("string"), "description": .string("Text to wait for (same escapes); the call succeeds once it arrives")]),
-                    "duration":      .object(["type": .string("number"), "description": .string("Seconds to listen after sending (default 1); with expect, the deadline for it (default 5)")]),
+                    "duration":      .object(["type": .string("number"), "minimum": .int(0), "maximum": .double(maxCallDuration), "description": .string("Seconds to listen after sending (default 1); with expect, the deadline for it (default 5); at most \(Int(maxCallDuration))")]),
                     "with_response": .object(["type": .string("boolean"), "description": .string("true = write with response, false = without response, omit = auto")]),
                 ]) { $1 }),
             ]),

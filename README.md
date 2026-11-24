@@ -425,7 +425,7 @@ Writes data to a characteristic. Connects automatically if no connection is acti
 blew sub [-n <name>] [-i <id>] [-f <format>] [-d <sec>] [-c <count>] [-b] <char-uuid>
 ```
 
-Subscribes to a characteristic and streams received values to stdout, one event per line. Connects automatically if no connection is active. Stops on `Ctrl-C`, or when a duration/count limit is reached. If the connection ends first, `sub` fails: exit code 5 when the device disconnects, 3 when Bluetooth is turned off or blew loses Bluetooth permission. A background subscription reports the same as a `sub error` line.
+Subscribes to a characteristic and streams received values to stdout, one event per line. Connects automatically if no connection is active. Stops on `Ctrl-C`, or when a duration/count limit is reached. If the connection ends first, `sub` fails: exit code 5 when the device disconnects, 3 when Bluetooth is turned off or blew loses Bluetooth permission. If the device does not confirm that notifications are on within the operation timeout (`-t`, default 5 seconds), `sub` fails with exit code 4. A background subscription reports the same as a `sub error` line.
 
 | Flag | Description |
 |------|-------------|
@@ -904,6 +904,18 @@ The server is stateful: BLE connections and peripheral state persist across tool
 | `ble_nus` | Send text over the Nordic UART Service and collect the reply, optionally waiting for an expected text |
 
 All tools that interact with a remote device accept optional targeting parameters (`name`, `device_id`, `service`, `manufacturer`, `rssi_min`, `pick`) and auto-connect if not already connected. A connected device that does not match the parameters given is replaced by the named device (see [Device targeting options](#device-targeting-options)). With `pick`, `ble_scan` returns only the device that strategy picks.
+
+Global options given before `mcp` apply to every tool call: `blew -t 30 mcp` gives each BLE operation a 30-second timeout.
+
+### Calls, arguments and time limits
+
+- **One call at a time.** Tool calls never overlap: a call that arrives while another runs waits for it to return, so two calls do not switch the device under each other. Calls sent without waiting for the previous reply may start in either order; send a call after the reply to the one it depends on.
+- **Arguments are checked against the tool's input schema** before the call runs. An argument the tool does not declare, a value of the wrong JSON type (`"duration": "5"` instead of `5`), a value outside the listed `enum`, `minimum` or `maximum`, or a missing required argument fails the call with exit code 6 and the reason; nothing is ignored.
+- **Durations.** `ble_subscribe` collects for `duration` seconds, 10 when the call gives none, and stops earlier once `count` notifications (no limit by default) have arrived. `ble_subscribe` and `ble_nus` accept a `duration`, and `ble_scan` a `timeout`, of at most 300 seconds.
+- **Every call has a time budget**: its own duration (the scan `timeout`, the subscribe or NUS `duration`; zero for the other tools) plus 60 seconds for connecting and setup, or plus four times `-t` when that is longer. The budget counts from when the call starts, not while it waits its turn. A call still running when its budget runs out is stopped and fails with exit code 4, with whatever output the command returned (the notifications a subscription received so far; a scan stopped this way returns no devices).
+- **Subscriptions run in the foreground.** `ble_subscribe` always returns its notifications with the call; there is no background subscription over MCP.
+- **Cancellation.** When the client cancels a call (`notifications/cancelled`), the call stops and the server sends no response for it; a cancelled call that was still waiting its turn never starts.
+- **SIGINT** (`kill -INT`) stops the call that is running, which fails with exit code 130; the server keeps serving. A SIGINT while no call runs ends the server with exit code 130, and SIGTERM ends it with 143.
 
 ### Example structured output
 

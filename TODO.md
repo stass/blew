@@ -14,24 +14,7 @@ later release. Delete an item in the commit that fixes it, citing its ID
 
 ## P0: release blockers (0.3.0)
 
-- [ ] **B7. Concurrent MCP tool calls race on the shared router and BLE
-  state.** `Sources/blew/MCP/MCPServer.swift:54`. The swift-sdk runs each
-  request in its own Task. Single-slot continuations
-  (`BLEEventProcessor.swift:78-143`) are overwritten, so calls hang.
-  `lastScanResults`, `backgroundSubTasks`, `commandIsRunning` and
-  `interruptRequested` race. Handlers that block on `DispatchSemaphore` hold
-  threads from the cooperative pool; enough stuck calls deadlock the whole
-  server *(plausible)*. Auto-connect replaces a connected device that does
-  not match a call's targeting, so a concurrent `ble_read` with `name: B`
-  disconnects the device a running `ble_subscribe` or `ble_nus` on A uses.
-  Fix: serialize `handleToolCall`, and stop blocking pool threads on
-  semaphores.
-- [ ] **B8. `ble_subscribe` has no deadline and cannot be cancelled.**
-  `MCPServer.swift:310-316`, `CommandRouter.swift:965`. With no `duration`
-  only `-c 10` is passed, and MCP `notifications/cancelled` does not reach the
-  inner Task. `duration: "5"` (a string) passes neither `-c` nor `-d`, so the
-  subscription is unbounded. Subscription setup and NUS writes also have no
-  operation deadline (`CommandRouter.swift:948`).
+None open.
 
 ## P1: important (0.3.0)
 
@@ -135,21 +118,16 @@ later release. Delete an item in the commit that fixes it, citing its ID
 - [ ] **N4. Reconnect eligibility uses one connection-state sample.**
   `CommandRouter+NUS.swift:260`. A write error that arrives before the
   disconnect callback exits 5 instead of reconnecting.
+- [ ] **N5. NUS writes have no operation deadline in the CLI.**
+  `CommandRouter+NUS.swift:307-310`. A write with response that the device
+  never acknowledges, or a write without response that never gets
+  flow-control credit, blocks `blew nus` until Ctrl-C. MCP `ble_nus` calls
+  end by their time budget.
 
 ### MCP
 
-- [ ] **M1. The MCP server ignores global options.** `MCPServer.swift:19`
-  parses `[]` instead of using `GlobalOptions.current`, so `blew -t 30 mcp`
-  and `blew -v mcp` have no effect.
-- [ ] **M2. The response collector keeps growing after the response
-  returns.** `MCPServer.swift:9-12`, `:97`, `CommandRouter.swift:1500`.
-  Advertising events keep appending with no lock. `ble_nus` durations of up
-  to a year also accumulate without bound.
-- [ ] **M3. Deprecated `.text(_:)`.** `MCPServer.swift:147`, `:157`. Use
+- [ ] **M3. Deprecated `.text(_:)`.** `MCPServer.swift:250`, `:260`. Use
   `.text(text:annotations:_meta:)`. These are the only build warnings.
-- [ ] **M4. `ble_periph_advertise` drops `services` entries that are not
-  strings.** `MCPServer.swift:339-343`. `"services": ["180D", 6159]`
-  advertises only `180D` and reports success.
 
 ### Output
 
@@ -179,6 +157,12 @@ later release. Delete an item in the commit that fixes it, citing its ID
   `CommandRouter.swift:25`.
 - [ ] **C2. `periph clone --save` reports success when the write fails.**
   `CommandRouter.swift:1606-1613` (`try?`).
+- [ ] **C8. Option values can become `sub -b`.** `CommandRouter.swift`
+  (`runSub`, `backgroundFlags`) tests every argument for `-b` and `--bg`,
+  option values included, so in the REPL `sub -n -b 2A19` starts a
+  background subscription. MCP calls are immune (`foregroundOnly`), but the
+  other MCP builders still pass free text through a command line; build them
+  from typed fields, as `ble_nus` does.
 - [ ] **C4. Values starting with `-` cannot be written.**
   `CommandRouter.swift:799`, `:804`. `write -f float32le fff1 -1.5` fails,
   even after `--`.
@@ -281,7 +265,11 @@ later release. Delete an item in the commit that fixes it, citing its ID
 - [ ] Config loading: `fileNotFound` hides permission errors, and
   `Data(contentsOf:)` has no size or file-type check, so an MCP
   `config_file` of `/dev/zero` exhausts memory and a FIFO blocks before any
-  deadline. `PeripheralConfig.swift` (`load`).
+  deadline. `PeripheralConfig.swift` (`load`). With MCP calls serialized, a
+  call blocked there (or on a `save_file` FIFO) stalls every later call, and
+  its budget cannot end it: the budget acts only through `waitInterruptible`.
+  A cancelled call still waiting its turn also stays suspended until it
+  reaches the front of the queue.
 - [ ] `periph clone` of a device with the same characteristic UUID in two
   services (two Battery services) collides in the GATT server's tables,
   which are keyed by UUID alone. Config files reject such duplicates.

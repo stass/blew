@@ -8,7 +8,7 @@ import BLEManager
 // MARK: - Helpers
 
 private func makeServer() -> BlewMCPServer {
-    BlewMCPServer()
+    BlewMCPServer(globals: try! GlobalOptions.parse([]))
 }
 
 private let encoder: JSONEncoder = {
@@ -202,14 +202,6 @@ final class MCPArgBuilderTests: XCTestCase {
 
     // MARK: buildSubArgs
 
-    func testSubArgsDefaultCount10WhenNeitherSpecified() {
-        let args: [String: Value] = ["char_uuid": .string("2A19")]
-        let result = server.buildSubArgs(args)
-        XCTAssertTrue(result.contains("-c"))
-        let idx = result.firstIndex(of: "-c")!
-        XCTAssertEqual(result[result.index(after: idx)], "10")
-    }
-
     func testSubArgsExplicitCount() {
         let args: [String: Value] = ["char_uuid": .string("2A19"), "count": .int(5)]
         let result = server.buildSubArgs(args)
@@ -221,8 +213,7 @@ final class MCPArgBuilderTests: XCTestCase {
     func testSubArgsDurationOverridesDefault() {
         let args: [String: Value] = ["char_uuid": .string("2A19"), "duration": .double(3.0)]
         let result = server.buildSubArgs(args)
-        XCTAssertTrue(result.contains("-d"))
-        // When duration is specified, -c 10 default should NOT be added
+        XCTAssertEqual(result.firstIndex(of: "-d").map { result[$0 + 1] }, "3.0")
         XCTAssertFalse(result.contains("-c"))
     }
 

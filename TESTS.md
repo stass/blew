@@ -101,6 +101,10 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 
 `MCPToolDefinitionTests` — verifies the static `toolDefinitions` array: correct count (19 tools), all expected tool names present, `readOnlyHint` and `idempotentHint` annotations, and required-field schemas for `ble_gatt_info`, `ble_write`, and `ble_gatt_chars`.
 
+`MCPArgumentValidationTests` — arguments are checked against the tool's input schema before anything runs: a string `duration` or `count`, a `duration` above 300 s, a `count` of 0, an undeclared argument, a non-string `services` item and a `pick` outside its enum are errors; `ble_subscribe` without `duration` collects for the documented 10 s; the global options reach the router and widen the call budget; a collector drops what arrives after its call returned.
+
+`ToolCallQueueTests` — the tool-call queue without a device: concurrent calls run one at a time, the first arrival first; cancelling a running call stops it within a second; a call cancelled while waiting its turn never starts; a call past its budget is stopped; and a `StopRequest` ends the router's `waitInterruptible` as interrupted.
+
 `MCPIntegrationTests` — launches `blew mcp` as a subprocess and communicates via JSON-RPC over stdio. Tests the full MCP protocol handshake (`initialize`), tool listing (`tools/list`, 19 tools), and a `tools/call` for `ble_gatt_info` verifying structured content and text output. Tests are skipped if the binary is not built.
 
 ## Manual checks (radio)

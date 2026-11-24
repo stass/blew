@@ -12,6 +12,9 @@ final class CommandRouter {
     /// The scan record of the device `connect(to:)` last connected, so a
     /// later scan that no longer sees it does not lose what it advertised.
     private var connectedAdvertisement: DiscoveredDevice?
+    /// The caller's request to stop the command that is running, besides
+    /// SIGINT; set only inside `run(stoppingOn:_:)`.
+    private var stopRequest: StopRequest?
     private var backgroundPeriphTask: Task<Void, Never>?
     private var backgroundSubTasks: [String: Task<Void, Never>] = [:]
 
@@ -208,7 +211,7 @@ final class CommandRouter {
         try scanDuration([]) ?? 5.0
     }
 
-    private static func invalidArguments(_ message: String) -> CommandResult {
+    static func invalidArguments(_ message: String) -> CommandResult {
         var result = CommandResult()
         result.errors.append(message)
         result.exitCode = BlewExitCode.invalidArguments.code
@@ -846,7 +849,11 @@ final class CommandRouter {
         return result
     }
 
-    func runSub(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
+    /// `foregroundOnly` (the MCP server) leaves `-b` and `--bg` without
+    /// meaning, so no argument text can start a background subscription
+    /// that outlives the call.
+    func runSub(_ args: [String], foregroundOnly: Bool = false,
+                emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
         let subOpts = Self.targetingOptionsWithValue.union(["-f", "--format", "-d", "--duration", "-c", "--count"])
         let args = expandArgs(args, optionsWithValue: subOpts)
         if let first = args.first {
@@ -866,8 +873,9 @@ final class CommandRouter {
             return result
         }
 
-        let background = args.contains("--bg") || args.contains("-b")
-        let positionals = positionalArgs(args.filter { $0 != "--bg" && $0 != "-b" }, optionsWithValue: subOpts)
+        let backgroundFlags: Set<String> = foregroundOnly ? [] : ["--bg", "-b"]
+        let background = args.contains { backgroundFlags.contains($0) }
+        let positionals = positionalArgs(args.filter { !backgroundFlags.contains($0) }, optionsWithValue: subOpts)
         // Arguments are checked before auto-connect, which may replace the connected device.
         guard let charInput = positionals.first else {
             return Self.invalidArguments("missing characteristic UUID")
@@ -885,6 +893,10 @@ final class CommandRouter {
         }
         let fmt = parseStringOption(args, short: "-f", long: "--format", optionsWithValue: subOpts) ?? "hex"
         let maxCount = parseIntOption(args, short: "-c", long: "--count", optionsWithValue: subOpts)
+        // Enabling notifications waits for the device to confirm; that wait
+        // has the operation timeout, like a read.
+        let setupTimeout = globals.timeout ?? 5.0
+        let manager = self.manager
 
         if background {
             guard isInteractiveMode else {
@@ -896,7 +908,9 @@ final class CommandRouter {
             let capturedRenderer = self.renderer
             backgroundSubTasks[charUUID] = Task {
                 do {
-                    let stream = try await manager.subscribe(characteristicUUID: charUUID)
+                    let stream = try await Self.withDeadline(setupTimeout) {
+                        try await manager.subscribe(characteristicUUID: charUUID)
+                    }
                     try await Self.forEachNotification(stream, maxCount: maxCount, duration: duration) { data in
                         capturedRenderer.renderLive("[\(charUUID)] \(DataFormatter.format(data, as: fmt))")
                     }
@@ -920,7 +934,9 @@ final class CommandRouter {
         let task = Task {
             defer { semaphore.signal() }
             do {
-                let stream = try await manager.subscribe(characteristicUUID: charUUID)
+                let stream = try await Self.withDeadline(setupTimeout) {
+                    try await manager.subscribe(characteristicUUID: charUUID)
+                }
                 let charName = BLENames.name(for: charUUID, category: .characteristic)
                 try await Self.forEachNotification(stream, maxCount: maxCount, duration: duration) { data in
                     let ts = ISO8601DateFormatter.shared.string(from: Date())
@@ -1014,13 +1030,48 @@ final class CommandRouter {
         }
     }
 
+    /// Run `operation`, throwing `BLEError.timeout` and cancelling it when
+    /// it has not finished after `seconds`.
+    static func withDeadline<T: Sendable>(_ seconds: TimeInterval,
+                                          _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw BLEError.timeout
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw CancellationError() }
+            return first
+        }
+    }
+
     // MARK: - Interrupt-aware wait
+
+    /// Run `body` as one command with `request` attached: while it runs,
+    /// every `waitInterruptible` stops when the request is set, as it does
+    /// on SIGINT. The whole of `body` is one signal span, like a REPL
+    /// command, so a SIGINT between two waits stops the command at its next
+    /// wait instead of ending the process. The MCP server runs each tool
+    /// call this way.
+    func run<T>(stoppingOn request: StopRequest, _ body: () -> T) -> T {
+        let outer = stopRequest
+        stopRequest = request
+        let signals = ProcessSignals.shared
+        signals.commandStarted()
+        defer {
+            signals.commandFinished()
+            stopRequest = outer
+        }
+        return body()
+    }
 
     enum CommandOutcome { case completed, interrupted, timedOut }
 
-    /// Block the calling (main) thread until the semaphore is signalled, polling
-    /// every 50 ms. If a Ctrl-C interrupt arrives, the task is cancelled and we
-    /// wait for it to finish before returning `.interrupted`. If a timeout is
+    /// Block the calling thread until the semaphore is signalled, polling
+    /// every 50 ms. If a Ctrl-C interrupt arrives, or the attached
+    /// `StopRequest` is set, the task is cancelled and we wait for it to
+    /// finish before returning `.interrupted`. If a timeout is
     /// provided and the deadline passes before the task finishes, the task is
     /// cancelled and we return `.timedOut`.
     @discardableResult
@@ -1034,7 +1085,7 @@ final class CommandRouter {
         signals.commandStarted()
         defer { signals.commandFinished() }
         while semaphore.wait(timeout: .now() + 0.05) == .timedOut {
-            if signals.interruptRequested {
+            if signals.interruptRequested || stopRequest?.reason != nil {
                 task.cancel()
                 _ = semaphore.wait(timeout: .now() + 2.0)
                 return .interrupted

@@ -293,10 +293,13 @@ extension CommandRouter {
         let semaphore = DispatchSemaphore(value: 0)
         let outcome = Locked<NUSOutcome>(.linkLost("session did not start"))
         let manager = self.manager
+        let setupTimeout = globals.timeout ?? 5.0
         let task = Task {
             defer { semaphore.signal() }
             do {
-                let received = try await manager.subscribe(characteristicUUID: NUS.tx)
+                let received = try await Self.withDeadline(setupTimeout) {
+                    try await manager.subscribe(characteristicUUID: NUS.tx)
+                }
                 // Chunks fit one ATT packet whatever the write type, so the
                 // device never needs a long (prepared) write.
                 let maxLength = try manager.maximumWriteLength(withResponse: false)
