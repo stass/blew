@@ -93,4 +93,19 @@ final class REPLScriptTests: XCTestCase {
         openFDs.append(dir)
         XCTAssertEqual(exitCode { try repl(inputFile: dir).run() }, BlewExitCode.operationFailed.code)
     }
+
+    /// A Ctrl-C seen during a line of a script stops the script after that
+    /// line, even when the line's own operation finished (here `gatt info`,
+    /// which has no wait to see it).
+    func testCtrlCStopsTheScriptAfterTheCurrentLine() {
+        let fd = inputPipe("gatt info 2A19\ngatt info 2A19\n")
+        let signals = ProcessSignals.shared
+        // Stand in for the Ctrl-C arriving while the script runs: an open
+        // span makes the signal a stop request rather than an exit.
+        signals.commandStarted()
+        defer { signals.commandFinished() }
+        signals.handle(.interrupt)
+        XCTAssertEqual(exitCode { try repl(inputFile: fd).run() }, BlewExitCode.interrupted.code)
+        XCTAssertEqual(unread(fd), "gatt info 2A19\n", "the script went on after Ctrl-C")
+    }
 }

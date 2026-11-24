@@ -56,6 +56,12 @@ final class REPL {
             }
         }
 
+        // Piped input is a script: it runs inside one span, like `exec`, so
+        // a Ctrl-C seen by any line stops the lines after it.
+        let scriptSpan = !isInteractive
+        if scriptSpan { ProcessSignals.shared.commandStarted() }
+        defer { if scriptSpan { ProcessSignals.shared.commandFinished() } }
+
         while true {
             do {
                 // LineNoise writes the prompt straight to the terminal, so
@@ -76,8 +82,10 @@ final class REPL {
                 ProcessSignals.shared.commandStarted()
                 let result = router.dispatch(trimmed)
                 ProcessSignals.shared.commandFinished()
-                if !isInteractive && result.exitCode != 0 {
-                    throw BlewExitCode(result.exitCode)
+                if !isInteractive {
+                    if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
+                    // The line's last operation finished as Ctrl-C arrived.
+                    if ProcessSignals.shared.interruptRequested { throw BlewExitCode.interrupted }
                 }
 
             } catch LinenoiseError.CTRL_C {

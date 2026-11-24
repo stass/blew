@@ -18,11 +18,13 @@ enum HandledSignal: CaseIterable {
 }
 
 /// Whether a command is running that a SIGINT can stop. A command runs
-/// inside a span: each `CommandRouter.waitInterruptible`, and in the REPL
-/// the whole command from Enter to the next prompt.
+/// inside a span: a whole one-shot CLI command or `exec` script (opened by
+/// `Blew.main`), a whole piped REPL script, an interactive REPL command
+/// from Enter to the next prompt, an MCP tool call, and each
+/// `CommandRouter.waitInterruptible` within them.
 enum CommandPhase: Equatable {
-    /// No span is open: at the REPL prompt, parsing a CLI command's
-    /// arguments, or rendering a CLI command's result.
+    /// No span is open: at the interactive REPL prompt, between MCP tool
+    /// calls, or parsing a CLI command's arguments.
     case idle
     /// A span is open and its command stops when asked.
     case running
@@ -141,7 +143,9 @@ final class ProcessSignals: @unchecked Sendable {
         lock.withLock { exitHook = hook }
     }
 
-    private func handle(_ signal: HandledSignal) {
+    /// Act on one delivered signal. Internal so tests can deliver a signal
+    /// without raising it.
+    func handle(_ signal: HandledSignal) {
         let response: SignalResponse = lock.withLock {
             let decision = SignalPolicy.respond(to: signal, in: phase)
             if decision.next == .interrupting { interrupted = true }

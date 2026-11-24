@@ -47,6 +47,12 @@ struct Blew: AsyncParsableCommand {
         ProcessSignals.shared.install()
         do {
             var command = try parseAsRoot()
+            // Every command runs inside one span, so a Ctrl-C seen by any of
+            // its waits stops the rest of it. The REPL and the MCP server
+            // open a span per command or tool call instead.
+            let outerSpan = Self.opensOuterSpan(for: command)
+            if outerSpan { ProcessSignals.shared.commandStarted() }
+            defer { if outerSpan { ProcessSignals.shared.commandFinished() } }
             if var asyncCommand = command as? AsyncParsableCommand {
                 try await asyncCommand.run()
             } else {
@@ -94,4 +100,21 @@ func cleanupBeforeExit() {
         semaphore.signal()
     }
     _ = semaphore.wait(timeout: .now() + 2.0)
+}
+
+/// A command that opens its own signal spans, one per command it runs (the
+/// REPL) or per tool call (the MCP server), instead of running inside one
+/// span for its whole life.
+protocol OpensOwnCommandSpans {}
+
+extension Blew: OpensOwnCommandSpans {}
+#if MCP_ENABLED
+extension MCPCommand: OpensOwnCommandSpans {}
+#endif
+
+extension Blew {
+    /// Whether `main` runs `command` inside one signal span.
+    static func opensOuterSpan(for command: ParsableCommand) -> Bool {
+        !(command is OpensOwnCommandSpans)
+    }
 }

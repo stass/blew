@@ -283,13 +283,22 @@ final class ToolCallQueueTests: XCTestCase {
         XCTAssertEqual(ran.wait(timeout: .now() + 0.2), .timedOut, "an operation started after the stop")
     }
 
-    /// A stop that arrives while an operation runs is a stop, even when the
-    /// operation then finishes before the wait first looks at the request.
-    func testStopRequestedDuringAQuickOperationIsAStop() throws {
+    /// A stop that arrives while an operation finishes leaves that
+    /// operation's result alone (a completed write stays completed), and
+    /// keeps the next operation from starting.
+    func testAnOperationThatFinishesKeepsItsResultButTheNextDoesNotStart() throws {
         let router = CommandRouter(globals: try GlobalOptions.parse([]))
         let stop = StopRequest()
-        let outcome = router.run(stoppingOn: stop) { router.waitInterruptible { stop.stop(.cancelled) } }
-        XCTAssertEqual(outcome, .interrupted)
+        var secondRan = false
+        let outcomes = router.run(stoppingOn: stop) {
+            (router.waitInterruptible { stop.stop(.cancelled) },
+             router.waitInterruptible { secondRan = true })
+        }
+        // .completed when the operation finishes before the 50 ms poll sees
+        // the stop (the usual case); .interrupted if the poll wins the race.
+        XCTAssertNotEqual(outcomes.0, .timedOut)
+        XCTAssertEqual(outcomes.1, .interrupted)
+        XCTAssertFalse(secondRan)
     }
 
     /// Subscription setup waits for the device to confirm through
@@ -309,3 +318,33 @@ final class ToolCallQueueTests: XCTestCase {
     }
 }
 #endif
+
+/// One-shot CLI commands and `exec` have no span of their own: `main` opens
+/// one around the whole command, so a Ctrl-C that one wait misses still
+/// stops the command's next step.
+final class CommandSpanTests: XCTestCase {
+
+    func testMainOpensAnOuterSpanExceptForTheREPLAndMCP() throws {
+        XCTAssertTrue(Blew.opensOuterSpan(for: try WriteCommand.parse(["fff1", "01"])))
+        XCTAssertTrue(Blew.opensOuterSpan(for: try ExecCommand.parse(["status"])))
+        XCTAssertFalse(Blew.opensOuterSpan(for: try Blew.parse([])))
+        #if MCP_ENABLED
+        XCTAssertFalse(Blew.opensOuterSpan(for: try MCPCommand.parse([])))
+        #endif
+    }
+
+    /// The `write -n X` case: the Ctrl-C lands as auto-connect finishes, so
+    /// that wait completes, and the write must then not start.
+    func testACtrlCAtTheEndOfOneStepStopsTheNextStep() throws {
+        let router = CommandRouter(globals: try GlobalOptions.parse([]))
+        let signals = ProcessSignals.shared
+        signals.commandStarted()
+        defer { signals.commandFinished() }
+        var writeRan = false
+        let connect = router.waitInterruptible { signals.handle(.interrupt) }
+        let write = router.waitInterruptible { writeRan = true }
+        XCTAssertNotEqual(connect, .timedOut)
+        XCTAssertEqual(write, .interrupted)
+        XCTAssertFalse(writeRan, "the write started after Ctrl-C")
+    }
+}

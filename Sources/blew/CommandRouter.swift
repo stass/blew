@@ -1046,12 +1046,16 @@ final class CommandRouter {
 
     /// Run `operation` in a Task and block the calling thread until it
     /// finishes, polling every 50 ms. A stop (a Ctrl-C interrupt, or the
-    /// attached `StopRequest` set) gives `.interrupted`:
-    ///   - requested before `waitInterruptible` is called, the operation
-    ///     never starts;
-    ///   - requested while it runs, the task is cancelled and waited for;
-    ///   - requested before the wait saw the operation finish, it still
-    ///     counts, so a command never reports success after a stop.
+    /// attached `StopRequest` set):
+    ///   - requested before `waitInterruptible` is called keeps the
+    ///     operation from starting, and gives `.interrupted`;
+    ///   - seen by the poll while the operation runs cancels the task, waits
+    ///     for it, and gives `.interrupted`;
+    ///   - arriving as the operation finishes, before the poll sees it,
+    ///     leaves the result `.completed`: the operation did happen. The stop
+    ///     stays set until the command's outermost span closes (see
+    ///     `ProcessSignals`), so the next wait of the same command does not
+    ///     start its operation.
     /// If a timeout is provided and the deadline passes before the
     /// operation finishes, the task is cancelled and we return `.timedOut`.
     func waitInterruptible(
@@ -1081,7 +1085,9 @@ final class CommandRouter {
                 return .timedOut
             }
         }
-        return stopRequested() ? .interrupted : .completed
+        // The operation finished: report what it did, even if a stop arrived
+        // while it ran. The stop still keeps the next operation from starting.
+        return .completed
     }
 
     // MARK: - Auto-connect
