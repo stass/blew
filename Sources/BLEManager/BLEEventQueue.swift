@@ -9,7 +9,8 @@ import Foundation
 /// `droppedScanResults`. A scan result is the only event that answers no
 /// wait and that the device repeats (each advertisement is a new result),
 /// so dropping one under an `allowDuplicates` flood loses at most an RSSI
-/// update. Every other event answers a wait or ends one (a connect, a GATT
+/// update; in a scan without duplicates, where CoreBluetooth reports a
+/// device about once, a dropped result can lose the device. Every other event answers a wait or ends one (a connect, a GATT
 /// request, a disconnect, a Bluetooth state change) or is a notification
 /// value that is not sent again; dropping one would hang its wait or lose
 /// data silently. Their number is bounded by what the device sends while

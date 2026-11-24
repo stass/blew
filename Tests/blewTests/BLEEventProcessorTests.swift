@@ -601,7 +601,7 @@ final class BLEEventProcessorTests: XCTestCase {
     /// CoreBluetooth's scan is appended to `calls` (when given) as "start"
     /// and "stop".
     private func registerScan(_ processor: BLEEventProcessor, timeout: TimeInterval? = nil,
-                              calls: SharedBox<[String]> = SharedBox([])) -> AsyncThrowingStream<DiscoveredDevice, Error> {
+                              calls: SharedBox<[String]> = SharedBox([])) -> ScanStream {
         let stream = processor.beginScan(timeout: timeout, on: gattQueue,
                                          start: { calls.update { $0.append("start") } },
                                          stop: { calls.update { $0.append("stop") } })
@@ -620,7 +620,7 @@ final class BLEEventProcessorTests: XCTestCase {
         private let ended = DispatchSemaphore(value: 0)
         private let task: Task<Void, Never>
 
-        init(_ stream: AsyncThrowingStream<DiscoveredDevice, Error>) {
+        init(_ stream: ScanStream) {
             let names = self.names, end = self.end, ended = self.ended
             task = Task {
                 do {
@@ -682,6 +682,83 @@ final class BLEEventProcessorTests: XCTestCase {
         let scan = ScanReader(registerScan(processor, timeout: 0.05, calls: calls))
         guard case .success = scan.outcome() else { return XCTFail("the scan did not finish at its deadline") }
         XCTAssertEqual(calls.get(), ["start", "stop"])
+    }
+
+    private func advertisement(_ peripheral: UUID, name: String? = nil, rssi: Int,
+                               services: [String] = [], manufacturer: [UInt8]? = nil) -> BLEEvent {
+        .didDiscover(peripheralId: peripheral, name: name, rssi: rssi, serviceUUIDs: services,
+                     manufacturerData: manufacturer.map { Data($0) })
+    }
+
+    /// A reader slower than the advertisements (a `scan -w` redraw in a
+    /// crowded room) gets each device once, its advertisements merged into
+    /// one record with the latest RSSI, instead of a backlog of every one.
+    func testASlowScanReaderGetsEachDeviceOnceWithItsAdvertisementsMerged() async throws {
+        let processor = poweredOn()
+        let a = UUID(), b = UUID()
+        var devices = registerScan(processor, timeout: 0.3).makeAsyncIterator()
+        processor.dispatch(advertisement(a, name: "Alpha", rssi: -80, services: ["180F"]))
+        processor.dispatch(advertisement(b, name: "Beta", rssi: -60))
+        processor.dispatch(advertisement(a, rssi: -70, manufacturer: [0x59, 0x00]))
+        processor.dispatch(advertisement(a, rssi: -40))
+
+        let first = try await devices.next()
+        XCTAssertEqual(first, DiscoveredDevice(identifier: a.uuidString, name: "Alpha", rssi: -40,
+                                               serviceUUIDs: ["180F"], manufacturerData: Data([0x59, 0x00])))
+        let second = try await devices.next()
+        XCTAssertEqual(second?.identifier, b.uuidString)
+        let end = try await devices.next()
+        XCTAssertNil(end, "a device the reader already got was delivered again")
+    }
+
+    /// A device first seen while the reader is busy is not lost, and the
+    /// results waiting for the reader come in the order their devices were
+    /// first seen; they come before the error that ended the scan.
+    func testScanResultsWaitingForABusyReaderKeepTheirFirstSightingOrder() async throws {
+        let processor = poweredOn()
+        let a = UUID(), c = UUID(), d = UUID()
+        var devices = registerScan(processor).makeAsyncIterator()
+        processor.dispatch(advertisement(a, name: "A", rssi: -50))
+        let read = try await devices.next()
+        XCTAssertEqual(read?.identifier, a.uuidString)
+
+        processor.dispatch(advertisement(c, name: "C", rssi: -60))
+        processor.dispatch(advertisement(a, rssi: -30))
+        processor.dispatch(advertisement(c, rssi: -20))
+        processor.dispatch(advertisement(d, name: "D", rssi: -90))
+        processor.dispatch(advertisement(a, rssi: -10))
+        processor.dispatch(.centralStateChanged(.poweredOff))
+
+        var waiting: [DiscoveredDevice] = []
+        do {
+            while let device = try await devices.next() { waiting.append(device) }
+            XCTFail("the scan ended without an error")
+        } catch {
+            guard case BLEError.bluetoothUnavailable = error else { return XCTFail("unexpected error \(error)") }
+        }
+        XCTAssertEqual(waiting.map(\.identifier), [c, a, d].map(\.uuidString))
+        XCTAssertEqual(waiting.map(\.rssi), [-20, -10, -90])
+        XCTAssertEqual(waiting.map(\.name), ["C", nil, "D"],
+                       "a device already read is merged only with what came after it")
+    }
+
+    /// An interrupted reader stops at once and ends the scan, also while
+    /// results wait for it, so a Ctrl-C during a flood of new devices does
+    /// not keep the reader draining them.
+    func testACancelledScanReaderStopsAtOnceWhileResultsWait() async {
+        let processor = poweredOn()
+        let calls = SharedBox<[String]>([])
+        let stream = registerScan(processor, calls: calls)
+        for _ in 0..<100 { processor.dispatch(advertisement(UUID(), rssi: -50)) }
+        let read = await Task { () -> Int in
+            withUnsafeCurrentTask { $0?.cancel() }
+            var count = 0
+            do { for try await _ in stream { count += 1 } } catch { XCTFail("unexpected error \(error)") }
+            return count
+        }.value
+        XCTAssertEqual(read, 0, "a cancelled reader got the waiting results")
+        gattQueue.sync {}
+        XCTAssertEqual(calls.get(), ["start", "stop"], "the cancelled reader did not end the scan")
     }
 
     /// A scan started while another runs (an interrupted `scan -w` whose

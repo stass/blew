@@ -74,7 +74,7 @@ public final class BLECentral: @unchecked Sendable {
     /// Bluetooth leaves poweredOn, operationFailed when a newer scan
     /// replaces it. Only this scan's deadline and reader end it.
     public func scan(timeout: TimeInterval? = 5.0, allowDuplicates: Bool = false) async throws
-        -> AsyncThrowingStream<DiscoveredDevice, Error>
+        -> ScanStream
     {
         try await waitForPoweredOn(timeout: 5.0)
 

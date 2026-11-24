@@ -258,11 +258,8 @@ extension PickStrategy {
     }
 }
 
-/// The devices one scan has seen, merged per identifier, in the order first
-/// seen. A device keeps the latest RSSI and the latest name, service list
-/// and manufacturer data it advertised, because any of them can be missing
-/// from a later advertisement. A list is replaced, never accumulated, so a
-/// device that keeps changing its advertisement cannot grow its record.
+/// The devices one scan has seen, merged per identifier
+/// (`DiscoveredDevice.merging`), in the order first seen.
 struct ScanResults {
     private(set) var devices: [DiscoveredDevice] = []
     private var positions: [String: Int] = [:]
@@ -275,13 +272,7 @@ struct ScanResults {
             devices.append(device)
             return device
         }
-        let old = devices[position]
-        let merged = DiscoveredDevice(
-            identifier: device.identifier,
-            name: device.name ?? old.name,
-            rssi: device.rssi,
-            serviceUUIDs: device.serviceUUIDs.isEmpty ? old.serviceUUIDs : device.serviceUUIDs,
-            manufacturerData: device.manufacturerData ?? old.manufacturerData)
+        let merged = devices[position].merging(device)
         devices[position] = merged
         return merged
     }

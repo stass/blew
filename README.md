@@ -203,6 +203,11 @@ Scans for advertising BLE peripherals and prints a table of discovered devices. 
 
 **Output columns (text):** ID, Name, RSSI, Signal (visual bar), Services
 
+`scan -w -o kv` writes a record each time a device is seen. When the reader
+falls behind, the advertisements a device sent meanwhile come as one record
+with the latest RSSI, so a slow pipe gets fewer updates rather than a growing
+backlog.
+
 Standard Bluetooth SIG service UUIDs in the Services column are shown with their human-readable name: e.g. `180F (Battery Service), 180A (Device Information)`.
 
 **Examples:**

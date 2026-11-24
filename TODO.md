@@ -18,19 +18,6 @@ None open.
 
 ## P1: important (0.3.0)
 
-### Scanning
-
-- [ ] **S14. The scan stream buffers without bound.**
-  `BLEEventProcessor.swift` (`beginScan`, `makeStream()` with the default
-  unbounded policy). `scan -w` with duplicates allowed redraws on every
-  result; in a crowded room, if the redraw (or a kv reader on stdout) is
-  slower than the results arrive, the buffer grows for as long as the watch
-  runs, and the event queue's bound (1024 waiting events) no longer limits
-  memory. Fix: bound the stream for watch mode, where a dropped RSSI sample
-  is replaced by the next, and decide whether a timed scan, whose first
-  sighting of a device must not be lost, needs the same bound with counted
-  drops.
-
 ### Commands
 
 - [ ] **C8. Option values can become `sub -b`.** `CommandRouter.swift`
@@ -79,6 +66,24 @@ None open.
 
 ## P3: later (after 0.3.0)
 
+- [ ] **S15. Every distinct device identifier is kept, without bound.**
+  `Sources/BLEManager/BLEDelegate.swift:30` keeps a CBPeripheral for every
+  identifier discovered, for the life of the process (never cleared);
+  `Sources/blew/DeviceSelection.swift:263` (`ScanResults`), and with it
+  `lastScanResults`, keeps a record for every device of one scan; and
+  `Sources/BLEManager/ScanStream.swift:100` (`ScanSink.yield`) one per
+  unread device. Each is bounded by the number of nearby devices, except
+  under an advertisement flood that changes its random address on every
+  advertisement (BLE spam tools do this): CoreBluetooth then reports a new
+  identifier each time, and a `blew mcp` or REPL session left running next
+  to it, or an hours-long `scan -w`, keeps an entry for every one; the
+  watch display also falls behind, since a real device's update waits
+  behind every newcomer first seen before it. Fix: cap the distinct
+  identifiers per scan and evict the delegate's peripherals no connect
+  needs, drop and count the newcomers past the cap, and report the count
+  as `sub` reports its drops. Whether CoreBluetooth gives each
+  non-resolvable random address its own identifier is unverified; settle
+  it with a manual check first.
 - [ ] Codegen backslash escaping is a no-op (`gsub("\\", "\\\\")`).
   `generate-ble-characteristics.rb:164`, `generate-ble-names.rb:31`. "CO2
   Concentration" renders a TAB.

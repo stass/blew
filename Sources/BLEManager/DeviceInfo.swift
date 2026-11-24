@@ -21,6 +21,22 @@ public struct DiscoveredDevice: Sendable, Equatable {
         self.serviceUUIDs = serviceUUIDs
         self.manufacturerData = manufacturerData
     }
+
+    /// This device's record updated by its `later` advertisement: the latest
+    /// RSSI, and the latest name, service list and manufacturer data it
+    /// advertised, because any of them can be missing from a later
+    /// advertisement. A list is replaced, never accumulated, so a device that
+    /// keeps changing its advertisement cannot grow its record. The scan
+    /// stream and the router's `ScanResults` both merge with it.
+    package func merging(_ later: DiscoveredDevice) -> DiscoveredDevice {
+        precondition(later.identifier == identifier, "merging advertisements of different devices")
+        return DiscoveredDevice(
+            identifier: identifier,
+            name: later.name ?? name,
+            rssi: later.rssi,
+            serviceUUIDs: later.serviceUUIDs.isEmpty ? serviceUUIDs : later.serviceUUIDs,
+            manufacturerData: later.manufacturerData ?? manufacturerData)
+    }
 }
 
 public struct ServiceInfo: Sendable {
