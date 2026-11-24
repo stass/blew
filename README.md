@@ -231,7 +231,7 @@ Standard Bluetooth SIG service UUIDs in the Services column are shown with their
 blew connect [-n <name>] [-S <uuid>] [-i <id>] [<device-id>]
 ```
 
-Explicitly connects to a BLE device and exits. Useful for testing connectivity or pre-warming a connection in `exec` scripts. The device can be specified by positional argument, `--id`, or device-targeting selectors (the tool will scan briefly to resolve them). In `exec` or the REPL, a connected device stays connected until the named device is found; with no device named, `connect` keeps it.
+Explicitly connects to a BLE device and exits. Useful for testing connectivity or pre-warming a connection in `exec` scripts. The device can be specified by positional argument, `--id`, or device-targeting selectors (the tool will scan briefly to resolve them), but not by a positional argument and options together (exit code 6). In `exec` or the REPL, a connected device stays connected until the named device is found; with no device named, `connect` keeps it.
 
 For `gatt`, `read`, `write`, and `sub` you do not need to run `connect` first — those commands connect automatically using the same device-targeting options.
 
@@ -653,7 +653,7 @@ blew> quit
 
 ## Script execution (`exec`)
 
-The `exec` subcommand runs a semicolon-separated sequence of commands in a single process, sharing one connection lifecycle. Commands are parsed identically to the REPL: an argument in single or double quotes may hold spaces and `;` (`write -f utf8 fff1 'a;b'` writes `a;b`); a quote runs to the next quote of the same kind, without escapes. A quote that is never closed is an error (exit code 6), and nothing in the script runs. An option that takes a value but has none, or is given twice, is an error too (exit code 6). The first command that requires a connection triggers an automatic connect; subsequent commands reuse it.
+The `exec` subcommand runs a semicolon-separated sequence of commands in a single process, sharing one connection lifecycle. Commands are parsed identically to the REPL: an argument in single or double quotes may hold spaces and `;` (`write -f utf8 fff1 'a;b'` writes `a;b`); a quote runs to the next quote of the same kind, without escapes. A quote that is never closed is an error (exit code 6), and nothing in the script runs. Options follow these rules in `exec` and the REPL: an option the command does not take, an argument given to a command that takes none (`disconnect x`, `periph status x`), an option that takes a value but has none, a value given to a flag (`--watch=1`), and a single-value option given twice are errors too (exit code 6). An option that takes a value takes the next argument whatever it looks like, so `sub -n -b 2A19` subscribes on a device whose name contains `-b` and does not start a background subscription; `--name=value` gives the value in one argument. Short flags combine (`gatt tree -dr`), and an option that takes a value may end the group (`scan -wR -70`). The first command that requires a connection triggers an automatic connect; subsequent commands reuse it.
 
 ```sh
 % blew exec "connect -n Thingy; gatt tree; read -f uint8 2A19"

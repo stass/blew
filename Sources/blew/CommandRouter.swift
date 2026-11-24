@@ -240,21 +240,19 @@ final class CommandRouter {
 
     // MARK: - Command runners (called from REPL/exec)
 
-    /// Options of `scan` that take a value.
-    static let scanOptionsWithValue: Set<String> = targetingOptionsWithValue.union(["-t", "--timeout"])
-
     func runScan(_ args: [String]) -> CommandResult {
-        let args = expandArgs(args, optionsWithValue: Self.scanOptionsWithValue)
+        let arguments: ParsedArguments
         let target: DeviceTarget
         let duration: TimeInterval?
         do {
-            target = try DeviceTarget.parse(args, optionsWithValue: Self.scanOptionsWithValue)
-            duration = try scanDuration(args)
+            arguments = try CommandSyntax.scan.parse(args)
+            target = try DeviceTarget(arguments)
+            duration = try scanDuration(arguments.value(.timeout))
         } catch {
-            return Self.invalidArguments("\(error)")
+            return CommandResult(failing: error)
         }
 
-        if hasFlag(args, short: "-w", long: "--watch", optionsWithValue: Self.scanOptionsWithValue) {
+        if arguments.flag(.watch) {
             guard target.pick == nil else {
                 return Self.invalidArguments("--pick chooses one device; it does not apply to --watch")
             }
@@ -271,12 +269,11 @@ final class CommandRouter {
         return result
     }
 
-    /// The scan duration: `scan -t` in `args`, else the global `-t`; nil
+    /// The scan duration: `local` (`scan -t`), else the global `-t`; nil
     /// when neither is given. Throws when the value is not a duration
     /// `isValidDuration` accepts, since a scan stop is scheduled with a
     /// nanosecond sleep.
-    private func scanDuration(_ args: [String]) throws -> TimeInterval? {
-        let local = try optionValue(args, short: "-t", long: "--timeout", optionsWithValue: Self.scanOptionsWithValue)
+    private func scanDuration(_ local: String?) throws -> TimeInterval? {
         guard let text = local ?? globals.timeout.map({ "\($0)" }) else { return nil }
         guard let seconds = Double(text), Self.isValidDuration(seconds) else {
             throw InvalidArgument("invalid timeout '\(text)' (use 0 to \(Int(Self.maxDuration)) seconds)")
@@ -286,12 +283,16 @@ final class CommandRouter {
 
     /// The scan duration auto-connect uses: the global `-t`, else 5 seconds.
     private func autoConnectScanDuration() throws -> TimeInterval {
-        try scanDuration([]) ?? 5.0
+        try scanDuration(nil) ?? 5.0
     }
 
-    static func invalidArguments(_ message: String) -> CommandResult {
+    /// The result of a command that cannot start for the reason `message`
+    /// gives, with exit code 6. The message is a literal: a caught error
+    /// goes to `CommandResult(failing:)`, which takes its exit code from its
+    /// type, and a message built from values is an `InvalidArgument`.
+    static func invalidArguments(_ message: StaticString) -> CommandResult {
         var result = CommandResult()
-        result.errors.append(message)
+        result.errors.append("\(message)")
         result.exitCode = BlewExitCode.invalidArguments.code
         return result
     }
@@ -457,11 +458,25 @@ final class CommandRouter {
     /// replacing the connected one once it is found; `connect` with no
     /// device named keeps a connected device.
     func runConnect(_ args: [String]) -> CommandResult {
-        let options = Self.targetingOptionsWithValue
-        if let device = positionalArgs(args, optionsWithValue: options).first {
-            return ensureConnected(args: ["-i", device], optionsWithValue: options, reconnect: true)
+        let target: DeviceTarget
+        do {
+            let arguments = try CommandSyntax.connect.parse(args)
+            target = try DeviceTarget(arguments)
+            switch arguments.positionals.count {
+            case 0:
+                break
+            case 1:
+                guard target == DeviceTarget() else {
+                    return Self.invalidArguments("name the device as an argument or with targeting options, not both")
+                }
+                return ensureConnected(to: DeviceTarget(id: arguments.positionals[0]), reconnect: true)
+            default:
+                throw InvalidArgument("unexpected argument '\(arguments.positionals[1])'")
+            }
+        } catch {
+            return CommandResult(failing: error)
         }
-        return ensureConnected(args: args, optionsWithValue: options, reconnect: true)
+        return ensureConnected(to: target, reconnect: true)
     }
 
     /// Connect to the device with identifier `targetId`, and remember its
@@ -496,6 +511,7 @@ final class CommandRouter {
     }
 
     func runDisconnect(_ args: [String]) -> CommandResult {
+        if let failure = Self.checkNoArguments(args) { return failure }
         var result = CommandResult()
 
         let operation: () async -> Void = { [self] in
@@ -520,6 +536,7 @@ final class CommandRouter {
     }
 
     func runStatus(_ args: [String]) -> CommandResult {
+        if let failure = Self.checkNoArguments(args) { return failure }
         var result = CommandResult()
 
         let operation: () async -> Void = { [self] in
@@ -534,9 +551,28 @@ final class CommandRouter {
         return result
     }
 
+    /// The failure of a command that takes no arguments when `args` has
+    /// one; nil when it is empty.
+    static func checkNoArguments(_ args: [String]) -> CommandResult? {
+        do {
+            if let stray = try CommandSyntax.none.parse(args).positionals.first {
+                throw InvalidArgument("unexpected argument '\(stray)'")
+            }
+            return nil
+        } catch {
+            return CommandResult(failing: error)
+        }
+    }
+
     func runSleep(_ args: [String]) -> CommandResult {
         var result = CommandResult()
-        guard let raw = args.first, let seconds = Double(raw) else {
+        let positionals: [String]
+        do {
+            positionals = try CommandSyntax.none.parse(args).positionals
+        } catch {
+            return CommandResult(failing: error)
+        }
+        guard positionals.count == 1, let seconds = Double(positionals[0]) else {
             result.errors.append("sleep requires a numeric argument (seconds; 0 = infinite)")
             result.exitCode = BlewExitCode.invalidArguments.code
             return result
@@ -565,48 +601,49 @@ final class CommandRouter {
         return result
     }
 
-    /// The `gatt tree`/`gatt chars` flags at option positions of `args`:
-    /// `-d`/`--descriptors` and `-r`/`--read`. An option value or a token
-    /// after `--` that spells a flag is not one.
-    func gattFlags(_ args: [String]) -> (descriptors: Bool, values: Bool) {
-        let options = Self.targetingOptionsWithValue
-        return (hasFlag(args, short: "-d", long: "--descriptors", optionsWithValue: options),
-                hasFlag(args, short: "-r", long: "--read", optionsWithValue: options))
-    }
-
+    /// `gatt <sub>`. The subcommand is the first positional, so options may
+    /// come before it (`gatt -n foo tree`); once it is known, the arguments
+    /// are read again with its own options (`CommandSyntax.gattSubcommands`),
+    /// so `gatt svcs -d` is an unknown option.
     func runGATT(_ args: [String]) -> CommandResult {
-        let targetingOpts = Self.targetingOptionsWithValue
-        let args = expandArgs(args, optionsWithValue: targetingOpts)
-        guard let sub = positionalArgs(args, optionsWithValue: targetingOpts).first else {
-            var result = CommandResult()
-            result.errors.append("missing subcommand")
-            result.output.append(.message("Usage: gatt <svcs|tree|chars|desc|info>"))
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
-        }
-
-        if sub == "info" {
-            let positionals = positionalArgs(args, optionsWithValue: targetingOpts).dropFirst()
-            guard let charInput = positionals.first else {
-                var result = CommandResult()
-                result.errors.append("missing characteristic UUID")
-                result.exitCode = BlewExitCode.invalidArguments.code
+        let usage = CommandOutput.message("Usage: gatt <svcs|tree|chars|desc|info>")
+        let sub: String
+        let arguments: ParsedArguments
+        let target: DeviceTarget
+        do {
+            guard let first = try CommandSyntax.gatt.parse(args).positionals.first else {
+                var result = Self.invalidArguments("missing subcommand")
+                result.output.append(usage)
                 return result
             }
-            return runGATTInfo(charInput)
+            guard let syntax = CommandSyntax.gattSubcommands[first] else {
+                var result = CommandResult(failing: InvalidArgument("unknown gatt subcommand '\(first)'"))
+                result.output.append(usage)
+                return result
+            }
+            sub = first
+            arguments = try syntax.parse(args)
+            if sub == "info" {
+                guard arguments.positionals.count >= 2 else { return Self.invalidArguments("missing characteristic UUID") }
+                return runGATTInfo(arguments.positionals[1])
+            }
+            target = try DeviceTarget(arguments)
+        } catch {
+            return CommandResult(failing: error)
         }
 
         // Arguments are checked before auto-connect, which may replace the connected device.
-        guard ["svcs", "tree", "chars", "desc"].contains(sub) else {
-            var result = Self.invalidArguments("unknown gatt subcommand '\(sub)'")
-            result.output.append(.message("Usage: gatt <svcs|tree|chars|desc|info>"))
-            return result
+        let operand = arguments.positionals.dropFirst().first
+        let includeDescriptors = sub == "tree" && arguments.flag(.descriptors)
+        let includeValues = (sub == "tree" || sub == "chars") && arguments.flag(.readValues)
+        if sub == "chars", operand == nil {
+            return Self.invalidArguments("missing service UUID")
         }
-        if sub == "desc", positionalArgs(args, optionsWithValue: targetingOpts).count < 2 {
+        if sub == "desc", operand == nil {
             return Self.invalidArguments("missing characteristic UUID")
         }
 
-        let connectResult = ensureConnected(args: args, optionsWithValue: targetingOpts)
+        let connectResult = ensureConnected(to: target)
         guard connectResult.exitCode == 0 else { return connectResult }
 
         var result = CommandResult()
@@ -622,9 +659,6 @@ final class CommandRouter {
                     result.output.append(.services(rows))
 
                 case "tree":
-                    let flags = gattFlags(args)
-                    let includeDescriptors = flags.descriptors
-                    let includeValues = flags.values
                     let tree = try await manager.discoverTree(includeDescriptors: includeDescriptors)
                     var treeServices: [GATTTreeService] = []
                     for service in tree {
@@ -671,13 +705,7 @@ final class CommandRouter {
                     result.output.append(.gattTree(treeServices))
 
                 case "chars":
-                    let charsOpts = Self.targetingOptionsWithValue
-                    let charsPositional = positionalArgs(args, optionsWithValue: charsOpts).dropFirst()
-                    guard let svcInput = charsPositional.first else {
-                        result.errors.append("missing service UUID")
-                        result.exitCode = BlewExitCode.invalidArguments.code
-                        return
-                    }
+                    guard let svcInput = operand else { preconditionFailure("checked before connecting") }
                     let svcUUID: String
                     switch resolveService(svcInput) {
                     case .resolved(let uuid): svcUUID = uuid
@@ -687,7 +715,6 @@ final class CommandRouter {
                         return
                     case .notFound: svcUUID = svcInput
                     }
-                    let includeValues = gattFlags(args).values
                     let chars = try await manager.discoverCharacteristics(forService: svcUUID)
                     var charRows: [CharacteristicRow] = []
                     for char in chars {
@@ -718,13 +745,7 @@ final class CommandRouter {
                     result.output.append(.characteristics(charRows))
 
                 case "desc":
-                    let descOpts = Self.targetingOptionsWithValue
-                    let descPositional = positionalArgs(args, optionsWithValue: descOpts).dropFirst()
-                    guard let charInput = descPositional.first else {
-                        result.errors.append("missing characteristic UUID")
-                        result.exitCode = BlewExitCode.invalidArguments.code
-                        return
-                    }
+                    guard let charInput = operand else { preconditionFailure("checked before connecting") }
                     let charUUID: String
                     switch resolveCharacteristic(charInput) {
                     case .resolved(let uuid): charUUID = uuid
@@ -778,18 +799,21 @@ final class CommandRouter {
     }
 
     func runRead(_ args: [String]) -> CommandResult {
-        let readOpts = Self.targetingOptionsWithValue.union(["-f", "--format"])
         // Arguments are checked before auto-connect, which may replace the connected device.
-        guard let charInput = positionalArgs(args, optionsWithValue: readOpts).first else {
-            return Self.invalidArguments("missing characteristic UUID")
-        }
+        let arguments: ParsedArguments
+        let target: DeviceTarget
         let fmt: ValueFormat
         do {
-            fmt = try valueFormat(args, optionsWithValue: readOpts)
+            arguments = try CommandSyntax.read.parse(args)
+            target = try DeviceTarget(arguments)
+            fmt = try Self.valueFormat(arguments)
         } catch {
-            return Self.invalidArguments("\(error)")
+            return CommandResult(failing: error)
         }
-        let connectResult = ensureConnected(args: args, optionsWithValue: readOpts)
+        guard let charInput = arguments.positionals.first else {
+            return Self.invalidArguments("missing characteristic UUID")
+        }
+        let connectResult = ensureConnected(to: target)
         guard connectResult.exitCode == 0 else { return connectResult }
 
         var result = CommandResult()
@@ -827,25 +851,36 @@ final class CommandRouter {
     }
 
     func runWrite(_ args: [String]) -> CommandResult {
-        let writeOpts = Self.targetingOptionsWithValue.union(["-f", "--format"])
-        let args = expandArgs(args, optionsWithValue: writeOpts)
         // Arguments are checked before auto-connect, which may replace the connected device.
-        let positional = positionalArgs(args, optionsWithValue: writeOpts)
+        let arguments: ParsedArguments
+        let target: DeviceTarget
+        let fmt: ValueFormat
+        do {
+            arguments = try CommandSyntax.write.parse(args)
+            target = try DeviceTarget(arguments)
+            fmt = try Self.valueFormat(arguments)
+        } catch {
+            return CommandResult(failing: error)
+        }
+        let positional = arguments.positionals
         guard positional.count >= 2 else {
-            return Self.invalidArguments(positional.isEmpty ? "missing characteristic UUID and data" : "missing data to write")
+            return positional.isEmpty ? Self.invalidArguments("missing characteristic UUID and data")
+                                      : Self.invalidArguments("missing data to write")
         }
         let charInput = positional[0]
         let dataStr = positional[1]
-        let fmt: ValueFormat
-        do {
-            fmt = try valueFormat(args, optionsWithValue: writeOpts)
-        } catch {
-            return Self.invalidArguments("\(error)")
-        }
         guard let data = DataFormatter.parse(dataStr, as: fmt) else {
-            return Self.invalidArguments("invalid data '\(dataStr)' for format '\(fmt.rawValue)'")
+            return CommandResult(failing: InvalidArgument("invalid data '\(dataStr)' for format '\(fmt.rawValue)'"))
         }
-        let connectResult = ensureConnected(args: args, optionsWithValue: writeOpts)
+        let writeType: WriteType
+        if arguments.flag(.withResponse) {
+            writeType = .withResponse
+        } else if arguments.flag(.withoutResponse) {
+            writeType = .withoutResponse
+        } else {
+            writeType = .auto
+        }
+        let connectResult = ensureConnected(to: target)
         guard connectResult.exitCode == 0 else { return connectResult }
 
         var result = CommandResult()
@@ -857,17 +892,6 @@ final class CommandRouter {
             result.exitCode = BlewExitCode.invalidArguments.code
             return result
         case .notFound: charUUID = charInput
-        }
-        let withResponse = hasFlag(args, short: "-r", long: "--with-response", optionsWithValue: writeOpts)
-        let withoutResponse = hasFlag(args, short: "-w", long: "--without-response", optionsWithValue: writeOpts)
-
-        let writeType: WriteType
-        if withResponse {
-            writeType = .withResponse
-        } else if withoutResponse {
-            writeType = .withoutResponse
-        } else {
-            writeType = .auto
         }
 
         let operation: () async -> Void = { [self] in
@@ -897,8 +921,6 @@ final class CommandRouter {
     /// that outlives the call.
     func runSub(_ args: [String], foregroundOnly: Bool = false,
                 emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
-        let subOpts = Self.targetingOptionsWithValue.union(["-f", "--format", "-d", "--duration", "-c", "--count"])
-        let args = expandArgs(args, optionsWithValue: subOpts)
         if let first = args.first {
             switch first {
             case "stop":   return runSubStop(Array(args.dropFirst()))
@@ -908,35 +930,34 @@ final class CommandRouter {
         }
 
         var result = CommandResult()
-        let durationText: String?
-        do {
-            durationText = try optionValue(args, short: "-d", long: "--duration", optionsWithValue: subOpts)
-        } catch {
-            return Self.invalidArguments("\(error)")
-        }
-        let duration = durationText.flatMap(Double.init)
-        if let durationText, !(duration.map(Self.isValidDuration) ?? false) {
-            result.errors.append("invalid duration '\(durationText)' (use 0 to \(Int(Self.maxDuration)) seconds)")
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
-        }
-
-        let backgroundFlags: Set<String> = foregroundOnly ? [] : ["--bg", "-b"]
-        let background = args.contains { backgroundFlags.contains($0) }
-        let positionals = positionalArgs(args.filter { !backgroundFlags.contains($0) }, optionsWithValue: subOpts)
         // Arguments are checked before auto-connect, which may replace the connected device.
-        guard let charInput = positionals.first else {
-            return Self.invalidArguments("missing characteristic UUID")
-        }
+        let arguments: ParsedArguments
+        let target: DeviceTarget
+        let duration: TimeInterval?
         let fmt: ValueFormat
         let maxCount: Int?
         do {
-            fmt = try valueFormat(args, optionsWithValue: subOpts)
-            maxCount = try notificationCount(args, optionsWithValue: subOpts)
+            arguments = try (foregroundOnly ? CommandSyntax.subForeground : CommandSyntax.sub).parse(args)
+            target = try DeviceTarget(arguments)
+            duration = try arguments.value(.duration).map { text in
+                guard let seconds = Double(text), Self.isValidDuration(seconds) else {
+                    throw InvalidArgument("invalid duration '\(text)' (use 0 to \(Int(Self.maxDuration)) seconds)")
+                }
+                return seconds
+            }
+            fmt = try Self.valueFormat(arguments)
+            maxCount = try Self.notificationCount(arguments)
         } catch {
-            return Self.invalidArguments("\(error)")
+            return CommandResult(failing: error)
         }
-        let connectResult = ensureConnected(args: args, optionsWithValue: subOpts)
+        let background = !foregroundOnly && arguments.flag(.background)
+        guard let charInput = arguments.positionals.first else {
+            return Self.invalidArguments("missing characteristic UUID")
+        }
+        if background, !isInteractiveMode {
+            return Self.invalidArguments("-b is only available in interactive mode")
+        }
+        let connectResult = ensureConnected(to: target)
         guard connectResult.exitCode == 0 else { return connectResult }
         let charUUID: String
         switch resolveCharacteristic(charInput) {
@@ -953,11 +974,6 @@ final class CommandRouter {
         let manager = self.manager
 
         if background {
-            guard isInteractiveMode else {
-                result.errors.append("-b is only available in interactive mode")
-                result.exitCode = BlewExitCode.invalidArguments.code
-                return result
-            }
             let capturedRenderer = self.renderer
             backgroundSubscriptions.start(charUUID) {
                 do {
@@ -1010,7 +1026,14 @@ final class CommandRouter {
 
     func runSubStop(_ args: [String]) -> CommandResult {
         var result = CommandResult()
-        if let charInput = args.first {
+        let positionals: [String]
+        do {
+            positionals = try CommandSyntax.none.parse(args).positionals
+            if positionals.count > 1 { throw InvalidArgument("unexpected argument '\(positionals[1])'") }
+        } catch {
+            return CommandResult(failing: error)
+        }
+        if let charInput = positionals.first {
             let charUUID: String
             switch resolveCharacteristic(charInput) {
             case .resolved(let uuid): charUUID = uuid
@@ -1037,6 +1060,7 @@ final class CommandRouter {
     }
 
     func runSubStatus(_ args: [String]) -> CommandResult {
+        if let failure = Self.checkNoArguments(args) { return failure }
         var result = CommandResult()
         let uuids = backgroundSubscriptions.characteristics
         result.output.append(.subscriptionList(uuids))
@@ -1177,13 +1201,8 @@ final class CommandRouter {
 
     // MARK: - Auto-connect
 
-    /// Options of the device-targeting group that take a value.
-    static let targetingOptionsWithValue: Set<String> = [
-        "-i", "--id", "-n", "--name", "-S", "--service", "-m", "--manufacturer", "-R", "--rssi-min", "-p", "--pick",
-    ]
-
-    /// Make sure the device the targeting options in `args` name is
-    /// connected before an operation. `AutoConnectPlan` decides:
+    /// Make sure the device `target` names is connected before an
+    /// operation. `AutoConnectPlan` decides:
     ///   - a connected device is used when it is the target, or when the
     ///     options name no device;
     ///   - otherwise `-i` connects directly, and the selectors (`-n`, `-S`,
@@ -1195,17 +1214,8 @@ final class CommandRouter {
     /// after the scan picked one. A failed lookup leaves it connected.
     /// With `reconnect`, a target that names a device is connected afresh
     /// even when it is the connected one (`connect`).
-    /// `optionsWithValue` lists the calling command's options that take a
-    /// value, so their values are never read as targeting options.
-    func ensureConnected(args: [String], optionsWithValue: Set<String>,
+    func ensureConnected(to target: DeviceTarget,
                          defaultFilter: DeviceFilter = DeviceFilter(), reconnect: Bool = false) -> CommandResult {
-        let target: DeviceTarget
-        do {
-            target = try DeviceTarget.parse(args, optionsWithValue: optionsWithValue)
-        } catch {
-            return Self.invalidArguments("\(error)")
-        }
-
         let connected = connectedDevice()
         let deviceId: String
         switch AutoConnectPlan.make(target: target, defaultFilter: defaultFilter, connected: connected,
@@ -1223,7 +1233,7 @@ final class CommandRouter {
             do {
                 duration = try autoConnectScanDuration()
             } catch {
-                return Self.invalidArguments("\(error)")
+                return CommandResult(failing: error)
             }
             var (devices, result) = scanForDevices(timeout: duration, filter: filter)
             guard result.exitCode == 0 else { return result }
@@ -1270,8 +1280,8 @@ final class CommandRouter {
     private func unresolvedIdentifier(_ input: String, _ failure: IdentifierFailure) -> CommandResult {
         switch failure {
         case .notAnIdentifier:
-            return Self.invalidArguments(
-                "'\(input)' is not a device identifier or part of one (-i takes hex digits; select by name with -n)")
+            return CommandResult(failing: InvalidArgument(
+                "'\(input)' is not a device identifier or part of one (-i takes hex digits; select by name with -n)"))
         case .notFound:
             var result = CommandResult()
             result.errors.append("device '\(input)' not found: no device of the last scan, and not the connected device, has an identifier containing it")
@@ -1310,158 +1320,22 @@ final class CommandRouter {
         return ConnectedDevice(id: id, advertisement: record)
     }
 
-    // MARK: - Argument parsing helpers
+    // MARK: - Option values
 
-    /// Expand combined single-dash short flags into individual flags.
-    /// For example, `["-dr"]` becomes `["-d", "-r"]`. Long flags (`--foo`)
-    /// and single-char flags (`-d`) are passed through unchanged.
-    /// Tokens after `--`, and numbers (`-12`), are values and stay as they are.
-    func expandArgs(_ args: [String], optionsWithValue: Set<String> = []) -> [String] {
-        var result: [String] = []
-        var skipNext = false
-        for (index, arg) in args.enumerated() {
-            if skipNext {
-                result.append(arg)
-                skipNext = false
-                continue
-            }
-            if arg == Self.endOfOptions {
-                result += args[index...]
-                break
-            }
-            if Self.isOption(arg) && !arg.hasPrefix("--") && arg.count > 2 {
-                for ch in arg.dropFirst() {
-                    result.append("-\(ch)")
-                }
-            } else {
-                result.append(arg)
-            }
-            if let last = result.last, optionsWithValue.contains(last) {
-                skipNext = true
-            }
-        }
-        return result
+    /// The `-f`/`--format` of `arguments`, hex when it is absent. Throws for
+    /// a name that is not a `ValueFormat`.
+    static func valueFormat(_ arguments: ParsedArguments) throws -> ValueFormat {
+        try ValueFormat(parsing: arguments.value(.format) ?? "hex")
     }
 
-    /// `--` ends the options: every token after it is positional, whatever
-    /// it looks like (`write fff1 -- -x`).
-    static let endOfOptions = "--"
-
-    /// Whether `arg`, at an option position, is an option: it starts with
-    /// `-` and is not a number, so `write -f float32le fff1 -1.5` writes
-    /// -1.5. No option of blew is a number.
-    static func isOption(_ arg: String) -> Bool {
-        arg.hasPrefix("-") && Double(arg) == nil
-    }
-
-    /// Collect non-flag positional tokens from args. Options listed in
-    /// `optionsWithValue` consume their following token and are skipped;
-    /// every token after `--` is positional.
-    func positionalArgs(_ args: [String], optionsWithValue: Set<String>) -> [String] {
-        var result: [String] = []
-        var tokens = args[...]
-        while let arg = tokens.popFirst() {
-            if arg == Self.endOfOptions {
-                result += tokens
-                break
-            }
-            if Self.isOption(arg) {
-                if optionsWithValue.contains(arg) { _ = tokens.popFirst() }
-            } else {
-                result.append(arg)
-            }
-        }
-        return result
-    }
-
-    /// The options at option positions of `args`, in order, each with its
-    /// value. An option in `optionsWithValue` takes the next token whatever it
-    /// looks like (nil when there is none), `--long=value` carries its own,
-    /// and any other option is a flag. Positional tokens are skipped, and the
-    /// walk ends at `--`. Every option lookup goes through this one walk, so
-    /// a value is never read as an option.
-    static func scanOptions(_ args: [String], optionsWithValue: Set<String>) -> [(name: String, value: String?)] {
-        var options: [(name: String, value: String?)] = []
-        var tokens = args[...]
-        while let arg = tokens.popFirst() {
-            if arg == endOfOptions { break }
-            guard isOption(arg) else { continue }
-            if optionsWithValue.contains(arg) {
-                options.append((arg, tokens.popFirst()))
-            } else if arg.hasPrefix("--"), let equals = arg.firstIndex(of: "=") {
-                options.append((String(arg[..<equals]), String(arg[arg.index(after: equals)...])))
-            } else {
-                options.append((arg, nil))
-            }
-        }
-        return options
-    }
-
-    /// The first value of `short` or `long`. `optionsWithValue` lists the
-    /// command's options that take a value, so their values are skipped.
-    func parseStringOption(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) -> String? {
-        parseAllStringOptions(args, short: short, long: long, optionsWithValue: optionsWithValue).first
-    }
-
-    func parseDoubleOption(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) -> Double? {
-        parseStringOption(args, short: short, long: long, optionsWithValue: optionsWithValue).flatMap(Double.init)
-    }
-
-    func parseIntOption(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) -> Int? {
-        parseStringOption(args, short: short, long: long, optionsWithValue: optionsWithValue).flatMap { Int($0) }
-    }
-
-    /// The value of the option `short`/`long`, which takes one value, in
-    /// `args`; nil when it is absent. Throws when it ends `args` without its
-    /// value or is given more than once, so a missing value never reads as
-    /// a missing option.
-    func optionValue(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) throws -> String? {
-        let values = try optionValues(args, short: short, long: long, optionsWithValue: optionsWithValue)
-        guard values.count <= 1 else { throw InvalidArgument("\(long) is given more than once") }
-        return values.first
-    }
-
-    /// Every value of the repeatable option `short`/`long` in `args`, in
-    /// order. Throws when it ends `args` without its value, so a missing
-    /// value never reads as a missing option.
-    func optionValues(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) throws -> [String] {
-        try Self.scanOptions(args, optionsWithValue: optionsWithValue.union([short, long]))
-            .filter { $0.name == short || $0.name == long }
-            .map { option in
-                guard let value = option.value else { throw InvalidArgument("\(option.name) needs a value") }
-                return value
-            }
-    }
-
-    /// The `-f`/`--format` of `args`, hex when it is absent. Throws for a
-    /// name that is not a `ValueFormat`.
-    func valueFormat(_ args: [String], optionsWithValue: Set<String>) throws -> ValueFormat {
-        try ValueFormat(parsing: optionValue(args, short: "-f", long: "--format",
-                                             optionsWithValue: optionsWithValue) ?? "hex")
-    }
-
-    /// The `sub -c`/`--count` of `args`, nil (no limit) when it is absent.
-    /// Throws for anything but a whole number of at least 1.
-    func notificationCount(_ args: [String], optionsWithValue: Set<String>) throws -> Int? {
-        guard let text = try optionValue(args, short: "-c", long: "--count", optionsWithValue: optionsWithValue) else {
-            return nil
-        }
+    /// The `sub -c`/`--count` of `arguments`, nil (no limit) when it is
+    /// absent. Throws for anything but a whole number of at least 1.
+    static func notificationCount(_ arguments: ParsedArguments) throws -> Int? {
+        guard let text = arguments.value(.count) else { return nil }
         guard let count = Int(text), count >= 1 else {
             throw InvalidArgument("invalid count '\(text)' (use a whole number of at least 1)")
         }
         return count
-    }
-
-    /// Collect all values for a repeatable option (e.g. `-S uuid1 -S uuid2`).
-    func parseAllStringOptions(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) -> [String] {
-        Self.scanOptions(args, optionsWithValue: optionsWithValue.union([short, long]))
-            .compactMap { $0.name == short || $0.name == long ? $0.value : nil }
-    }
-
-    /// Whether a flag named `short` or `long` is at an option position.
-    func hasFlag(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) -> Bool {
-        Self.scanOptions(args, optionsWithValue: optionsWithValue)
-            .contains { ($0.name == short || $0.name == long) && $0.value == nil }
     }
 }
 
@@ -1563,16 +1437,16 @@ extension CommandRouter {
 
     func runPeriphAdv(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
         var result = CommandResult()
-        let advOpts: Set<String> = ["-c", "--config", "-n", "--name", "-S", "--service"]
-        let configPath: String?
-        let nameArg: String?
+        let arguments: ParsedArguments
         do {
-            configPath = try optionValue(args, short: "-c", long: "--config", optionsWithValue: advOpts)
-            nameArg = try optionValue(args, short: "-n", long: "--name", optionsWithValue: advOpts)
+            arguments = try CommandSyntax.periphAdv.parse(args)
+            if let stray = arguments.positionals.first { throw InvalidArgument("unexpected argument '\(stray)'") }
         } catch {
-            return Self.invalidArguments("\(error)")
+            return CommandResult(failing: error)
         }
-        let serviceArgs = parseAllStringOptions(args, short: "-S", long: "--service", optionsWithValue: advOpts)
+        let configPath = arguments.value(.config)
+        let nameArg = arguments.value(.name)
+        let serviceArgs = arguments.values(.service)
 
         var serviceUUIDs: [BLEUUID]
         var services: [ServiceDefinition] = []
@@ -1594,15 +1468,13 @@ extension CommandRouter {
                 }
             }
         } catch {
-            result.errors.append(error.localizedDescription)
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
+            // A service UUID or a config file blew cannot use is an argument
+            // it cannot use, whatever the error's type.
+            return CommandResult(failing: InvalidArgument(error.localizedDescription))
         }
 
         if services.isEmpty && serviceUUIDs.isEmpty {
-            result.errors.append("no services defined -- use --config <file> or -S <uuid>")
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
+            return Self.invalidArguments("no services defined -- use --config <file> or -S <uuid>")
         }
 
         let peripheral = BLEPeripheral.shared
@@ -1678,19 +1550,22 @@ extension CommandRouter {
 
     func runPeriphClone(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
         var result = CommandResult()
-        let cloneOpts = Self.targetingOptionsWithValue.union(["-o", "--save"])
         // Checked before connecting, which may replace the connected device.
+        let target: DeviceTarget
         let savePath: String?
         do {
-            savePath = try optionValue(args, short: "-o", long: "--save", optionsWithValue: cloneOpts)
+            let arguments = try CommandSyntax.periphClone.parse(args)
+            if let stray = arguments.positionals.first { throw InvalidArgument("unexpected argument '\(stray)'") }
+            target = try DeviceTarget(arguments)
+            savePath = arguments.value(.save)
+            if let savePath, let problem = Self.unwritableReason(savePath) {
+                throw InvalidArgument("cannot save to '\(savePath)': \(problem)")
+            }
         } catch {
-            return Self.invalidArguments("\(error)")
-        }
-        if let savePath, let problem = Self.unwritableReason(savePath) {
-            return Self.invalidArguments("cannot save to '\(savePath)': \(problem)")
+            return CommandResult(failing: error)
         }
 
-        let connectResult = ensureConnected(args: args, optionsWithValue: cloneOpts)
+        let connectResult = ensureConnected(to: target)
         guard connectResult.exitCode == 0 else { return connectResult }
 
         result.infos.append("snapshotting GATT tree...")
@@ -1897,6 +1772,7 @@ extension CommandRouter {
     }
 
     func runPeriphStop(_ args: [String]) -> CommandResult {
+        if let failure = Self.checkNoArguments(args) { return failure }
         var result = CommandResult()
         backgroundPeriphTask?.cancel()
         backgroundPeriphTask = nil
@@ -1905,38 +1781,35 @@ extension CommandRouter {
         return result
     }
 
-    func runPeriphSet(_ args: [String]) -> CommandResult {
-        var result = CommandResult()
-        let positional = positionalArgs(args, optionsWithValue: ["-f", "--format"])
+    /// The characteristic, value and format of `periph set` and
+    /// `periph notify`. Throws an `InvalidArgument` for arguments it cannot
+    /// use, a characteristic it cannot resolve among them.
+    private func parsePeriphValue(_ args: [String]) throws -> (char: BLEUUID, data: Data, format: ValueFormat) {
+        let arguments = try CommandSyntax.periphValue.parse(args)
+        let positional = arguments.positionals
         guard positional.count >= 2 else {
-            result.errors.append(positional.isEmpty
-                ? "missing characteristic UUID and value"
-                : "missing value")
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
+            throw InvalidArgument(positional.isEmpty ? "missing characteristic UUID and value" : "missing value")
         }
-        let charInput = positional[0]
-        let valueStr = positional[1]
-        let fmt: ValueFormat
-        do {
-            fmt = try valueFormat(args, optionsWithValue: ["-f", "--format"])
-        } catch {
-            return Self.invalidArguments("\(error)")
-        }
-
+        let fmt = try Self.valueFormat(arguments)
         let charUUID: BLEUUID
         do {
-            charUUID = try resolvePeriphCharacteristic(charInput)
+            charUUID = try resolvePeriphCharacteristic(positional[0])
         } catch {
-            result.errors.append(error.localizedDescription)
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
+            throw InvalidArgument(error.localizedDescription)
         }
+        guard let data = DataFormatter.parse(positional[1], as: fmt) else {
+            throw InvalidArgument("invalid value '\(positional[1])' for format '\(fmt.rawValue)'")
+        }
+        return (charUUID, data, fmt)
+    }
 
-        guard let data = DataFormatter.parse(valueStr, as: fmt) else {
-            result.errors.append("invalid value '\(valueStr)' for format '\(fmt.rawValue)'")
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
+    func runPeriphSet(_ args: [String]) -> CommandResult {
+        var result = CommandResult()
+        let (charUUID, data, fmt): (BLEUUID, Data, ValueFormat)
+        do {
+            (charUUID, data, fmt) = try parsePeriphValue(args)
+        } catch {
+            return CommandResult(failing: error)
         }
 
         do {
@@ -1950,36 +1823,11 @@ extension CommandRouter {
 
     func runPeriphNotify(_ args: [String]) -> CommandResult {
         var result = CommandResult()
-        let positional = positionalArgs(args, optionsWithValue: ["-f", "--format"])
-        guard positional.count >= 2 else {
-            result.errors.append(positional.isEmpty
-                ? "missing characteristic UUID and value"
-                : "missing value")
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
-        }
-        let charInput = positional[0]
-        let valueStr = positional[1]
-        let fmt: ValueFormat
+        let (charUUID, data): (BLEUUID, Data)
         do {
-            fmt = try valueFormat(args, optionsWithValue: ["-f", "--format"])
+            (charUUID, data, _) = try parsePeriphValue(args)
         } catch {
-            return Self.invalidArguments("\(error)")
-        }
-
-        let charUUID: BLEUUID
-        do {
-            charUUID = try resolvePeriphCharacteristic(charInput)
-        } catch {
-            result.errors.append(error.localizedDescription)
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
-        }
-
-        guard let data = DataFormatter.parse(valueStr, as: fmt) else {
-            result.errors.append("invalid value '\(valueStr)' for format '\(fmt.rawValue)'")
-            result.exitCode = BlewExitCode.invalidArguments.code
-            return result
+            return CommandResult(failing: error)
         }
 
         do {
@@ -1999,6 +1847,7 @@ extension CommandRouter {
     }
 
     func runPeriphStatus(_ args: [String]) -> CommandResult {
+        if let failure = Self.checkNoArguments(args) { return failure }
         var result = CommandResult()
         let status = BLEPeripheral.shared.peripheralStatus()
         result.output.append(.peripheralStatus(status))

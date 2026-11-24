@@ -51,6 +51,12 @@ struct DeviceTargetingOptions: ParsableArguments {
         if let pick { args += ["-p", pick.rawValue] }
         return args
     }
+
+    /// The target these options name, checked by the one targeting reader
+    /// (`DeviceTarget(_:)`) the REPL and the MCP server use.
+    func target() throws -> DeviceTarget {
+        try DeviceTarget(CommandSyntax.targeting.parse(toArgs()))
+    }
 }
 
 enum OutputFormat: String, ExpressibleByArgument, Sendable {

@@ -442,9 +442,7 @@ final class NUSPortTests: XCTestCase {
 
 final class NUSOptionTests: XCTestCase {
     private func parse(_ args: [String], stdin: Bool = true) throws -> NUSOptions {
-        let router = makeRouter()
-        return try router.parseNUSOptions(router.expandArgs(args, optionsWithValue: CommandRouter.nusOptionsWithValue),
-                                          stdinAvailable: stdin)
+        try CommandRouter.parseNUSOptions(args, stdinAvailable: stdin)
     }
 
     func testDefaultsToStdioWithAutoWrites() throws {
@@ -529,9 +527,9 @@ final class NUSOptionTests: XCTestCase {
     /// targeting names no device (see AutoConnectPlanTests), so the targeting
     /// passes through unchanged; its values are checked before any endpoint opens.
     func testTargetingIsCheckedAndPassedThrough() throws {
-        XCTAssertEqual(try parse(["-p", "only"]).targeting, ["-p", "only"])
-        XCTAssertEqual(try parse(["-n", "erxos"]).targeting, ["-n", "erxos"])
-        XCTAssertEqual(try parse(["-e", "--name=x"]).targeting, ["-e", "--name=x"])
+        XCTAssertEqual(try parse(["-p", "only"]).targeting, DeviceTarget(pick: .only))
+        XCTAssertEqual(try parse(["-n", "erxos"]).targeting, DeviceTarget(filter: DeviceFilter(name: "erxos")))
+        XCTAssertEqual(try parse(["-e", "--name=x"]).targeting, DeviceTarget())
         XCTAssertThrowsError(try parse(["-p", "-n"]))
         XCTAssertThrowsError(try parse(["-S", "not-a-uuid"]))
         XCTAssertEqual(BLENames.canonicalUUID(NUS.service), NUS.service,
@@ -764,7 +762,7 @@ final class NUSMCPTests: XCTestCase {
             "name": .string("erxos"), "send": .string("ping\n"), "expect": .string("ping"),
             "duration": .double(2), "with_response": .bool(false),
         ])
-        XCTAssertEqual(o.targeting, ["-n", "erxos"])
+        XCTAssertEqual(o.targeting, DeviceTarget(filter: DeviceFilter(name: "erxos")))
         XCTAssertEqual(o.endpoint, .fixed(Data("ping\n".utf8)))
         XCTAssertEqual(o.expect, Data("ping".utf8))
         XCTAssertEqual(o.linger, 2)
@@ -774,7 +772,7 @@ final class NUSMCPTests: XCTestCase {
     func testFreeTextFieldsNeverBecomeOptions() throws {
         let o = try BlewMCPServer().buildNUSOptions(["pick": .string("first"), "name": .string("--file=/etc/hosts")])
         XCTAssertEqual(o.endpoint, .fixed(Data()), "the name value was read as --file")
-        XCTAssertEqual(o.targeting, ["-n", "--file=/etc/hosts", "-p", "first"])
+        XCTAssertEqual(o.targeting, DeviceTarget(filter: DeviceFilter(name: "--file=/etc/hosts"), pick: .first))
         XCTAssertThrowsError(try BlewMCPServer().buildNUSOptions(["pick": .string("--file=/etc/hosts")]),
                              "a pick value is checked")
     }

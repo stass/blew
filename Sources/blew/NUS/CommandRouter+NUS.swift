@@ -19,10 +19,10 @@ struct NUSOptions {
         case tcp(host: String, port: UInt16)
     }
 
-    /// Device-targeting arguments for `ensureConnected`. With none that
-    /// name a device, `nus` uses the connected device or scans for
+    /// The device `ensureConnected` connects to. When it names no device,
+    /// `nus` uses the connected device or scans for
     /// `deviceFilter`.
-    var targeting: [String]
+    var targeting: DeviceTarget
     var endpoint: Endpoint
     var expect: Data?
     /// Seconds to keep listening after the input ends; with `expect`, the
@@ -42,7 +42,7 @@ struct NUSOptions {
     /// `stdinAvailable` is false in the REPL, `exec` and MCP, where standard
     /// input is not the user's to bridge. Throws an `InvalidArgument`.
     static func make(
-        targeting: [String], sends: [String] = [], file: String? = nil, expect: String? = nil,
+        targeting: DeviceTarget, sends: [String] = [], file: String? = nil, expect: String? = nil,
         duration: Double? = nil, pty: Bool = false, listen: UInt16? = nil, bind: String? = nil,
         reconnect: Bool = false, withResponse: Bool = false, withoutResponse: Bool = false,
         stdinAvailable: Bool
@@ -87,7 +87,6 @@ struct NUSOptions {
         default: break
         }
 
-        _ = try DeviceTarget.parse(targeting, optionsWithValue: CommandRouter.nusOptionsWithValue)
         return NUSOptions(
             targeting: targeting,
             endpoint: endpoint,
@@ -174,52 +173,40 @@ extension NUSOutcome {
 }
 
 extension CommandRouter {
-    static let nusOptionsWithValue: Set<String> = targetingOptionsWithValue.union([
-        "-s", "--send", "--file", "-e", "--expect", "-d", "--duration", "-l", "--listen", "--bind",
-    ])
-
     /// Parse `nus` arguments from the REPL or a script. Throws an
     /// `InvalidArgument` on invalid input.
-    func parseNUSOptions(_ args: [String], stdinAvailable: Bool) throws -> NUSOptions {
-        let valueOptions = Self.nusOptionsWithValue
-        func value(_ short: String, _ long: String) throws -> String? {
-            try optionValue(args, short: short, long: long, optionsWithValue: valueOptions)
-        }
-        func flag(_ short: String, _ long: String) -> Bool {
-            hasFlag(args, short: short, long: long, optionsWithValue: valueOptions)
-        }
-
-        if let stray = positionalArgs(args, optionsWithValue: valueOptions).first {
+    static func parseNUSOptions(_ args: [String], stdinAvailable: Bool) throws -> NUSOptions {
+        let arguments = try CommandSyntax.nus.parse(args)
+        if let stray = arguments.positionals.first {
             throw InvalidArgument("unexpected argument '\(stray)'")
         }
-        let listen = try value("-l", "--listen").map { text in
+        let listen = try arguments.value(.listen).map { text in
             guard let port = UInt16(text) else { throw InvalidArgument("invalid port '\(text)'") }
             return port
         }
-        let duration = try value("-d", "--duration").map { text in
+        let duration = try arguments.value(.duration).map { text in
             guard let seconds = Double(text) else { throw InvalidArgument("invalid duration '\(text)'") }
             return seconds
         }
         return try NUSOptions.make(
-            targeting: args,
-            sends: optionValues(args, short: "-s", long: "--send", optionsWithValue: valueOptions),
-            file: value("--file", "--file"),
-            expect: value("-e", "--expect"),
+            targeting: DeviceTarget(arguments),
+            sends: arguments.values(.send),
+            file: arguments.value(.file),
+            expect: arguments.value(.expect),
             duration: duration,
-            pty: flag("--pty", "--pty"),
+            pty: arguments.flag(.pty),
             listen: listen,
-            bind: value("--bind", "--bind"),
-            reconnect: flag("--reconnect", "--reconnect"),
-            withResponse: flag("-r", "--with-response"),
-            withoutResponse: flag("-w", "--without-response"),
+            bind: arguments.value(.bind),
+            reconnect: arguments.flag(.reconnect),
+            withResponse: arguments.flag(.withResponse),
+            withoutResponse: arguments.flag(.withoutResponse),
             stdinAvailable: stdinAvailable)
     }
 
     /// `nus` from the REPL or a script: parse, then bridge.
     func runNUS(_ args: [String], emit: @escaping @Sendable (CommandOutput) -> Void = { _ in }) -> CommandResult {
-        let args = expandArgs(args, optionsWithValue: Self.nusOptionsWithValue)
         do {
-            return runNUS(try parseNUSOptions(args, stdinAvailable: !isInteractiveMode), emit: emit)
+            return runNUS(try Self.parseNUSOptions(args, stdinAvailable: !isInteractiveMode), emit: emit)
         } catch {
             return CommandResult(failing: error)
         }
@@ -277,8 +264,7 @@ extension CommandRouter {
         var targeting = options.targeting
         var connectedOnce = false
         while true {
-            let connectResult = ensureConnected(args: targeting, optionsWithValue: Self.nusOptionsWithValue,
-                                                defaultFilter: NUSOptions.deviceFilter)
+            let connectResult = ensureConnected(to: targeting, defaultFilter: NUSOptions.deviceFilter)
             if connectResult.exitCode != 0 {
                 guard NUSOptions.retries(afterConnectFailure: connectResult.exitCode,
                                          reconnect: options.reconnect, connectedOnce: connectedOnce) else {
@@ -298,7 +284,7 @@ extension CommandRouter {
                 return result
             }
             let device = connectedDevice()
-            if let id = device.id { targeting = ["-i", id] }
+            if let id = device.id { targeting = DeviceTarget(id: id) }
             connectedOnce = true
             status("connected", device.label)
 

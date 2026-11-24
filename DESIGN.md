@@ -303,7 +303,7 @@ An interrupted command finishes the ordinary way: a CLI subcommand renders what 
 --pick (-p)          PickStrategy: strongest | first | only
 ```
 
-`DeviceTargetingOptions.toArgs()` serializes non-nil values into a flat string array passed to `CommandRouter.run*()` methods.
+`DeviceTargetingOptions.toArgs()` serializes non-nil values into a flat string array passed to `CommandRouter.run*()` methods, which read it with their `CommandSyntax`; `target()` reads it into a `DeviceTarget` for `nus`, which takes typed options.
 
 ### 4.3 Subcommands
 
@@ -394,7 +394,7 @@ Background subscriptions are kept in `BackgroundSubscriptions` (`CommandRouter.b
 
 ### 4.4 Implicit auto-connect
 
-`gatt`, `read`, `write`, and `sub` call `CommandRouter.ensureConnected(args:)` before executing. This means operations can be used directly from the CLI without a separate `connect` step:
+`gatt`, `read`, `write`, and `sub` call `CommandRouter.ensureConnected(to:)` with their `DeviceTarget` before executing. This means operations can be used directly from the CLI without a separate `connect` step:
 
 ```
 blew gatt tree -i <uuid>
@@ -403,7 +403,7 @@ blew read -n "My Device" 2A19
 
 The decisions are pure functions in `Sources/blew/DeviceSelection.swift`, tested without a radio; `ensureConnected` only runs the scans, disconnects and connects they call for:
 
-- `DeviceTarget.parse` reads the targeting options into a `DeviceFilter` (`-i`, `-n`, `-S`, `-m`, `-R`) and an optional `PickStrategy`, rejecting a value it cannot use. Service UUIDs are compared in the form `BLENames.canonicalUUID` gives, the form `CBUUID.uuidString` has.
+- `DeviceTarget(_:)` reads the targeting options of a `ParsedArguments` into a `DeviceFilter` (`-i`, `-n`, `-S`, `-m`, `-R`) and an optional `PickStrategy`, rejecting a value it cannot use. Service UUIDs are compared in the form `BLENames.canonicalUUID` gives, the form `CBUUID.uuidString` has.
 - `DeviceTarget.resolveIdentifier` turns a `-i` value (or MCP `device_id`) into a full identifier. It compares identifiers only, never advertised names, so a nearby device cannot capture the value by advertising it as its name: a value that parses as a UUID is exactly that identifier, seen or not; otherwise its hex digits (hyphens and case ignored) must occur in exactly one known identifier. Several matches are an `ambiguous` error listing them, none `notFound`, and a value that is not hex digits `notAnIdentifier`.
 - `AutoConnectPlan.make` takes the target, the `ConnectedDevice` (its identifier and scan record), the identifiers of the last scan and a default filter (`nus` passes the NUS service). It resolves `-i` among the scanned identifiers and the connected device's, since a connected device usually stops advertising and is missing from a later scan; a value that does not resolve is the plan `unresolvedIdentifier`, and nothing is disconnected. A connected device is used when the target names no device or accepts it (`-i` compares identifiers; the selectors are matched against the scan record, and an unknown record matches nothing). Otherwise: `-i` connects directly; the selectors, or the default filter when nothing is named, scan and pick; with neither it is an error.
 - `ensureConnected` calls `BLECentral.connect` (which disconnects the current device) only once the new device is known: after `-i` resolved, or after the scan ran (CoreBluetooth scans while connected) and picked. A failed lookup leaves the connection alone. When the old device is gone after `connect(to:)` returned (`BLECentral.connect` can fail before it disconnects), `ensureConnected` passes a `DeviceSwitch` to `CommandRouter.reportDeviceSwitch`, whether or not the new connect succeeded. It writes the notice to stderr at every verbosity, except inside `collectingDeviceSwitches`, which returns the switches with the body's value: the MCP server runs each call in it and returns the switches as the `deviceSwitches` field of the call's structured result. A cancelled call gets no response, so `UnreportedDeviceSwitches` keeps its switches for the next result. Commands check their own arguments (characteristic, data, format) before calling it.
@@ -421,7 +421,7 @@ The central command dispatcher. It is the shared implementation used by all thre
 **`executeScript(_:keepGoing:dryRun:)`** — splits the script string on `;` outside quotes (`splitScript`, by the quoting rule `tokenize` uses: `CommandRouter.quoteCharacters`, a quote runs to the next of the same character), strips whitespace and empty segments, calls `dispatch` on each. Returns `Int32` exit code. With `dryRun: true`, prints numbered steps instead. With `keepGoing: true`, records first error but continues.
 
 **`run*()` methods** — each is a synchronous function that returns a `CommandResult` containing structured output. The method:
-1. Parses its args from the token array via helpers: `parseStringOption`, `parseIntOption`, `parseDoubleOption`, `parseAllStringOptions`, `valueFormat`, `notificationCount`. Every option value is checked here, before auto-connect, and a bad one is an invalid-arguments result. The option walks (`scanOptions`, `positionalArgs`, `expandArgs`) share one rule: `--` ends the options, and a token that is a number (`-1.5`) is a value, never an option (`isOption`). A failure of the operation is recorded with `CommandResult.fail(_:)`, which takes the message from `localizedDescription` and the exit code from `BlewExitCode(for:)`.
+1. Parses its args once, at the top, with its `CommandSyntax` (see **Option parsing** below), then reads typed values from the `ParsedArguments`: `DeviceTarget(_:)` for the targeting options, `valueFormat`, `notificationCount`. Every option value is checked here, before auto-connect. A failure to start is a `CommandResult(failing:)` of the thrown error, which takes the message from `localizedDescription` and the exit code from the error's type (`BlewExitCode(for:)`); a message built from values is thrown as an `InvalidArgument`, and `invalidArguments(_:)` takes only a literal (`StaticString`), so no caught error is turned into exit 6 by its text. A failure of the operation is recorded with `CommandResult.fail(_:)`, by the same mapping.
 2. Builds an async operation closure calling the appropriate `BLECentral.shared` async method, which appends structured `CommandOutput` items to the result (instead of printing directly)
 3. Hands the operation to `waitInterruptible`, which starts it in a `Task` and blocks on a `DispatchSemaphore` until it finishes, is stopped or times out. A stop already requested when `waitInterruptible` is called keeps the operation from starting, so no operation starts once a stop has been seen. An operation that finished before the poll saw the stop keeps its result (`.completed`), so a write known to have completed is not reported as failed. A stop seen while the operation is still running cancels it and gives `.interrupted`, even if the device already acted on it. The stop stays set until the command's outermost span closes: `main` opens one span around every one-shot command and `exec` script, and the REPL and the MCP server open one per command or tool call, so the next wait of the same command does not start its operation.
 4. Returns the `CommandResult`
@@ -433,6 +433,15 @@ Commands fall into two categories:
 `runSub`, `runPeriph`, `runPeriphAdv`, and `runPeriphClone` all accept an `emit` parameter with a no-op default so existing call sites without a need for streaming output require no change.
 
 This semaphore pattern bridges Swift's structured concurrency into the synchronous world of the CLI main thread and REPL loop.
+
+**Option parsing** — `Sources/blew/CommandOptions.swift` is the one reader of command options. An `OptionSpec` is an option's short and long names and its arity (flag, single value, repeated value); a `CommandSyntax` is the list of options one command takes, and every command's syntax is declared in that file (`CommandSyntax.scan`, `.read`, `.sub`, `.subForeground`, `.gattSubcommands`, `.periphAdv`, `.nus`, ...). `CommandSyntax.parse` walks the arguments once and is the only code that decides which token is an option, a value or a positional:
+- `--` ends the options; every token after it is positional.
+- A token that starts with `-`, is longer than `-` and is not a number is an option; `-1.5`, `-7` and a bare `-` are positionals. An option the command does not declare is an error, so nothing a command does not take is skipped silently.
+- An option that takes a value takes the next token, whatever it looks like: in `sub -n -b 2A19` the name is `-b`, and nothing starts in the background. `--long=value` carries its value in the same token.
+- Short flags combine (`-dr`); an option that takes a value may only end the group (`-wR -70`).
+- A missing value, a value given to a flag (`--watch=1`) and a second value of a single-value option are errors.
+
+`ParsedArguments` answers `value(_:)`, `values(_:)` and `flag(_:)` for a declared option of the right arity and traps for any other, so asking for an option a command does not declare is a programming error a test hits, not a silent nil. `gatt` reads its arguments twice with the same reader: `CommandSyntax.gatt` (every gatt option) finds the subcommand, the first positional, so options may come before it; `gattSubcommands[sub]` then reads them with that subcommand's options, so `gatt svcs -d` is an error. The MCP `sub` uses `subForeground`, which has no `-b`, so no tool argument can start a background subscription. The ArgumentParser commands, `DeviceTargetingOptions.target()` and the MCP builders produce command lines for these syntaxes: free text goes either as the value of an option, which takes the next token whatever it is, or after `--` as a positional; `ble_nus` alone builds `NUSOptions` from typed fields.
 
 **Device/UUID resolution** — partial identifiers resolve to full ones:
 

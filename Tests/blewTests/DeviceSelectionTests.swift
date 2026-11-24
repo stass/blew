@@ -11,7 +11,7 @@ private func device(_ id: String, name: String? = nil, rssi: Int = -60, services
 }
 
 private func target(_ args: [String]) throws -> DeviceTarget {
-    try DeviceTarget.parse(args, optionsWithValue: CommandRouter.targetingOptionsWithValue)
+    try DeviceTarget(CommandSyntax.targeting.parse(args))
 }
 
 final class DeviceFilterTests: XCTestCase {
@@ -259,7 +259,7 @@ final class IdentifierResolutionTests: XCTestCase {
     }
 
     private func target(_ id: String) throws -> DeviceTarget {
-        try DeviceTarget.parse(["-i", id], optionsWithValue: CommandRouter.targetingOptionsWithValue)
+        try DeviceTarget(CommandSyntax.targeting.parse(["-i", id]))
     }
 
     func testAFragmentMatchesIdentifiersNotNames() {

@@ -77,8 +77,8 @@ struct GATTCharsCommand: ParsableCommand {
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
         var args = targeting.toArgs()
-        args += ["chars", service]
         if readValues { args.append("-r") }
+        args += [CommandSyntax.endOfOptions, "chars", service]
         let result = router.runGATT(args)
         router.renderer.renderResult(result)
         if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
@@ -99,7 +99,7 @@ struct GATTDescCommand: ParsableCommand {
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
         var args = targeting.toArgs()
-        args += ["desc", char]
+        args += [CommandSyntax.endOfOptions, "desc", char]
         let result = router.runGATT(args)
         router.renderer.renderResult(result)
         if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
@@ -118,7 +118,7 @@ struct GATTInfoCommand: ParsableCommand {
 
     mutating func run() throws {
         let router = CommandRouter(globals: GlobalOptions.current)
-        let result = router.runGATT(["info", char])
+        let result = router.runGATT([CommandSyntax.endOfOptions, "info", char])
         router.renderer.renderResult(result)
         if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
     }

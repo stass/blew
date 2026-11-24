@@ -61,7 +61,7 @@ struct NUSCommand: ParsableCommand {
         let result: CommandResult
         do {
             let options = try NUSOptions.make(
-                targeting: targeting.toArgs(), sends: send, file: file, expect: expect, duration: duration,
+                targeting: targeting.target(), sends: send, file: file, expect: expect, duration: duration,
                 pty: pty, listen: listen, bind: bind, reconnect: reconnect,
                 withResponse: withResponse, withoutResponse: withoutResponse, stdinAvailable: true)
             result = router.runNUS(options, emit: { router.renderer.render($0) })

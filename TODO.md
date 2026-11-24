@@ -18,33 +18,6 @@ None open.
 
 ## P1: important (0.3.0)
 
-### Commands
-
-- [ ] **C8. Option values can become `sub -b`.** `CommandRouter.swift`
-  (`runSub`, `backgroundFlags`) tests every argument for `-b` and `--bg`,
-  option values and arguments after `--` included, so in the REPL
-  `sub -n -b 2A19` starts a background subscription. MCP calls are immune
-  (`foregroundOnly`), but the other MCP builders still pass free text
-  through a command line; build them from typed fields, as `ble_nus` does.
-- [ ] **C9. Option values have two strict readers and a lenient one.**
-  `DeviceSelection.swift:59` (`DeviceTarget.parse`, its local `value` and
-  `values`) repeats `CommandRouter.optionValue`/`optionValues`, messages
-  included; a change to one (say `--long=value`) leaves targeting and
-  command options disagreeing. `parseAllStringOptions` still drops a
-  missing value: `periph adv -n foo -S` (`CommandRouter.swift:1555`)
-  advertises with no service instead of exiting 6. `parseStringOption`,
-  `parseIntOption` and `parseDoubleOption` have no production caller.
-  Fix: one static reader that `DeviceTarget.parse` calls, `periph adv -S`
-  on `optionValues`, and delete the lenient helpers and their tests.
-- [ ] **C10. Two ways to fail a command before it starts.**
-  `CommandRouter.invalidArguments("\(error)")` (for example in `runRead`
-  and `runSub`) sets exit 6 whatever the error and formats it with
-  `"\(error)"`; `CommandResult(failing:)` (`ExitCodes.swift`) maps the
-  error by type. Every caught error there is an `InvalidArgument` today,
-  so the codes agree, but a new error type thrown there exits 6 when its
-  type says otherwise. Fix: catch blocks use `CommandResult(failing:)`;
-  `invalidArguments` keeps only literal messages.
-
 ### Peripheral mode
 
 - [ ] **P5. A callback CoreBluetooth never sends for an undone request
@@ -82,6 +55,34 @@ None open.
   as `sub` reports its drops. Whether CoreBluetooth gives each
   non-resolvable random address its own identifier is unverified; settle
   it with a manual check first.
+- [ ] **C11. MCP tools still reach the router through a command line.**
+  `MCPServer.swift` (`buildTargetingArgs`, `buildReadArgs`, `buildSubArgs`,
+  `buildGATTArgs`, `buildPeriphAdvArgs`, ...) serialize typed tool fields
+  into tokens that `CommandSyntax.parse` reads back. The strict reader and
+  `--` before free text keep every value where its field says, but each
+  builder and the syntax it targets must agree by hand: a builder that
+  emits an option the command's syntax lacks fails every call of that tool
+  with exit 6. Build typed options per command (as `ble_nus` builds
+  `NUSOptions`) and drop the round trip. Until then no test parses every
+  builder's line with the syntax its `run*` uses (`MCPTests.swift`,
+  `MCPCommandLineTests` parses gatt lines with the union `CommandSyntax.gatt`).
+- [ ] **C12. Extra positionals are ignored by `scan`, `read`, `write`, `sub`
+  and `gatt`.** `CommandRouter.swift` (`runScan`, `runRead`, `runWrite`,
+  `runSub`, `runGATT`); the commands that reject them repeat the check by
+  hand. `exec "write fff1 01 02"` writes only `01` and exits 0; `scan Thingy`
+  scans everything. Fix: positional arity in `CommandSyntax`, checked by
+  `parse`.
+- [ ] **C13. `gatt` subcommands are strings kept in step by hand.**
+  `CommandOptions.swift` (`gatt`, `gattSubcommands`), `CommandRouter.swift`
+  (`runGATT` switch and usage, `printHelp`). The union syntax must cover
+  every subcommand's options, and the operand is recovered after connecting
+  with a `preconditionFailure`. Fix: an enum of subcommands with its syntax
+  and operand, the union computed from it.
+- [ ] **C14. REPL completion and help keep their own option lists.**
+  `REPL/REPL.swift` (`completionPositionalUUID`, `optionsWithValue`),
+  `CommandRouter.swift` (`printHelp`). `read -n foo <TAB>` takes `foo` as
+  the characteristic and offers nothing; help omits `scan -t`. Fix: derive
+  both from `CommandSyntax`.
 - [ ] Codegen backslash escaping is a no-op (`gsub("\\", "\\\\")`).
   `generate-ble-characteristics.rb:164`, `generate-ble-names.rb:31`. "CO2
   Concentration" renders a TAB.

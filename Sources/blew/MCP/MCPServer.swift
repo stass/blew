@@ -105,7 +105,7 @@ final class BlewMCPServer {
             try ToolArguments.validate(args, against: tool.inputSchema)
             command = try makeCommand(params.name, args)
         } catch let error as ToolArgumentError {
-            return buildMCPResult(CommandRouter.invalidArguments(error.message))
+            return buildMCPResult(CommandResult(failing: InvalidArgument(error.message)))
         }
         return try await execute(command, name: params.name, budget: callBudget(command))
     }
@@ -391,7 +391,7 @@ final class BlewMCPServer {
     /// starts with `-` (write data, a UUID typed wrong) stays a value and is
     /// checked as one, never read as an option. Absent fields are left out.
     func positionals(_ values: String?...) -> [String] {
-        [CommandRouter.endOfOptions] + values.compactMap { $0 }
+        [CommandSyntax.endOfOptions] + values.compactMap { $0 }
     }
 
     /// The `gatt <sub>` command line of a `ble_gatt_*` call. Each tool's
@@ -432,7 +432,7 @@ final class BlewMCPServer {
     func buildNUSOptions(_ args: [String: Value]) throws -> NUSOptions {
         let withResponse = args["with_response"]?.boolValue
         return try NUSOptions.make(
-            targeting: buildTargetingArgs(args),
+            targeting: DeviceTarget(CommandSyntax.targeting.parse(buildTargetingArgs(args))),
             sends: args["send"]?.stringValue.map { [$0] } ?? [],
             expect: args["expect"]?.stringValue,
             duration: number(args["duration"]),

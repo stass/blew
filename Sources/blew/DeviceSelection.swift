@@ -51,55 +51,6 @@ struct DeviceTarget: Equatable {
     /// `-p`; nil when the option is absent.
     var pick: PickStrategy?
 
-    /// Parse the targeting options in `args`. `optionsWithValue` lists the
-    /// command's options that take a value, so their values are never read
-    /// as targeting options. Throws a message for the user when a targeting
-    /// option has no value or a value it cannot use, or when an option other
-    /// than `-S` is given twice.
-    static func parse(_ args: [String], optionsWithValue: Set<String>) throws -> DeviceTarget {
-        let options = CommandRouter.scanOptions(args, optionsWithValue: optionsWithValue)
-        func values(_ short: String, _ long: String) throws -> [String] {
-            try options.filter { $0.name == short || $0.name == long }.map { option in
-                guard let value = option.value else { throw InvalidArgument("\(option.name) needs a value") }
-                return value
-            }
-        }
-        func value(_ short: String, _ long: String) throws -> String? {
-            let all = try values(short, long)
-            guard all.count <= 1 else { throw InvalidArgument("\(long) is given more than once") }
-            return all.first
-        }
-
-        var target = DeviceTarget()
-        target.filter.id = try value("-i", "--id")
-        target.filter.name = try value("-n", "--name")
-        target.filter.services = try values("-S", "--service").map { text in
-            guard let uuid = BLENames.canonicalUUID(text) else {
-                throw InvalidArgument("invalid service UUID '\(text)' (use 4 or 8 hex digits or a 128-bit UUID)")
-            }
-            return uuid
-        }
-        if let text = try value("-m", "--manufacturer") {
-            guard let id = UInt16(text) else {
-                throw InvalidArgument("invalid manufacturer ID '\(text)' (use a decimal company identifier, 0 to 65535)")
-            }
-            target.filter.manufacturer = id
-        }
-        if let text = try value("-R", "--rssi-min") {
-            guard let rssi = Int(text) else {
-                throw InvalidArgument("invalid RSSI '\(text)' (use a whole number of dBm, e.g. -70)")
-            }
-            target.filter.rssiMin = rssi
-        }
-        if let text = try value("-p", "--pick") {
-            guard let pick = PickStrategy(rawValue: text) else {
-                throw InvalidArgument("invalid pick strategy '\(text)' (use strongest, first or only)")
-            }
-            target.pick = pick
-        }
-        return target
-    }
-
     /// Whether `connected` is the device this target names. `-i` compares
     /// identifiers. The other filters are checked against the device's
     /// record from the last scan, and nothing matches when that record is
@@ -112,6 +63,46 @@ struct DeviceTarget: Equatable {
             return false
         }
         return filter.matches(advertisement)
+    }
+}
+
+extension DeviceTarget {
+    /// The target the targeting options of `arguments` name; their syntax
+    /// must declare `OptionSpec.targeting`. Throws an `InvalidArgument` for a
+    /// value the target cannot use.
+    init(_ arguments: ParsedArguments) throws {
+        self.init()
+        filter.id = arguments.value(.id)
+        filter.name = arguments.value(.name)
+        filter.services = try arguments.values(.service).map { text in
+            guard let uuid = BLENames.canonicalUUID(text) else {
+                throw InvalidArgument("invalid service UUID '\(text)' (use 4 or 8 hex digits or a 128-bit UUID)")
+            }
+            return uuid
+        }
+        if let text = arguments.value(.manufacturer) {
+            guard let id = UInt16(text) else {
+                throw InvalidArgument("invalid manufacturer ID '\(text)' (use a decimal company identifier, 0 to 65535)")
+            }
+            filter.manufacturer = id
+        }
+        if let text = arguments.value(.rssiMin) {
+            guard let rssi = Int(text) else {
+                throw InvalidArgument("invalid RSSI '\(text)' (use a whole number of dBm, e.g. -70)")
+            }
+            filter.rssiMin = rssi
+        }
+        if let text = arguments.value(.pick) {
+            guard let pick = PickStrategy(rawValue: text) else {
+                throw InvalidArgument("invalid pick strategy '\(text)' (use strongest, first or only)")
+            }
+            self.pick = pick
+        }
+    }
+
+    /// The target `-i <id>` names.
+    init(id: String) {
+        self.init(filter: DeviceFilter(id: id))
     }
 }
 

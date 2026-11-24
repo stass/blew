@@ -1172,53 +1172,53 @@ final class MCPIntegrationTests: XCTestCase {
 final class MCPCommandLineTests: XCTestCase {
     private let server = makeServer()
     private let router = CommandRouter(globals: try! GlobalOptions.parse([]))
-    private let valueOptions = CommandRouter.targetingOptionsWithValue.union(["-f", "--format"])
-
     func testWriteDataThatLooksLikeAnOptionIsTheData() throws {
-        let built = server.buildWriteArgs([
+        let built = try CommandSyntax.write.parse(server.buildWriteArgs([
             "char_uuid": .string("2A19"), "data": .string("-abc"), "format": .string("utf8"),
-        ])
-        XCTAssertEqual(router.positionalArgs(built, optionsWithValue: valueOptions), ["2A19", "-abc"])
-        XCTAssertEqual(try router.valueFormat(built, optionsWithValue: valueOptions), .utf8)
+        ]))
+        XCTAssertEqual(built.positionals, ["2A19", "-abc"])
+        XCTAssertEqual(try CommandRouter.valueFormat(built), .utf8)
     }
 
-    func testReadAndSubscribeCharacteristicIsNeverAnOption() {
-        let read = server.buildReadArgs(["char_uuid": .string("--format=raw")])
-        XCTAssertEqual(router.positionalArgs(read, optionsWithValue: valueOptions), ["--format=raw"])
-        XCTAssertEqual(try router.valueFormat(read, optionsWithValue: valueOptions), .hex)
+    func testReadAndSubscribeCharacteristicIsNeverAnOption() throws {
+        let read = try CommandSyntax.read.parse(server.buildReadArgs(["char_uuid": .string("--format=raw")]))
+        XCTAssertEqual(read.positionals, ["--format=raw"])
+        XCTAssertEqual(try CommandRouter.valueFormat(read), .hex)
 
-        let subOptions = valueOptions.union(["-d", "--duration", "-c", "--count"])
-        let sub = server.buildSubArgs(["char_uuid": .string("-c"), "count": .int(2)])
-        XCTAssertEqual(router.positionalArgs(sub, optionsWithValue: subOptions), ["-c"])
-        XCTAssertEqual(try router.notificationCount(sub, optionsWithValue: subOptions), 2)
+        let sub = try CommandSyntax.subForeground.parse(
+            server.buildSubArgs(["char_uuid": .string("-c"), "count": .int(2)]))
+        XCTAssertEqual(sub.positionals, ["-c"])
+        XCTAssertEqual(try CommandRouter.notificationCount(sub), 2)
     }
 
-    func testPeripheralValueThatLooksLikeAnOptionIsTheValue() {
+    func testPeripheralValueThatLooksLikeAnOptionIsTheValue() throws {
         for command in ["set", "notify"] {
             let built = server.buildPeriphSetArgs(command, [
                 "char_uuid": .string("FFF1"), "value": .string("-abc"), "format": .string("utf8"),
             ])
             XCTAssertEqual(built.first, command)
-            let args = Array(built.dropFirst())
-            XCTAssertEqual(router.positionalArgs(args, optionsWithValue: ["-f", "--format"]), ["FFF1", "-abc"], command)
-            XCTAssertEqual(try router.valueFormat(args, optionsWithValue: ["-f", "--format"]), .utf8, command)
+            let parsed = try CommandSyntax.periphValue.parse(Array(built.dropFirst()))
+            XCTAssertEqual(parsed.positionals, ["FFF1", "-abc"], command)
+            XCTAssertEqual(try CommandRouter.valueFormat(parsed), .utf8, command)
         }
     }
 
-    func testGATTServiceAndCharacteristicAreNeverOptions() {
-        let options = CommandRouter.targetingOptionsWithValue
-        let chars = server.buildGATTArgs("chars", ["service_uuid": .string("-n"), "read_values": .bool(true)])
-        XCTAssertEqual(router.positionalArgs(chars, optionsWithValue: options), ["chars", "-n"])
-        XCTAssertTrue(router.gattFlags(chars).values)
-        let desc = server.buildGATTArgs("desc", ["char_uuid": .string("-x")])
-        XCTAssertEqual(router.positionalArgs(desc, optionsWithValue: options), ["desc", "-x"])
-        let info = server.buildGATTArgs("info", ["char_uuid": .string("--read")])
-        XCTAssertEqual(router.positionalArgs(info, optionsWithValue: options), ["info", "--read"])
+    /// The `gatt` command line of a call, read with every gatt option.
+    private func gatt(_ sub: String, _ args: [String: Value]) throws -> ParsedArguments {
+        try CommandSyntax.gatt.parse(server.buildGATTArgs(sub, args))
+    }
+
+    func testGATTServiceAndCharacteristicAreNeverOptions() throws {
+        let chars = try gatt("chars", ["service_uuid": .string("-n"), "read_values": .bool(true)])
+        XCTAssertEqual(chars.positionals, ["chars", "-n"])
+        XCTAssertTrue(chars.flag(.readValues))
+        XCTAssertEqual(try gatt("desc", ["char_uuid": .string("-x")]).positionals, ["desc", "-x"])
+        XCTAssertEqual(try gatt("info", ["char_uuid": .string("--read")]).positionals, ["info", "--read"])
     }
 
     /// Only `read_values` and `descriptors` turn on the gatt flags: a
     /// service UUID or a name that spells one does not.
-    func testGATTFlagsComeOnlyFromTheirFields() {
+    func testGATTFlagsComeOnlyFromTheirFields() throws {
         let calls: [(String, [String: Value])] = [
             ("chars", ["service_uuid": .string("--read")]),
             ("chars", ["service_uuid": .string("-r")]),
@@ -1227,14 +1227,13 @@ final class MCPCommandLineTests: XCTestCase {
             ("tree", ["name": .string("--read")]),
         ]
         for (sub, args) in calls {
-            let flags = router.gattFlags(server.buildGATTArgs(sub, args))
-            XCTAssertFalse(flags.values, "\(sub) \(args)")
-            XCTAssertFalse(flags.descriptors, "\(sub) \(args)")
+            let parsed = try gatt(sub, args)
+            XCTAssertFalse(parsed.flag(.readValues), "\(sub) \(args)")
+            XCTAssertFalse(parsed.flag(.descriptors), "\(sub) \(args)")
         }
-        let both = router.gattFlags(server.buildGATTArgs("tree", ["descriptors": .bool(true), "read_values": .bool(true)]))
-        XCTAssertTrue(both.values)
-        XCTAssertTrue(both.descriptors)
-        XCTAssertTrue(router.gattFlags(["tree", "-n", "x", "-d", "-r"]).descriptors, "short flags in the REPL")
+        let both = try gatt("tree", ["descriptors": .bool(true), "read_values": .bool(true)])
+        XCTAssertTrue(both.flag(.readValues))
+        XCTAssertTrue(both.flag(.descriptors))
     }
 
     /// Every `format` a tool takes lists the formats blew has, in their order.

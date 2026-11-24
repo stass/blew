@@ -32,7 +32,7 @@ The suite deliberately avoids CoreBluetooth. BLE-dependent paths (scan, connect,
 
 **REPL command parsing**
 
-`TokenizerTests`, `ArgParsingHelperTests` — unit tests for the internal tokenizer and option-parsing helpers in `CommandRouter`. These call `internal` methods directly.
+`TokenizerTests` — unit tests for the internal tokenizer in `CommandRouter`. `CommandOptionsTests` — the option reader (`CommandSyntax.parse`: `--`, numbers, combined flags, missing and repeated values, unknown options) and the commands that use it, which fail on bad options before connecting.
 
 **Line editor**
 

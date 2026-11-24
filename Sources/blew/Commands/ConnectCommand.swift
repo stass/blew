@@ -17,7 +17,7 @@ struct ConnectCommand: ParsableCommand {
         let globals = GlobalOptions.current!
         let router = CommandRouter(globals: globals)
         var args = targeting.toArgs()
-        if let id = deviceId { args.append(id) }
+        if let id = deviceId { args += [CommandSyntax.endOfOptions, id] }
         let result = router.runConnect(args)
         router.renderer.renderResult(result)
         if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
