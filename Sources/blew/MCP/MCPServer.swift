@@ -167,26 +167,20 @@ final class BlewMCPServer {
         case "ble_status":
             return plain { $0.runStatus([]) }
         case "ble_gatt_services":
-            let gattArgs = ["svcs"] + buildTargetingArgs(args)
+            let gattArgs = buildGATTArgs("svcs", args)
             return plain { $0.runGATT(gattArgs) }
         case "ble_gatt_tree":
-            var gattArgs = ["tree"] + buildTargetingArgs(args)
-            if args["descriptors"]?.boolValue == true { gattArgs.append("--descriptors") }
-            if args["read_values"]?.boolValue == true { gattArgs.append("--read") }
-            return plain { [gattArgs] in $0.runGATT(gattArgs) }
+            let gattArgs = buildGATTArgs("tree", args)
+            return plain { $0.runGATT(gattArgs) }
         case "ble_gatt_chars":
-            var gattArgs = ["chars"] + buildTargetingArgs(args)
-            if let svc = args["service_uuid"]?.stringValue { gattArgs.append(svc) }
-            if args["read_values"]?.boolValue == true { gattArgs.append("--read") }
-            return plain { [gattArgs] in $0.runGATT(gattArgs) }
+            let gattArgs = buildGATTArgs("chars", args)
+            return plain { $0.runGATT(gattArgs) }
         case "ble_gatt_descriptors":
-            var gattArgs = ["desc"] + buildTargetingArgs(args)
-            if let char = args["char_uuid"]?.stringValue { gattArgs.append(char) }
-            return plain { [gattArgs] in $0.runGATT(gattArgs) }
+            let gattArgs = buildGATTArgs("desc", args)
+            return plain { $0.runGATT(gattArgs) }
         case "ble_gatt_info":
-            var gattArgs = ["info"]
-            if let char = args["char_uuid"]?.stringValue { gattArgs.append(char) }
-            return plain { [gattArgs] in $0.runGATT(gattArgs) }
+            let gattArgs = buildGATTArgs("info", args)
+            return plain { $0.runGATT(gattArgs) }
         case "ble_read":
             let readArgs = buildReadArgs(args)
             return plain { $0.runRead(readArgs) }
@@ -247,7 +241,7 @@ final class BlewMCPServer {
         do {
             if let structured = structured {
                 return try CallTool.Result(
-                    content: [.text(text)],
+                    content: [.text(text: text, annotations: nil, _meta: nil)],
                     structuredContent: structured,
                     isError: isError
                 )
@@ -257,7 +251,7 @@ final class BlewMCPServer {
         }
 
         return CallTool.Result(
-            content: [.text(text)],
+            content: [.text(text: text, annotations: nil, _meta: nil)],
             isError: isError
         )
     }
@@ -382,19 +376,32 @@ final class BlewMCPServer {
         return result
     }
 
+    /// `device_id` names the device as `-i`, so connect takes no positional.
     func buildConnectArgs(_ args: [String: Value]) -> [String] {
-        var result = buildTargetingArgs(args)
-        if let id = args["device_id"]?.stringValue, !result.contains("-i") {
-            result.append(id)
-        }
-        return result
+        buildTargetingArgs(args)
+    }
+
+    /// The positional values of a command line, after `--`, so a value that
+    /// starts with `-` (write data, a UUID typed wrong) stays a value and is
+    /// checked as one, never read as an option. Absent fields are left out.
+    func positionals(_ values: String?...) -> [String] {
+        [CommandRouter.endOfOptions] + values.compactMap { $0 }
+    }
+
+    /// The `gatt <sub>` command line of a `ble_gatt_*` call. Each tool's
+    /// schema admits only its own fields, so the fields it does not take
+    /// are absent here.
+    func buildGATTArgs(_ sub: String, _ args: [String: Value]) -> [String] {
+        var result = [sub] + buildTargetingArgs(args)
+        if args["descriptors"]?.boolValue == true { result.append("--descriptors") }
+        if args["read_values"]?.boolValue == true { result.append("--read") }
+        return result + positionals(args["service_uuid"]?.stringValue, args["char_uuid"]?.stringValue)
     }
 
     func buildReadArgs(_ args: [String: Value]) -> [String] {
         var result = buildTargetingArgs(args)
         if let fmt = args["format"]?.stringValue { result += ["-f", fmt] }
-        if let char = args["char_uuid"]?.stringValue { result.append(char) }
-        return result
+        return result + positionals(args["char_uuid"]?.stringValue)
     }
 
     func buildWriteArgs(_ args: [String: Value]) -> [String] {
@@ -402,9 +409,7 @@ final class BlewMCPServer {
         if let fmt = args["format"]?.stringValue { result += ["-f", fmt] }
         if args["with_response"]?.boolValue == true { result.append("-r") }
         if args["with_response"]?.boolValue == false { result.append("-w") }
-        if let char = args["char_uuid"]?.stringValue { result.append(char) }
-        if let data = args["data"]?.stringValue { result.append(data) }
-        return result
+        return result + positionals(args["char_uuid"]?.stringValue, args["data"]?.stringValue)
     }
 
     func buildSubArgs(_ args: [String: Value]) -> [String] {
@@ -413,8 +418,7 @@ final class BlewMCPServer {
         let duration = number(args["duration"]) ?? Self.defaultSubscribeDuration
         result += ["-d", "\(duration)"]
         if let count = args["count"]?.intValue { result += ["-c", "\(count)"] }
-        if let char = args["char_uuid"]?.stringValue { result.append(char) }
-        return result
+        return result + positionals(args["char_uuid"]?.stringValue)
     }
 
     /// The options of a `ble_nus` call, built from typed fields: free text
@@ -452,9 +456,7 @@ final class BlewMCPServer {
     func buildPeriphSetArgs(_ cmd: String, _ args: [String: Value]) -> [String] {
         var result = [cmd]
         if let fmt = args["format"]?.stringValue { result += ["-f", fmt] }
-        if let char = args["char_uuid"]?.stringValue { result.append(char) }
-        if let value = args["value"]?.stringValue { result.append(value) }
-        return result
+        return result + positionals(args["char_uuid"]?.stringValue, args["value"]?.stringValue)
     }
 }
 
@@ -686,7 +688,7 @@ extension BlewMCPServer {
                 "type": .string("object"),
                 "properties": .object(targetingProperties.merging([
                     "char_uuid": .object(["type": .string("string"), "description": .string("Characteristic UUID to read")]),
-                    "format":    .object(["type": .string("string"), "enum": .array([.string("hex"), .string("utf8"), .string("uint8"), .string("uint16le"), .string("uint32le"), .string("float32le"), .string("base64"), .string("raw")]), "description": .string("Output format (default: hex)")]),
+                    "format":    .object(["type": .string("string"), "enum": formatNames, "description": .string("Output format (default: hex)")]),
                 ]) { $1 }),
                 "required": .array([.string("char_uuid")]),
             ]),
@@ -700,7 +702,7 @@ extension BlewMCPServer {
                 "properties": .object(targetingProperties.merging([
                     "char_uuid":     .object(["type": .string("string"), "description": .string("Characteristic UUID to write")]),
                     "data":          .object(["type": .string("string"), "description": .string("Value to write (interpreted according to format)")]),
-                    "format":        .object(["type": .string("string"), "enum": .array([.string("hex"), .string("utf8"), .string("uint8"), .string("uint16le"), .string("uint32le"), .string("float32le"), .string("base64"), .string("raw")]), "description": .string("Input format (default: hex)")]),
+                    "format":        .object(["type": .string("string"), "enum": formatNames, "description": .string("Input format (default: hex)")]),
                     "with_response": .object(["type": .string("boolean"), "description": .string("true = write with response, false = without response, omit = auto")]),
                 ]) { $1 }),
                 "required": .array([.string("char_uuid"), .string("data")]),
@@ -714,7 +716,7 @@ extension BlewMCPServer {
                 "type": .string("object"),
                 "properties": .object(targetingProperties.merging([
                     "char_uuid": .object(["type": .string("string"), "description": .string("Characteristic UUID to subscribe to")]),
-                    "format":    .object(["type": .string("string"), "enum": .array([.string("hex"), .string("utf8"), .string("uint8"), .string("uint16le"), .string("uint32le"), .string("float32le"), .string("base64"), .string("raw")]), "description": .string("Value format (default: hex)")]),
+                    "format":    .object(["type": .string("string"), "enum": formatNames, "description": .string("Value format (default: hex)")]),
                     "duration":  .object(["type": .string("number"), "minimum": .int(0), "maximum": .double(maxCallDuration), "description": .string("Collection duration in seconds (default: \(Int(defaultSubscribeDuration)), at most \(Int(maxCallDuration)))")]),
                     "count":     .object(["type": .string("integer"), "minimum": .int(1), "description": .string("Stop after this many notifications (default: no limit; the call still ends after `duration`)")]),
                 ]) { $1 }),
@@ -760,7 +762,7 @@ extension BlewMCPServer {
                 "properties": .object([
                     "char_uuid": .object(["type": .string("string"), "description": .string("Characteristic UUID")]),
                     "value":     .object(["type": .string("string"), "description": .string("New value")]),
-                    "format":    .object(["type": .string("string"), "description": .string("Value format (default: hex)")]),
+                    "format":    .object(["type": .string("string"), "enum": formatNames, "description": .string("Value format (default: hex)")]),
                 ]),
                 "required": .array([.string("char_uuid"), .string("value")]),
             ]),
@@ -774,7 +776,7 @@ extension BlewMCPServer {
                 "properties": .object([
                     "char_uuid": .object(["type": .string("string"), "description": .string("Characteristic UUID")]),
                     "value":     .object(["type": .string("string"), "description": .string("Value to send")]),
-                    "format":    .object(["type": .string("string"), "description": .string("Value format (default: hex)")]),
+                    "format":    .object(["type": .string("string"), "enum": formatNames, "description": .string("Value format (default: hex)")]),
                 ]),
                 "required": .array([.string("char_uuid"), .string("value")]),
             ]),
@@ -801,6 +803,9 @@ extension BlewMCPServer {
             annotations: .init(readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true)
         ),
     ]
+
+    /// The `format` values a tool takes: every `ValueFormat`, in its order.
+    static let formatNames: Value = .array(ValueFormat.allCases.map { .string($0.rawValue) })
 
     static let targetingProperties: [String: Value] = [
         "name":         .object(["type": .string("string"), "description": .string("Device name filter (substring match)")]),

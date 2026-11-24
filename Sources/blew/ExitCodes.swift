@@ -52,4 +52,10 @@ extension CommandResult {
         errors.append(error.localizedDescription)
         exitCode = BlewExitCode(for: error).code
     }
+
+    /// The result of a command that failed with `error` before it started.
+    init(failing error: Error) {
+        self.init()
+        fail(error)
+    }
 }

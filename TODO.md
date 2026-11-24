@@ -115,28 +115,6 @@ None open.
   error with `CommandResult.fail`. `ensurePoweredOn` (`BLEManager.swift:45`)
   is unused; delete it.
 
-### NUS bridge
-
-- [ ] **N6. NUS keeps its own option and error rules.**
-  `CommandRouter+NUS.swift:144-148` maps errors to exit codes itself
-  (`(error as? BLEError)?.exitCode ?? 5`) instead of `BlewExitCode(for:)`,
-  so an `InvalidArgument` there exits 5, not 6. `:161` reads options with
-  `parseStringOption`, so `nus -s` without its value is taken as no `-s`;
-  use `optionValue`, which rejects a missing or repeated value.
-
-### MCP
-
-- [ ] **M3. Deprecated `.text(_:)`.** `MCPServer.swift:250`, `:260`. Use
-  `.text(text:annotations:_meta:)`. These are the only build warnings.
-- [ ] **M7. MCP command lines put values where options go.**
-  `MCPServer.swift:393-418`, `:452-458` (`buildReadArgs`, `buildWriteArgs`,
-  `buildSubArgs`, `buildPeriphSetArgs`) append positionals without `--`, so
-  `ble_write {format: utf8, data: "-abc"}` fails with "missing data to
-  write" (it fails safely, before connecting). The `format` enums at `:689`,
-  `:703`, `:717` are hand-written lists; build them from
-  `ValueFormat.allCases`. Building the calls from typed fields (C8) closes
-  both.
-
 ### Output
 
 - [ ] **O4. TextRenderer escapes at each `Swift.print` call site.**
@@ -185,6 +163,24 @@ None open.
   agent or an `exec` script loses its connection and background
   subscriptions on the old device with no sign in its output. Fix: carry the
   notice in the command's result (MCP `content`) and show it without `-v`.
+- [ ] **C9. Option values have two strict readers and a lenient one.**
+  `DeviceSelection.swift:59` (`DeviceTarget.parse`, its local `value` and
+  `values`) repeats `CommandRouter.optionValue`/`optionValues`, messages
+  included; a change to one (say `--long=value`) leaves targeting and
+  command options disagreeing. `parseAllStringOptions` still drops a
+  missing value: `periph adv -n foo -S` (`CommandRouter.swift:1555`)
+  advertises with no service instead of exiting 6. `parseStringOption`,
+  `parseIntOption` and `parseDoubleOption` have no production caller.
+  Fix: one static reader that `DeviceTarget.parse` calls, `periph adv -S`
+  on `optionValues`, and delete the lenient helpers and their tests.
+- [ ] **C10. Two ways to fail a command before it starts.**
+  `CommandRouter.invalidArguments("\(error)")` (for example in `runRead`
+  and `runSub`) sets exit 6 whatever the error and formats it with
+  `"\(error)"`; `CommandResult(failing:)` (`ExitCodes.swift`) maps the
+  error by type. Every caught error there is an `InvalidArgument` today,
+  so the codes agree, but a new error type thrown there exits 6 when its
+  type says otherwise. Fix: catch blocks use `CommandResult(failing:)`;
+  `invalidArguments` keeps only literal messages.
 
 ### Peripheral mode
 

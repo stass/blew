@@ -477,9 +477,11 @@ extension NUSPort {
     }
 }
 
-struct NUSPortError: Error, CustomStringConvertible {
+/// A local endpoint of the bridge failed (pty, socket, listener).
+struct NUSPortError: Error, LocalizedError, CustomStringConvertible {
     let description: String
     init(_ description: String) { self.description = description }
+    var errorDescription: String? { description }
 }
 
 // MARK: - Descriptor helpers

@@ -209,7 +209,7 @@ final class PeripheralUUIDTests: XCTestCase {
         let result = try await BlewMCPServer().handleToolCall(params)
         XCTAssertEqual(result.isError, true)
         let text = result.content.compactMap { item -> String? in
-            if case .text(let t) = item { return t.text }
+            if case .text(let text, _, _) = item { return text }
             return nil
         }.joined()
         XCTAssertTrue(text.contains("invalid UUID \"180G\""), text)

@@ -560,6 +560,15 @@ final class CommandRouter {
         return result
     }
 
+    /// The `gatt tree`/`gatt chars` flags at option positions of `args`:
+    /// `-d`/`--descriptors` and `-r`/`--read`. An option value or a token
+    /// after `--` that spells a flag is not one.
+    func gattFlags(_ args: [String]) -> (descriptors: Bool, values: Bool) {
+        let options = Self.targetingOptionsWithValue
+        return (hasFlag(args, short: "-d", long: "--descriptors", optionsWithValue: options),
+                hasFlag(args, short: "-r", long: "--read", optionsWithValue: options))
+    }
+
     func runGATT(_ args: [String]) -> CommandResult {
         let targetingOpts = Self.targetingOptionsWithValue
         let args = expandArgs(args, optionsWithValue: targetingOpts)
@@ -608,8 +617,9 @@ final class CommandRouter {
                     result.output.append(.services(rows))
 
                 case "tree":
-                    let includeDescriptors = args.contains("-d") || args.contains("--descriptors")
-                    let includeValues = args.contains("-r") || args.contains("--read")
+                    let flags = gattFlags(args)
+                    let includeDescriptors = flags.descriptors
+                    let includeValues = flags.values
                     let tree = try await manager.discoverTree(includeDescriptors: includeDescriptors)
                     var treeServices: [GATTTreeService] = []
                     for service in tree {
@@ -672,7 +682,7 @@ final class CommandRouter {
                         return
                     case .notFound: svcUUID = svcInput
                     }
-                    let includeValues = args.contains("-r") || args.contains("--read")
+                    let includeValues = gattFlags(args).values
                     let chars = try await manager.discoverCharacteristics(forService: svcUUID)
                     var charRows: [CharacteristicRow] = []
                     for char in chars {
@@ -1347,12 +1357,21 @@ final class CommandRouter {
     /// value or is given more than once, so a missing value never reads as
     /// a missing option.
     func optionValue(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) throws -> String? {
-        let given = Self.scanOptions(args, optionsWithValue: optionsWithValue.union([short, long]))
+        let values = try optionValues(args, short: short, long: long, optionsWithValue: optionsWithValue)
+        guard values.count <= 1 else { throw InvalidArgument("\(long) is given more than once") }
+        return values.first
+    }
+
+    /// Every value of the repeatable option `short`/`long` in `args`, in
+    /// order. Throws when it ends `args` without its value, so a missing
+    /// value never reads as a missing option.
+    func optionValues(_ args: [String], short: String, long: String, optionsWithValue: Set<String>) throws -> [String] {
+        try Self.scanOptions(args, optionsWithValue: optionsWithValue.union([short, long]))
             .filter { $0.name == short || $0.name == long }
-        guard given.count <= 1 else { throw InvalidArgument("\(long) is given more than once") }
-        guard let option = given.first else { return nil }
-        guard let value = option.value else { throw InvalidArgument("\(option.name) needs a value") }
-        return value
+            .map { option in
+                guard let value = option.value else { throw InvalidArgument("\(option.name) needs a value") }
+                return value
+            }
     }
 
     /// The `-f`/`--format` of `args`, hex when it is absent. Throws for a

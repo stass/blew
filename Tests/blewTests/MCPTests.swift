@@ -750,7 +750,7 @@ final class MCPToolDispatchTests: XCTestCase {
         let params = CallTool.Parameters(name: "ble_gatt_info", arguments: ["char_uuid": .string("2A19")])
         let result = try await server.handleToolCall(params)
         let text = result.content.compactMap { item -> String? in
-            if case .text(let t) = item { return t.text }
+            if case .text(let text, _, _) = item { return text }
             return nil
         }.joined()
         XCTAssertTrue(text.contains("Battery Level"), "Expected 'Battery Level' in text content: \(text)")
@@ -836,7 +836,7 @@ final class MCPToolDispatchTests: XCTestCase {
         commandResult.errors = ["something failed"]
         let mcpResult = server.buildMCPResult(commandResult)
         let text = mcpResult.content.compactMap { item -> String? in
-            if case .text(let t) = item { return t.text }
+            if case .text(let text, _, _) = item { return text }
             return nil
         }.joined()
         XCTAssertTrue(text.contains("something failed"), "Error text should appear in content: \(text)")
@@ -846,7 +846,7 @@ final class MCPToolDispatchTests: XCTestCase {
         let commandResult = CommandResult()  // exitCode=0, no output
         let mcpResult = server.buildMCPResult(commandResult)
         let text = mcpResult.content.compactMap { item -> String? in
-            if case .text(let t) = item { return t.text }
+            if case .text(let text, _, _) = item { return text }
             return nil
         }.joined()
         XCTAssertEqual(text, "OK")
@@ -1119,6 +1119,94 @@ final class MCPIntegrationTests: XCTestCase {
             let text = contentArray.compactMap { $0["text"] as? String }.joined()
             XCTAssertTrue(text.contains("Battery Level") || text.contains("2A19"),
                           "Text should contain characteristic info: \(text)")
+        }
+    }
+}
+
+// MARK: - MCPCommandLineTests
+
+/// A tool argument reaches the router as the value its field names,
+/// whatever it looks like: values never stand where options go.
+final class MCPCommandLineTests: XCTestCase {
+    private let server = makeServer()
+    private let router = CommandRouter(globals: try! GlobalOptions.parse([]))
+    private let valueOptions = CommandRouter.targetingOptionsWithValue.union(["-f", "--format"])
+
+    func testWriteDataThatLooksLikeAnOptionIsTheData() throws {
+        let built = server.buildWriteArgs([
+            "char_uuid": .string("2A19"), "data": .string("-abc"), "format": .string("utf8"),
+        ])
+        XCTAssertEqual(router.positionalArgs(built, optionsWithValue: valueOptions), ["2A19", "-abc"])
+        XCTAssertEqual(try router.valueFormat(built, optionsWithValue: valueOptions), .utf8)
+    }
+
+    func testReadAndSubscribeCharacteristicIsNeverAnOption() {
+        let read = server.buildReadArgs(["char_uuid": .string("--format=raw")])
+        XCTAssertEqual(router.positionalArgs(read, optionsWithValue: valueOptions), ["--format=raw"])
+        XCTAssertEqual(try router.valueFormat(read, optionsWithValue: valueOptions), .hex)
+
+        let subOptions = valueOptions.union(["-d", "--duration", "-c", "--count"])
+        let sub = server.buildSubArgs(["char_uuid": .string("-c"), "count": .int(2)])
+        XCTAssertEqual(router.positionalArgs(sub, optionsWithValue: subOptions), ["-c"])
+        XCTAssertEqual(try router.notificationCount(sub, optionsWithValue: subOptions), 2)
+    }
+
+    func testPeripheralValueThatLooksLikeAnOptionIsTheValue() {
+        for command in ["set", "notify"] {
+            let built = server.buildPeriphSetArgs(command, [
+                "char_uuid": .string("FFF1"), "value": .string("-abc"), "format": .string("utf8"),
+            ])
+            XCTAssertEqual(built.first, command)
+            let args = Array(built.dropFirst())
+            XCTAssertEqual(router.positionalArgs(args, optionsWithValue: ["-f", "--format"]), ["FFF1", "-abc"], command)
+            XCTAssertEqual(try router.valueFormat(args, optionsWithValue: ["-f", "--format"]), .utf8, command)
+        }
+    }
+
+    func testGATTServiceAndCharacteristicAreNeverOptions() {
+        let options = CommandRouter.targetingOptionsWithValue
+        let chars = server.buildGATTArgs("chars", ["service_uuid": .string("-n"), "read_values": .bool(true)])
+        XCTAssertEqual(router.positionalArgs(chars, optionsWithValue: options), ["chars", "-n"])
+        XCTAssertTrue(router.gattFlags(chars).values)
+        let desc = server.buildGATTArgs("desc", ["char_uuid": .string("-x")])
+        XCTAssertEqual(router.positionalArgs(desc, optionsWithValue: options), ["desc", "-x"])
+        let info = server.buildGATTArgs("info", ["char_uuid": .string("--read")])
+        XCTAssertEqual(router.positionalArgs(info, optionsWithValue: options), ["info", "--read"])
+    }
+
+    /// Only `read_values` and `descriptors` turn on the gatt flags: a
+    /// service UUID or a name that spells one does not.
+    func testGATTFlagsComeOnlyFromTheirFields() {
+        let calls: [(String, [String: Value])] = [
+            ("chars", ["service_uuid": .string("--read")]),
+            ("chars", ["service_uuid": .string("-r")]),
+            ("chars", ["name": .string("-r"), "service_uuid": .string("180F")]),
+            ("tree", ["name": .string("-d")]),
+            ("tree", ["name": .string("--read")]),
+        ]
+        for (sub, args) in calls {
+            let flags = router.gattFlags(server.buildGATTArgs(sub, args))
+            XCTAssertFalse(flags.values, "\(sub) \(args)")
+            XCTAssertFalse(flags.descriptors, "\(sub) \(args)")
+        }
+        let both = router.gattFlags(server.buildGATTArgs("tree", ["descriptors": .bool(true), "read_values": .bool(true)]))
+        XCTAssertTrue(both.values)
+        XCTAssertTrue(both.descriptors)
+        XCTAssertTrue(router.gattFlags(["tree", "-n", "x", "-d", "-r"]).descriptors, "short flags in the REPL")
+    }
+
+    /// Every `format` a tool takes lists the formats blew has, in their order.
+    func testFormatEnumsAreTheValueFormats() {
+        let formats = Value.array(ValueFormat.allCases.map { .string($0.rawValue) })
+        let tools = Dictionary(uniqueKeysWithValues: BlewMCPServer.toolDefinitions.map { ($0.name, $0) })
+        for name in ["ble_read", "ble_write", "ble_subscribe", "ble_periph_set", "ble_periph_notify"] {
+            guard case .object(let schema) = tools[name]?.inputSchema,
+                  case .object(let properties) = schema["properties"],
+                  case .object(let format) = properties["format"] else {
+                XCTFail("\(name) has no format property")
+                continue
+            }
+            XCTAssertEqual(format["enum"], formats, name)
         }
     }
 }

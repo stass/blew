@@ -538,6 +538,28 @@ final class NUSOptionTests: XCTestCase {
         XCTAssertEqual(NUSOptions.deviceFilter, DeviceFilter(services: [NUS.service]))
     }
 
+    /// An option that takes a value is refused without it or when given
+    /// twice, never read as absent; every refused option is exit code 6.
+    func testValueOptionsNeedTheirValueOnce() {
+        let bad: [[String]] = [
+            ["-s"], ["--send"], ["-s", "x", "-s"], ["-d"], ["-e"], ["--file"], ["-l"], ["--listen", "7000", "--bind"],
+            ["--file", "a", "--file", "b"], ["-e", "a", "-e", "b"], ["-d", "1", "-d", "2"],
+        ]
+        for args in bad {
+            XCTAssertThrowsError(try parse(args, stdin: false), "\(args) should be rejected") { error in
+                XCTAssertEqual(BlewExitCode(for: error).code, BlewExitCode.invalidArguments.code, "\(args): \(error)")
+            }
+        }
+    }
+
+    func testRefusedOptionsMapToTheInvalidArgumentsCode() {
+        for args in [["stray"], ["--listen", "notaport"], ["-r", "-w"], ["--send", "\\q"], ["-S", "not-a-uuid"]] {
+            XCTAssertThrowsError(try parse(args)) { error in
+                XCTAssertEqual(BlewExitCode(for: error).code, BlewExitCode.invalidArguments.code, "\(args): \(error)")
+            }
+        }
+    }
+
     func testDispatchRejectsBadOptionsWithoutTouchingBluetooth() {
         let result = makeRouter(interactive: true).dispatch("nus --pty --expect x")
         XCTAssertEqual(result.exitCode, BlewExitCode.invalidArguments.code)
@@ -548,6 +570,21 @@ final class NUSOptionTests: XCTestCase {
 
 final class NUSStepTests: XCTestCase {
     private let failed = BlewExitCode.operationFailed.code
+
+    /// A lost link takes the exit code `BlewExitCode(for:)` gives its error.
+    func testLinkLostTakesTheSharedExitCode() {
+        guard case .linkLost(let reason, let exitCode, let linkDown) =
+                NUSOutcome.linkLost("write failed", InvalidArgument("value too long")) else {
+            return XCTFail("not a lost link")
+        }
+        XCTAssertEqual(reason, "write failed: value too long")
+        XCTAssertEqual(exitCode, BlewExitCode.invalidArguments.code)
+        XCTAssertFalse(linkDown)
+        guard case .linkLost(_, let otherCode, _) = NUSOutcome.linkLost(nil, NUSPortError("closed")) else {
+            return XCTFail("not a lost link")
+        }
+        XCTAssertEqual(otherCode, failed)
+    }
 
     func testConnectFailureRetriesOnlyUnderReconnectAfterAFirstConnection() {
         XCTAssertTrue(NUSOptions.retries(afterConnectFailure: failed, reconnect: true, connectedOnce: true))

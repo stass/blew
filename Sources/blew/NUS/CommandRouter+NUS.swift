@@ -40,29 +40,28 @@ struct NUSOptions {
 
     /// Check the raw values of a `nus` command and build its options.
     /// `stdinAvailable` is false in the REPL, `exec` and MCP, where standard
-    /// input is not the user's to bridge. Throws a message for the user.
+    /// input is not the user's to bridge. Throws an `InvalidArgument`.
     static func make(
         targeting: [String], sends: [String] = [], file: String? = nil, expect: String? = nil,
         duration: Double? = nil, pty: Bool = false, listen: UInt16? = nil, bind: String? = nil,
         reconnect: Bool = false, withResponse: Bool = false, withoutResponse: Bool = false,
         stdinAvailable: Bool
     ) throws -> NUSOptions {
-        func fail(_ message: String) -> NUSPortError { NUSPortError(message) }
         func escaped(_ text: String, _ option: String) throws -> Data {
             guard let data = NUS.unescape(text) else {
-                throw fail("invalid escape in \(option) '\(text)' (use \\n \\r \\t \\0 \\\\ \\xHH)")
+                throw InvalidArgument("invalid escape in \(option) '\(text)' (use \\n \\r \\t \\0 \\\\ \\xHH)")
             }
             return data
         }
 
         let sources = [!sends.isEmpty, file != nil, pty, listen != nil].filter { $0 }.count
-        guard sources <= 1 else { throw fail("use only one of --send, --file, --pty and --listen") }
-        guard bind == nil || listen != nil else { throw fail("--bind needs --listen") }
+        guard sources <= 1 else { throw InvalidArgument("use only one of --send, --file, --pty and --listen") }
+        guard bind == nil || listen != nil else { throw InvalidArgument("--bind needs --listen") }
         guard !(withResponse && withoutResponse) else {
-            throw fail("use only one of --with-response and --without-response")
+            throw InvalidArgument("use only one of --with-response and --without-response")
         }
         if let duration, !CommandRouter.isValidDuration(duration) {
-            throw fail("invalid duration '\(duration)' (use 0 to \(Int(CommandRouter.maxDuration)) seconds)")
+            throw InvalidArgument("invalid duration '\(duration)' (use 0 to \(Int(CommandRouter.maxDuration)) seconds)")
         }
 
         let endpoint: Endpoint
@@ -70,7 +69,7 @@ struct NUSOptions {
             endpoint = .fixed(try sends.map { try escaped($0, "--send") }.reduce(Data(), +))
         } else if let file {
             guard let data = FileManager.default.contents(atPath: file) else {
-                throw fail("cannot read file '\(file)'")
+                throw InvalidArgument("cannot read file '\(file)'")
             }
             endpoint = .fixed(data)
         } else if pty {
@@ -84,15 +83,11 @@ struct NUSOptions {
         let expected = try expect.map { try escaped($0, "--expect") }
         switch (expected, endpoint) {
         case (.some, .pty), (.some, .tcp):
-            throw fail("--expect works only with standard input/output, --send or --file")
+            throw InvalidArgument("--expect works only with standard input/output, --send or --file")
         default: break
         }
 
-        do {
-            _ = try DeviceTarget.parse(targeting, optionsWithValue: CommandRouter.nusOptionsWithValue)
-        } catch {
-            throw fail("\(error)")
-        }
+        _ = try DeviceTarget.parse(targeting, optionsWithValue: CommandRouter.nusOptionsWithValue)
         return NUSOptions(
             targeting: targeting,
             endpoint: endpoint,
@@ -163,19 +158,18 @@ struct NUSOptions {
 
 extension NUSOutcome {
     /// The link was lost because of `error` (`context` says what was being
-    /// done): a BLEError keeps its exit code, so Bluetooth becoming
-    /// unavailable ends `nus` with exit code 3. A disconnect, no connection
-    /// or Bluetooth becoming unavailable shows the link is gone.
+    /// done), with the exit code `BlewExitCode(for:)` gives it, so Bluetooth
+    /// becoming unavailable ends `nus` with exit code 3. A disconnect, no
+    /// connection or Bluetooth becoming unavailable shows the link is gone.
     static func linkLost(_ context: String?, _ error: Error) -> NUSOutcome {
-        let bleError = error as? BLEError
-        let message = bleError?.localizedDescription ?? error.localizedDescription
+        let message = error.localizedDescription
         let reason = context.map { "\($0): \(message)" } ?? message
         let linkDown: Bool
-        switch bleError {
+        switch error as? BLEError {
         case .connectionFailed, .notConnected, .bluetoothUnavailable: linkDown = true
         default: linkDown = false
         }
-        return .linkLost(reason, exitCode: bleError?.exitCode ?? BlewExitCode.operationFailed.code, linkDown: linkDown)
+        return .linkLost(reason, exitCode: BlewExitCode(for: error).code, linkDown: linkDown)
     }
 }
 
@@ -184,31 +178,31 @@ extension CommandRouter {
         "-s", "--send", "--file", "-e", "--expect", "-d", "--duration", "-l", "--listen", "--bind",
     ])
 
-    /// Parse `nus` arguments from the REPL or a script. Throws a message for
-    /// the user on invalid input.
+    /// Parse `nus` arguments from the REPL or a script. Throws an
+    /// `InvalidArgument` on invalid input.
     func parseNUSOptions(_ args: [String], stdinAvailable: Bool) throws -> NUSOptions {
         let valueOptions = Self.nusOptionsWithValue
-        func value(_ short: String, _ long: String) -> String? {
-            parseStringOption(args, short: short, long: long, optionsWithValue: valueOptions)
+        func value(_ short: String, _ long: String) throws -> String? {
+            try optionValue(args, short: short, long: long, optionsWithValue: valueOptions)
         }
         func flag(_ short: String, _ long: String) -> Bool {
             hasFlag(args, short: short, long: long, optionsWithValue: valueOptions)
         }
 
         if let stray = positionalArgs(args, optionsWithValue: valueOptions).first {
-            throw NUSPortError("unexpected argument '\(stray)'")
+            throw InvalidArgument("unexpected argument '\(stray)'")
         }
         let listen = try value("-l", "--listen").map { text in
-            guard let port = UInt16(text) else { throw NUSPortError("invalid port '\(text)'") }
+            guard let port = UInt16(text) else { throw InvalidArgument("invalid port '\(text)'") }
             return port
         }
         let duration = try value("-d", "--duration").map { text in
-            guard let seconds = Double(text) else { throw NUSPortError("invalid duration '\(text)'") }
+            guard let seconds = Double(text) else { throw InvalidArgument("invalid duration '\(text)'") }
             return seconds
         }
         return try NUSOptions.make(
             targeting: args,
-            sends: parseAllStringOptions(args, short: "-s", long: "--send", optionsWithValue: valueOptions),
+            sends: optionValues(args, short: "-s", long: "--send", optionsWithValue: valueOptions),
             file: value("--file", "--file"),
             expect: value("-e", "--expect"),
             duration: duration,
@@ -227,16 +221,8 @@ extension CommandRouter {
         do {
             return runNUS(try parseNUSOptions(args, stdinAvailable: !isInteractiveMode), emit: emit)
         } catch {
-            return Self.nusInvalid(error)
+            return CommandResult(failing: error)
         }
-    }
-
-    /// The result for options `NUSOptions.make` refused.
-    static func nusInvalid(_ error: Error) -> CommandResult {
-        var result = CommandResult()
-        result.errors.append("\(error)")
-        result.exitCode = BlewExitCode.invalidArguments.code
-        return result
     }
 
     /// Bridge a local port to the connected device's Nordic UART Service.
@@ -263,8 +249,7 @@ extension CommandRouter {
                 port = try NUSPort.tcp(host: host, port: number, onEvent: { status("client", $0) })
             }
         } catch {
-            result.errors.append("\(error)")
-            result.exitCode = BlewExitCode.operationFailed.code
+            result.fail(error)
             return result
         }
         defer { port.close() }

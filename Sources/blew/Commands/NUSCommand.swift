@@ -66,7 +66,7 @@ struct NUSCommand: ParsableCommand {
                 withResponse: withResponse, withoutResponse: withoutResponse, stdinAvailable: true)
             result = router.runNUS(options, emit: { router.renderer.render($0) })
         } catch {
-            result = CommandRouter.nusInvalid(error)
+            result = CommandResult(failing: error)
         }
         router.renderer.renderResult(result)
         if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }
