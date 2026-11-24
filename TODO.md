@@ -14,18 +14,6 @@ later release. Delete an item in the commit that fixes it, citing its ID
 
 ## P0: release blockers (0.3.0)
 
-- [ ] **B2. A failed service discovery leaves the state "connected".**
-  `BLEManager.swift:154-160`, `:499-541`. `connectedPeripheralId` is set
-  before `discoverAllServices`, and nothing rolls it back if discovery throws
-  or times out. Auto-connect then returns at once and every operation fails
-  with `characteristicNotFound`. The `try? await Task.sleep` at `:512` also
-  swallows cancellation.
-- [ ] **B3. Bluetooth power-off or loss of authorization fails nothing**
-  *(plausible)*. `BLEManager.swift:30-34`,
-  `BLEEventProcessor.swift:218-219`. Only `cbState` is recorded. Pending
-  continuations are not failed, the scan and notification streams are not
-  finished, and the connection state is not cleared. `sub`, `nus` and
-  `scan -w` hang, and `status` still says connected.
 - [ ] **B6. Ctrl-C in one-shot commands bypasses all interrupt handling.**
   `Sources/blew/Blew.swift:65`. `installSignalHandlers` runs only on the REPL
   path. In CLI mode SIGINT kills the process, so there is no exit code 130,
@@ -105,6 +93,19 @@ later release. Delete an item in the commit that fixes it, citing its ID
   then disconnects it and its own `didConnect` is dropped. Fix: serialise
   connect and disconnect in `BLECentral`, or give each attempt a token that
   `cancelConnect`, `isConnecting` and `updateConnection` require.
+  A connect whose service discovery fails ends the link at once
+  (`endConnection`) and queues `cancelPeripheralConnection`; a REPL or MCP
+  retry of the same device faster than that disconnect round-trip has its
+  connect failed by the old connection's late `didDisconnect` (exit 5).
+- [ ] **S11. A registration made after Bluetooth left poweredOn is never
+  failed.** `BLEManager.swift:110-153`, `BLEEventProcessor.swift` (the
+  `centralStateChanged` case). The processor fails what is registered when
+  the state changes, but nothing refuses a later registration: a power-off
+  during `closeConnection` lets `beginConnect` install a wait that CoreBluetooth
+  never answers, so `connect` exits 4 (timeout) instead of 3. Fix: the
+  processor owns the central state under its lock (`BLECentral.cbState`
+  reads it) and `beginConnect` and every `set*Continuation` fail at once
+  with `BLEError.unavailable(state)` when it is not poweredOn.
 
 ### Exit codes and README contract
 
@@ -113,9 +114,11 @@ later release. Delete an item in the commit that fixes it, citing its ID
 - [ ] **E2. Scan and auto-connect map every error to 5.**
   `CommandRouter.swift:217-219`, `:306-308`, `:389-391`. With Bluetooth off
   they should exit 3. They also print the raw enum instead of
-  `localizedDescription`.
-- [ ] **E3. `sub` exits 0 when the device disconnects.**
-  `CommandRouter.swift:945-969`.
+  `localizedDescription`. A scan that Bluetooth turning off ends
+  (`BLEEventProcessor` finishes the scan stream; `scan -w`, `watch`) prints
+  its table and exits 0; it should exit 3. Make the scan stream an
+  `AsyncThrowingStream` finished with `bluetoothUnavailable`, as the
+  notification stream is, and iterate it with `for try await`.
 - [ ] **E4. A short global `-t` with Bluetooth off exits 4 instead of 3.**
   `waitForPoweredOn(5s)` runs inside `waitInterruptible(globals.timeout)`.
   `BLEManager.swift:61-71` also polls the full 5 s instead of failing fast;

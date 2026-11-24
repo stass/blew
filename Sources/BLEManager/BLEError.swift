@@ -1,4 +1,5 @@
 import Foundation
+import CoreBluetooth
 
 public enum BLEError: Error, Sendable {
     // Central errors
@@ -47,6 +48,18 @@ public enum BLEError: Error, Sendable {
         case .peripheralUnavailable(let msg): return "Peripheral unavailable: \(msg)"
         case .advertisingFailed(let msg): return "Advertising failed: \(msg)"
         case .serviceRegistrationFailed(let msg): return "Service registration failed: \(msg)"
+        }
+    }
+
+    /// Why the central cannot be used while CoreBluetooth reports `state`
+    /// (any state but poweredOn).
+    static func unavailable(_ state: CBManagerState) -> BLEError {
+        switch state {
+        case .poweredOff: return .bluetoothUnavailable("Bluetooth is powered off")
+        case .unauthorized: return .bluetoothUnavailable("Bluetooth access unauthorized")
+        case .unsupported: return .bluetoothUnavailable("Bluetooth is not supported")
+        case .resetting: return .bluetoothUnavailable("Bluetooth is resetting")
+        default: return .bluetoothUnavailable("Bluetooth state: \(state.rawValue)")
         }
     }
 }

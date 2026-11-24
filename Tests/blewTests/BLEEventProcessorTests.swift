@@ -1,4 +1,5 @@
 import XCTest
+import CoreBluetooth
 @testable import BLEManager
 
 /// The event processor without CoreBluetooth: events are handed to it
@@ -60,8 +61,8 @@ final class BLEEventProcessorTests: XCTestCase {
     /// A notification stream registered the way BLEManager.subscribe does:
     /// its termination handler deregisters it, which takes the processor's
     /// lock. `finished` is signalled once the stream has ended.
-    private func registerStream(_ processor: BLEEventProcessor, finished: DispatchSemaphore) -> AsyncStream<Data> {
-        AsyncStream<Data> { continuation in
+    private func registerStream(_ processor: BLEEventProcessor, finished: DispatchSemaphore) -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream<Data, Error> { continuation in
             processor.setNotificationContinuation(forChar: "TX", continuation)
             continuation.onTermination = { _ in
                 processor.setNotificationContinuation(forChar: "TX", nil)
@@ -271,5 +272,130 @@ final class BLEEventProcessorTests: XCTestCase {
             return XCTFail("the connected peripheral's value did not complete the read")
         }
         XCTAssertEqual(value, Data([0x64]))
+    }
+
+    /// A scan stream registered the way BLECentral.scan does. `finished` is
+    /// signalled once the stream has ended.
+    private func registerScan(_ processor: BLEEventProcessor, finished: DispatchSemaphore) -> AsyncStream<DiscoveredDevice> {
+        AsyncStream<DiscoveredDevice> { continuation in
+            processor.setScanContinuation(continuation)
+            continuation.onTermination = { _ in
+                processor.setScanContinuation(nil)
+                finished.signal()
+            }
+        }
+    }
+
+    /// Bluetooth leaving poweredOn (powered off, access revoked, the stack
+    /// resetting, no radio) ends everything that waits on the radio: the
+    /// connection's one-shot waits fail with bluetoothUnavailable, its
+    /// notification streams and the scan finish, and blew is no longer
+    /// connected.
+    func testBluetoothBecomingUnavailableEndsTheConnectionAndTheScan() {
+        for state in [CBManagerState.poweredOff, .unauthorized, .resetting, .unsupported] {
+            let processor = connected(to: deviceB)
+            let read = Wait<Data> { processor.setReadContinuation(forChar: "2A19", $0) }
+            let write = Wait<Void> { processor.setWriteContinuation(forChar: "FFF1", $0) }
+            let streamFinished = DispatchSemaphore(value: 0)
+            let stream = registerStream(processor, finished: streamFinished)
+            let scanFinished = DispatchSemaphore(value: 0)
+            let scan = registerScan(processor, finished: scanFinished)
+            let disconnected = DispatchSemaphore(value: 0)
+            processor.onDisconnect { _ in disconnected.signal() }
+
+            processor.dispatch(.centralStateChanged(state))
+
+            guard case .failure(BLEError.bluetoothUnavailable) = read.outcome() else {
+                return XCTFail("\(state.rawValue): the read did not fail with bluetoothUnavailable")
+            }
+            guard case .failure(BLEError.bluetoothUnavailable) = write.outcome() else {
+                return XCTFail("\(state.rawValue): the write did not fail with bluetoothUnavailable")
+            }
+            XCTAssertEqual(streamFinished.wait(timeout: .now() + 1), .success, "\(state.rawValue): the notification stream did not end")
+            guard case .failure(BLEError.bluetoothUnavailable) = streamEnd(stream) else {
+                return XCTFail("\(state.rawValue): the notification stream did not end with bluetoothUnavailable")
+            }
+            XCTAssertEqual(scanFinished.wait(timeout: .now() + 1), .success, "\(state.rawValue): the scan did not end")
+            XCTAssertEqual(disconnected.wait(timeout: .now() + 1), .success, "\(state.rawValue): the disconnect callbacks did not run")
+            XCTAssertNil(processor.connectedPeripheralId, "\(state.rawValue): still connected")
+            withExtendedLifetime((stream, scan)) {}
+        }
+    }
+
+    /// How a stream that has already ended ends for its reader: success when
+    /// it finished, the error it threw otherwise.
+    private func streamEnd(_ stream: AsyncThrowingStream<Data, Error>) -> Result<Void, Error> {
+        let end = Wait<Void> { cont in
+            Task {
+                do {
+                    for try await _ in stream {}
+                    cont.resume()
+                } catch {
+                    cont.resume(throwing: error)
+                }
+            }
+        }
+        return end.outcome() ?? .failure(BLEError.timeout)
+    }
+
+    /// The connected peripheral's disconnect ends its notification streams
+    /// with the reason, so `sub` reports it instead of exiting 0.
+    func testDisconnectEndsTheNotificationStreamWithAnError() {
+        let processor = connected(to: deviceB)
+        let finished = DispatchSemaphore(value: 0)
+        let stream = registerStream(processor, finished: finished)
+        processor.dispatch(.didDisconnect(peripheralId: deviceB, error: "link lost"))
+        guard case .failure(BLEError.connectionFailed) = streamEnd(stream) else {
+            return XCTFail("the stream did not end with connectionFailed")
+        }
+    }
+
+    /// A connection whose setup failed (service discovery threw or was
+    /// cancelled) is ended at once, as a disconnect would end it: blew is not
+    /// connected, its waits fail, the disconnect callbacks run, and the late
+    /// didDisconnect of the cancelled connection is dropped.
+    func testEndConnectionEndsTheConnectionItNames() {
+        let processor = connected(to: deviceB)
+        let discover = Wait<[String]> { processor.setDiscoverServicesContinuation($0) }
+        let disconnected = DispatchSemaphore(value: 0)
+        processor.onDisconnect { _ in disconnected.signal() }
+
+        processor.endConnection(to: deviceA, .connectionFailed("setup failed"))
+        XCTAssertEqual(processor.connectedPeripheralId, deviceB, "ending another peripheral's connection ended this one")
+        XCTAssertNil(discover.outcome(timeout: 0.1))
+
+        processor.endConnection(to: deviceB, .connectionFailed("setup failed"))
+        XCTAssertNil(processor.connectedPeripheralId)
+        guard case .failure(BLEError.connectionFailed) = discover.outcome() else {
+            return XCTFail("the pending discovery was not failed")
+        }
+        XCTAssertEqual(disconnected.wait(timeout: .now() + 1), .success)
+        XCTAssertTrue(ignores(processor, .didDisconnect(peripheralId: deviceB, error: nil)),
+                      "the ended connection's late didDisconnect was served")
+    }
+
+    /// A connect still waiting for its device fails when Bluetooth goes away.
+    func testBluetoothPowerOffFailsAWaitingConnect() {
+        let processor = BLEEventProcessor(eventQueue: BLEEventQueue())
+        let connect = Wait<Void> { processor.beginConnect(to: self.deviceB, $0) }
+        processor.dispatch(.centralStateChanged(.poweredOff))
+        guard case .failure(BLEError.bluetoothUnavailable) = connect.outcome() else {
+            return XCTFail("the waiting connect did not fail with bluetoothUnavailable")
+        }
+        XCTAssertFalse(processor.isConnecting(to: deviceB))
+    }
+
+    /// Bluetooth reporting poweredOn ends nothing, and the state callbacks
+    /// see every state.
+    func testPoweredOnLeavesTheConnectionAlone() {
+        let processor = connected(to: deviceB)
+        let read = Wait<Data> { processor.setReadContinuation(forChar: "2A19", $0) }
+        let seen = DispatchSemaphore(value: 0)
+        processor.onStateChange { state in if state == .poweredOn { seen.signal() } }
+
+        processor.dispatch(.centralStateChanged(.poweredOn))
+        XCTAssertEqual(seen.wait(timeout: .now() + 1), .success)
+        XCTAssertNil(read.outcome(timeout: 0.1), "poweredOn failed the read")
+        XCTAssertEqual(processor.connectedPeripheralId, deviceB)
     }
 }

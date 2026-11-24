@@ -28,8 +28,9 @@ final class BLEEventProcessor: @unchecked Sendable {
         }
     }
 
-    /// Set by beginConnect; cleared when that connect fails or is cancelled
-    /// and when the peripheral disconnects.
+    /// Set by beginConnect; cleared when that connect fails or is cancelled,
+    /// when the peripheral disconnects, when its setup fails
+    /// (endConnection) and when Bluetooth leaves poweredOn.
     private var link: Link?
 
     private var stateCallbacks: [(CBManagerState) -> Void] = []
@@ -45,7 +46,8 @@ final class BLEEventProcessor: @unchecked Sendable {
 
     // Streams for continuous data
     private var scanContinuation: AsyncStream<DiscoveredDevice>.Continuation?
-    private var notificationContinuations: [String: AsyncStream<Data>.Continuation] = [:]
+    /// Finished with the error that ended the connection.
+    private var notificationContinuations: [String: AsyncThrowingStream<Data, Error>.Continuation] = [:]
 
     init(eventQueue: BLEEventQueue) {
         self.eventQueue = eventQueue
@@ -189,7 +191,7 @@ final class BLEEventProcessor: @unchecked Sendable {
         c?.resume()
     }
 
-    func setNotificationContinuation(forChar uuid: String, _ cont: AsyncStream<Data>.Continuation?) {
+    func setNotificationContinuation(forChar uuid: String, _ cont: AsyncThrowingStream<Data, Error>.Continuation?) {
         lock.lock()
         notificationContinuations[uuid] = cont
         lock.unlock()
@@ -206,6 +208,19 @@ final class BLEEventProcessor: @unchecked Sendable {
         link = nil
         lock.unlock()
         cont.resume(throwing: CancellationError())
+    }
+
+    /// Stop serving the connected `peripheral` because its setup (service
+    /// discovery) failed or was cancelled: its waits fail and its streams
+    /// finish as on a disconnect, and its later didDisconnect is dropped. The
+    /// caller cancels the CoreBluetooth connection. A no-op when `peripheral`
+    /// is not the connected one.
+    func endConnection(to peripheral: UUID, _ error: BLEError) {
+        lock.lock()
+        guard case .connected(peripheral) = link else { lock.unlock(); return }
+        let ended = endLink(error)
+        lock.unlock()
+        for effect in ended { effect() }
     }
 
     func cancelDisconnectContinuation() {
@@ -278,7 +293,19 @@ final class BLEEventProcessor: @unchecked Sendable {
 
         switch event {
         case .centralStateChanged(let state):
-            return stateCallbacks.map { cb in { cb(state) } }
+            // The state callbacks run first, so a caller woken by the effects
+            // below already sees the new state.
+            var effects: [() -> Void] = stateCallbacks.map { cb in { cb(state) } }
+            guard state != .poweredOn else { return effects }
+            // CoreBluetooth stops scanning and drops its connections in every
+            // other state; end what waits on them. Whether a per-peripheral
+            // didDisconnect comes first (ending the link with connectionFailed
+            // instead) is unverified; TESTS.md has the manual check.
+            effects += endLink(BLEError.unavailable(state))
+            if let scan = Self.take(&scanContinuation) {
+                effects.append { scan.finish() }
+            }
+            return effects
 
         case .didDiscover(let id, let name, let rssi, let services, let mfgData):
             let device = DiscoveredDevice(
@@ -340,16 +367,16 @@ final class BLEEventProcessor: @unchecked Sendable {
 
     /// End the served connection, if any, with `error`: stop serving it, fail
     /// a waiting connect and every pending one-shot wait, finish the
-    /// notification streams, run the disconnect callbacks and resume a
-    /// waiting disconnect. The lock must be held; the returned effects run
-    /// after it is released.
+    /// notification streams with `error`, run the disconnect callbacks and
+    /// resume a waiting disconnect. The lock must be held; the returned
+    /// effects run after it is released.
     private func endLink(_ error: BLEError) -> [() -> Void] {
         guard let ended = link else { return [] }
         link = nil
         let id = ended.peripheralId
         var effects: [() -> Void] = disconnectCallbacks.map { cb in { cb(id) } }
-        // End the notification streams, so `for await` loops finish.
-        effects += notificationContinuations.values.map { stream in { stream.finish() } }
+        // End the notification streams, so `for try await` loops throw why.
+        effects += notificationContinuations.values.map { stream in { stream.finish(throwing: error) } }
         notificationContinuations.removeAll()
 
         func fail<T>(_ cont: CheckedContinuation<T, Error>?) {

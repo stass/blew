@@ -46,18 +46,7 @@ public final class BLECentral: @unchecked Sendable {
         stateLock.lock()
         let state = cbState
         stateLock.unlock()
-        switch state {
-        case .poweredOn:
-            return
-        case .poweredOff:
-            throw BLEError.bluetoothUnavailable("Bluetooth is powered off")
-        case .unauthorized:
-            throw BLEError.bluetoothUnavailable("Bluetooth access unauthorized")
-        case .unsupported:
-            throw BLEError.bluetoothUnavailable("Bluetooth is not supported")
-        default:
-            throw BLEError.bluetoothUnavailable("Bluetooth state: \(state.rawValue)")
-        }
+        guard state == .poweredOn else { throw BLEError.unavailable(state) }
     }
 
     private func waitForPoweredOn(timeout: TimeInterval) async throws {
@@ -169,7 +158,17 @@ public final class BLECentral: @unchecked Sendable {
             // A cancel that came just after the device connected: keep no
             // connection the caller gave up on.
             try Task.checkCancellation()
+
+            updateConnection(uuid) {
+                connectedPeripheralName = targetPeripheral.name
+            }
+            // Without its GATT database the connection serves no operation.
+            try await discoverAllServices(peripheral: targetPeripheral)
         } catch {
+            // A connection whose setup failed is not kept: blew stops serving
+            // it at once (a no-op when the connect itself failed), so it is not
+            // reported or reused as connected.
+            processor.endConnection(to: uuid, BLEError.connectionFailed("connection setup did not complete"))
             // CoreBluetooth keeps a connect pending until it is cancelled, and
             // would connect the device later with no one waiting for it. On
             // blew.cb this runs after any connect queued before the cancel.
@@ -178,13 +177,6 @@ public final class BLECentral: @unchecked Sendable {
             }
             throw error
         }
-
-        updateConnection(uuid) {
-            connectedPeripheralName = targetPeripheral.name
-        }
-
-        // Auto-discover services
-        try await discoverAllServices(peripheral: targetPeripheral)
     }
 
     // MARK: - Disconnect
@@ -469,7 +461,10 @@ public final class BLECentral: @unchecked Sendable {
 
     // MARK: - Subscribe
 
-    public func subscribe(characteristicUUID charUUID: String) async throws -> AsyncStream<Data> {
+    /// Enable notifications of `charUUID` and stream its values. The stream
+    /// throws the reason when the connection ends (a disconnect, Bluetooth
+    /// becoming unavailable); ending the iteration turns notifications off.
+    public func subscribe(characteristicUUID charUUID: String) async throws -> AsyncThrowingStream<Data, Error> {
         guard let peripheral = try getConnectedPeripheral() else {
             throw BLEError.notConnected
         }
@@ -499,7 +494,7 @@ public final class BLECentral: @unchecked Sendable {
 
         stateLock.withLock { _ = activeSubscriptions.insert(charUUID.uppercased()) }
 
-        let stream = AsyncStream<Data> { continuation in
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
             self.processor.setNotificationContinuation(forChar: c.uuid.uuidString, continuation)
             continuation.onTermination = { _ in
                 self.processor.setNotificationContinuation(forChar: c.uuid.uuidString, nil)
@@ -543,7 +538,7 @@ public final class BLECentral: @unchecked Sendable {
         }
 
         // Wait for services to be available on the peripheral object
-        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        try await Task.sleep(nanoseconds: 50_000_000) // 50ms
 
         var allServices: [CBService] = []
         var allChars: [CBCharacteristic] = []

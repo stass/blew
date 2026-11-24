@@ -129,11 +129,22 @@ struct NUSOptions {
             return .finish(exitCode: 0, error: nil)
         case .expectMissed:
             return .finish(exitCode: BlewExitCode.timeout.code, error: "expected text not received within \(linger)s")
-        case .linkLost(let reason):
+        case .linkLost(let reason, let exitCode):
             return reconnect && !stillConnected
                 ? .reconnect
-                : .finish(exitCode: BlewExitCode.operationFailed.code, error: reason)
+                : .finish(exitCode: exitCode, error: reason)
         }
+    }
+}
+
+extension NUSOutcome {
+    /// The link was lost because of `error` (`context` says what was being
+    /// done): a BLEError keeps its exit code, so Bluetooth becoming
+    /// unavailable ends `nus` with exit code 3.
+    static func linkLost(_ context: String?, _ error: Error) -> NUSOutcome {
+        let message = (error as? BLEError)?.localizedDescription ?? error.localizedDescription
+        let reason = context.map { "\($0): \(message)" } ?? message
+        return .linkLost(reason, exitCode: (error as? BLEError)?.exitCode ?? BlewExitCode.operationFailed.code)
     }
 }
 
@@ -266,10 +277,10 @@ extension CommandRouter {
             switch NUSOptions.step(after: outcome, stillConnected: stillConnected,
                                    linger: options.linger, reconnect: options.reconnect) {
             case .reconnect:
-                if case .linkLost(let reason) = outcome { status("disconnected", reason) }
+                if case .linkLost(let reason, _) = outcome { status("disconnected", reason) }
                 status("reconnecting", "")
             case .finish(let exitCode, let error):
-                if case .linkLost(let reason) = outcome, !stillConnected { status("disconnected", reason) }
+                if case .linkLost(let reason, _) = outcome, !stillConnected { status("disconnected", reason) }
                 result.exitCode = exitCode
                 if let error { result.errors.append(error) }
                 return result
@@ -302,7 +313,7 @@ extension CommandRouter {
                     linger: options.linger)
                 outcome.set(await session.run())
             } catch {
-                outcome.set(.linkLost("\(error.localizedDescription)"))
+                outcome.set(.linkLost(nil, error))
             }
         }
         if case .interrupted = waitInterruptible(task, semaphore: semaphore) { return nil }

@@ -82,8 +82,9 @@ enum NUSOutcome: Equatable {
     case matched
     /// The local input ended and the `--expect` bytes did not arrive in time.
     case expectMissed
-    /// The device disconnected, or a write to it failed.
-    case linkLost(String)
+    /// The device disconnected, or a write to it failed: why, and the exit
+    /// code that ends the command when it does not reconnect.
+    case linkLost(String, exitCode: Int32 = BlewExitCode.operationFailed.code)
 }
 
 /// One connection's worth of bridging: local input goes to the device's RX
@@ -94,8 +95,8 @@ struct NUSSession: Sendable {
     /// Writes one piece of local input to RX (chunking and flow control are
     /// the link's job).
     let send: @Sendable (Data) async throws -> Void
-    /// TX notifications; the stream finishes when the device disconnects.
-    let received: AsyncStream<Data>
+    /// TX notifications; the stream throws why when the connection ends.
+    let received: AsyncThrowingStream<Data, Error>
     /// Local input; finishes when the input ends for good (EOF).
     let input: AsyncStream<Data>
     /// Where received bytes go: the local port or the command's output.
@@ -109,9 +110,13 @@ struct NUSSession: Sendable {
         await withTaskGroup(of: NUSOutcome.self) { group in
             group.addTask { [received, deliver, expect] in
                 var matcher = expect.map(NUSExpect.init)
-                for await chunk in received {
-                    deliver(chunk)
-                    if matcher?.feed(chunk) == true { return .matched }
+                do {
+                    for try await chunk in received {
+                        deliver(chunk)
+                        if matcher?.feed(chunk) == true { return .matched }
+                    }
+                } catch {
+                    return .linkLost(nil, error)
                 }
                 return .linkLost("device disconnected")
             }
@@ -120,7 +125,7 @@ struct NUSSession: Sendable {
                     do {
                         try await send(chunk)
                     } catch {
-                        return .linkLost("write failed: \(error.localizedDescription)")
+                        return .linkLost("write failed", error)
                     }
                 }
                 try? await Task.sleep(nanoseconds: UInt64(max(linger, 0) * 1_000_000_000))

@@ -896,7 +896,7 @@ final class CommandRouter {
             backgroundSubTasks[charUUID] = Task {
                 do {
                     let stream = try await manager.subscribe(characteristicUUID: charUUID)
-                    await Self.forEachNotification(stream, maxCount: maxCount, duration: duration) { data in
+                    try await Self.forEachNotification(stream, maxCount: maxCount, duration: duration) { data in
                         capturedRenderer.renderLive("[\(charUUID)] \(DataFormatter.format(data, as: fmt))")
                     }
                 } catch is CancellationError {
@@ -921,7 +921,7 @@ final class CommandRouter {
             do {
                 let stream = try await manager.subscribe(characteristicUUID: charUUID)
                 let charName = BLENames.name(for: charUUID, category: .characteristic)
-                await Self.forEachNotification(stream, maxCount: maxCount, duration: duration) { data in
+                try await Self.forEachNotification(stream, maxCount: maxCount, duration: duration) { data in
                     let ts = ISO8601DateFormatter.shared.string(from: Date())
                     emit(.notification(NotificationValue(timestamp: ts, char: charUUID, name: charName,
                                                          value: DataFormatter.format(data, as: fmt))))
@@ -992,13 +992,14 @@ final class CommandRouter {
 
     /// Pass each notification of `stream` to `handle` until `maxCount` have
     /// arrived, `duration` seconds have passed (whether or not any arrive) or
-    /// the stream ends. Ending the iteration ends the subscription.
-    static func forEachNotification(_ stream: AsyncStream<Data>, maxCount: Int?, duration: TimeInterval?,
-                                    _ handle: @escaping @Sendable (Data) -> Void) async {
-        await withTaskGroup(of: Void.self) { group in
+    /// the stream ends. Ending the iteration ends the subscription. Throws
+    /// the error the stream ends with (the connection ended).
+    static func forEachNotification(_ stream: AsyncThrowingStream<Data, Error>, maxCount: Int?, duration: TimeInterval?,
+                                    _ handle: @escaping @Sendable (Data) -> Void) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
                 var count = 0
-                for await data in stream {
+                for try await data in stream {
                     handle(data)
                     count += 1
                     if let maxCount, count >= maxCount { return }
@@ -1007,8 +1008,8 @@ final class CommandRouter {
             if let duration {
                 group.addTask { try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000)) }
             }
-            await group.next()
-            group.cancelAll()
+            defer { group.cancelAll() }
+            try await group.next()
         }
     }
 

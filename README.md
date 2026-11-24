@@ -219,7 +219,7 @@ Explicitly connects to a BLE device and exits. Useful for testing connectivity o
 
 For `gatt`, `read`, `write`, and `sub` you do not need to run `connect` first — those commands connect automatically using the same device-targeting options.
 
-blew holds one connection at a time: `connect` disconnects the current device first, also when it is the same one, and then connects and discovers its services afresh. A connect that times out or is interrupted stops connecting, so the device does not connect later.
+blew holds one connection at a time: `connect` disconnects the current device first, also when it is the same one, and then connects and discovers its services afresh. A connect that times out or is interrupted stops connecting, so the device does not connect later. A connect whose service discovery fails or is interrupted fails too and leaves nothing connected.
 
 The connection is automatically closed on exit.
 
@@ -425,7 +425,7 @@ Writes data to a characteristic. Connects automatically if no connection is acti
 blew sub [-n <name>] [-i <id>] [-f <format>] [-d <sec>] [-c <count>] [-b] <char-uuid>
 ```
 
-Subscribes to a characteristic and streams received values to stdout, one event per line. Connects automatically if no connection is active. Stops on `Ctrl-C`, or when a duration/count limit is reached.
+Subscribes to a characteristic and streams received values to stdout, one event per line. Connects automatically if no connection is active. Stops on `Ctrl-C`, or when a duration/count limit is reached. If the connection ends first, `sub` fails: exit code 5 when the device disconnects, 3 when Bluetooth is turned off or blew loses Bluetooth permission. A background subscription reports the same as a `sub error` line.
 
 | Flag | Description |
 |------|-------------|
@@ -489,7 +489,7 @@ The local endpoint is one of:
 |------|-------------|
 | `-e, --expect <text>` | Succeed as soon as this text (same escapes as `--send`) has arrived, even split across notifications; exit with code 4 (timeout) if it has not arrived `--duration` seconds after the input ends. Works with stdin, `--send` and `--file`. |
 | `-d, --duration <sec>` | Seconds to keep listening after the input ends. Default 1; with `--expect`, the deadline for the expected text, default 5. At most a year. |
-| `--reconnect` | When the device disconnects, report it, reconnect to that same device (by its identifier, whatever else now matches the targeting options) and keep the endpoint (pty or TCP listener) open. Without it, a disconnect ends the command with exit code 5; so does a subscribe or write failure while the device is still connected, with or without it. |
+| `--reconnect` | When the device disconnects, report it, reconnect to that same device (by its identifier, whatever else now matches the targeting options) and keep the endpoint (pty or TCP listener) open. Without it, a disconnect ends the command with exit code 5 (3 when Bluetooth is turned off or blew loses Bluetooth permission); so does a subscribe or write failure while the device is still connected, with or without it. |
 | `-r, --with-response` / `-w, --without-response` | Write type for RX. Default: without response when RX supports it. |
 
 A pty or TCP bridge runs until `Ctrl-C` (or until the device disconnects, without `--reconnect`). If the local program is not reading, bytes from the device that do not fit the pty or socket buffer are dropped, as on a serial line.

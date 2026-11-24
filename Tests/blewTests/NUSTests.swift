@@ -1,4 +1,5 @@
 import XCTest
+import BLEManager
 @testable import blew
 
 private func makeRouter(interactive: Bool = false) -> CommandRouter {
@@ -113,10 +114,10 @@ final class NUSSessionTests: XCTestCase {
     private func makeSession(input: [Data], inputEnds: Bool = true,
                              expect: Data? = nil, linger: TimeInterval = 0.05,
                              sendFails: Bool = false)
-        -> (NUSSession, AsyncStream<Data>.Continuation, Sink, Sink) {
+        -> (NUSSession, AsyncThrowingStream<Data, Error>.Continuation, Sink, Sink) {
         let rx = Sink()
         let delivered = Sink()
-        let (received, deviceSends) = AsyncStream<Data>.makeStream()
+        let (received, deviceSends) = AsyncThrowingStream<Data, Error>.makeStream()
         let (inputStream, inputCont) = AsyncStream<Data>.makeStream()
         input.forEach { inputCont.yield($0) }
         if inputEnds { inputCont.finish() }
@@ -167,16 +168,29 @@ final class NUSSessionTests: XCTestCase {
 
     func testDeviceDisconnectIsLinkLost() async {
         let (session, deviceSends, _, _) = makeSession(input: [], inputEnds: false)
-        deviceSends.finish()
+        deviceSends.finish(throwing: BLEError.connectionFailed("disconnected"))
         let outcome = await session.run()
-        XCTAssertEqual(outcome, .linkLost("device disconnected"))
+        XCTAssertEqual(outcome, .linkLost("Connection failed: disconnected", exitCode: BlewExitCode.operationFailed.code))
     }
 
     func testWriteFailureIsLinkLost() async {
         let (session, _, _, _) = makeSession(input: [bytes("x")], inputEnds: false, sendFails: true)
         let outcome = await session.run()
-        guard case .linkLost(let reason) = outcome else { return XCTFail("got \(outcome)") }
+        guard case .linkLost(let reason, _) = outcome else { return XCTFail("got \(outcome)") }
         XCTAssertTrue(reason.hasPrefix("write failed"), reason)
+    }
+
+    /// Bluetooth becoming unavailable ends the TX stream with
+    /// bluetoothUnavailable, and `nus` without `--reconnect` exits 3.
+    func testBluetoothUnavailableEndsTheSessionWithExitCode3() async {
+        let (session, deviceSends, _, _) = makeSession(input: [], inputEnds: false)
+        deviceSends.finish(throwing: BLEError.bluetoothUnavailable("Bluetooth is powered off"))
+        let outcome = await session.run()
+        XCTAssertEqual(outcome, .linkLost("Bluetooth unavailable: Bluetooth is powered off",
+                                          exitCode: BlewExitCode.bluetoothUnavailable.code))
+        XCTAssertEqual(NUSOptions.step(after: outcome, stillConnected: false, linger: 1, reconnect: false),
+                       .finish(exitCode: BlewExitCode.bluetoothUnavailable.code,
+                               error: "Bluetooth unavailable: Bluetooth is powered off"))
     }
 }
 
@@ -421,20 +435,38 @@ final class NUSStepTests: XCTestCase {
 // MARK: - sub deadline
 
 final class SubDeadlineTests: XCTestCase {
-    func testDurationEndsASubscriptionThatReceivesNothing() async {
-        let (stream, continuation) = AsyncStream<Data>.makeStream()
+    func testDurationEndsASubscriptionThatReceivesNothing() async throws {
+        let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
         let start = Date()
-        await CommandRouter.forEachNotification(stream, maxCount: nil, duration: 0.2) { _ in }
+        try await CommandRouter.forEachNotification(stream, maxCount: nil, duration: 0.2) { _ in }
         XCTAssertLessThan(Date().timeIntervalSince(start), 2)
         continuation.finish()
     }
 
-    func testCountEndsTheSubscription() async {
-        let (stream, continuation) = AsyncStream<Data>.makeStream()
+    func testCountEndsTheSubscription() async throws {
+        let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
         for byte in 0..<5 { continuation.yield(Data([UInt8(byte)])) }
         let sink = Sink()
-        await CommandRouter.forEachNotification(stream, maxCount: 3, duration: nil) { sink.append($0) }
+        try await CommandRouter.forEachNotification(stream, maxCount: 3, duration: nil) { sink.append($0) }
         XCTAssertEqual(sink.data, Data([0, 1, 2]))
+    }
+
+    /// The connection ending (a disconnect, Bluetooth going off) ends `sub`
+    /// with the stream's error, whose exit code the command reports.
+    func testTheStreamsErrorEndsTheSubscription() async {
+        let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+        continuation.yield(Data([1]))
+        continuation.finish(throwing: BLEError.bluetoothUnavailable("Bluetooth is powered off"))
+        let sink = Sink()
+        do {
+            try await CommandRouter.forEachNotification(stream, maxCount: nil, duration: 5) { sink.append($0) }
+            XCTFail("the subscription ended without the stream's error")
+        } catch let error as BLEError {
+            XCTAssertEqual(error.exitCode, BlewExitCode.bluetoothUnavailable.code)
+        } catch {
+            XCTFail("unexpected error \(error)")
+        }
+        XCTAssertEqual(sink.data, Data([1]))
     }
 
     func testHugeDurationsAreRejectedBeforeBluetooth() {
