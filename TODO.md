@@ -122,6 +122,10 @@ None open.
   m") and Recipe Parameters Temperature Gradient (uint8 with "Minimum:
   -12.8"). Report them to the Bluetooth SIG.
   `generate-ble-characteristics.rb:200` (`CONTRADICTED_SCALES`).
+- [ ] Special values the GSS states in other forms ("0 = Year is not known",
+  "255: DST offset unknown") are not recognised, so those fields print the
+  raw number. The generator parses only the "A value of 0x8000 represents
+  ..." sentence form (`generate-ble-characteristics.rb`).
 - [ ] A value longer than its structure is decoded without a word about the
   extra bytes (`GATTDecoder.swift:145-175`).
 - [ ] Truncated GATT fields are skipped silently. `GATTDecoder.swift:85-98`.
