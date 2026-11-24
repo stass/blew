@@ -166,7 +166,7 @@ Use `--id` to target an explicit device, or combine selectors to let blew find a
 
 | Flag | Description |
 |------|-------------|
-| `-i, --id <device-id>` | Target a specific device by its identifier. `connect` and auto-connect also take a name or identifier fragment that matches one device of the last scan; with `-i` they connect directly and ignore the other selectors. |
+| `-i, --id <device-id>` | Target a specific device by its identifier. `connect` and auto-connect also take a fragment of the identifier (hex digits, hyphens and case ignored) that occurs in exactly one identifier of the last scan or of the connected device; a fragment that matches several is an error listing them. A full identifier (a UUID, with or without its hyphens) names exactly that device, seen or not. Names are never matched: select by name with `-n`. With `-i`, `connect` and auto-connect connect directly and ignore the other selectors. |
 | `-n, --name <substring>` | Filter by advertised name (case-insensitive substring). |
 | `-S, --service <uuid>` | Filter by advertised service UUID: 4 or 8 hex digits or a 128-bit UUID, so `180F` and `0000180F-0000-1000-8000-00805F9B34FB` are the same service. Repeatable; the device must advertise every one. |
 | `-m, --manufacturer <id>` | Filter by manufacturer: the decimal Bluetooth SIG company identifier at the start of the advertised manufacturer data (e.g. `89` for Nordic Semiconductor, `76` for Apple). |
@@ -175,7 +175,7 @@ Use `--id` to target an explicit device, or combine selectors to let blew find a
 
 An invalid value (a malformed UUID, a manufacturer ID outside 0 to 65535, an unknown strategy) or a selector other than `-S` given twice is an error, and nothing is scanned or connected.
 
-When a device is already connected (in `exec`, the REPL or the MCP server), a command other than `connect` uses it if its targeting options name no device, or if the connected device matches them: `-i` compares identifiers, and the selectors are checked against what the device advertised when blew connected to it (or in the last scan); `-p` does not apply then. Otherwise blew finds the device the options name, by identifier or by scanning, and only then disconnects the connected one and connects to it, so `exec "connect -n A; write -n B fff1 01"` writes to B. When the named device is not found, by its identifier or by the scan, the connection is left as it was; once blew starts connecting to the named device, the old connection ends even if that connect then fails.
+When a device is already connected (in `exec`, the REPL or the MCP server), a command other than `connect` uses it if its targeting options name no device, or if the connected device matches them: `-i` compares identifiers, and the selectors are checked against what the device advertised when blew connected to it (or in the last scan); `-p` does not apply then. Otherwise blew finds the device the options name, by identifier or by scanning, and only then disconnects the connected one and connects to it, so `exec "connect -n A; write -n B fff1 01"` writes to B. When the named device is not found, by its identifier or by the scan, the connection is left as it was; once blew starts connecting to the named device, the old connection ends even if that connect then fails. When blew has disconnected the connected device to connect to another, it says so on stderr at every verbosity, whether or not that connect succeeds: `disconnected <old-id> to connect to <new-id>`. Background subscriptions on the old device end with it.
 
 ---
 
@@ -983,7 +983,7 @@ The server is stateful: BLE connections and peripheral state persist across tool
 | `ble_periph_status` | Show peripheral state |
 | `ble_nus` | Send text over the Nordic UART Service and collect the reply, optionally waiting for an expected text |
 
-All tools that interact with a remote device accept optional targeting parameters (`name`, `device_id`, `service`, `manufacturer`, `rssi_min`, `pick`) and auto-connect if not already connected. A connected device that does not match the parameters given is replaced by the named device (see [Device targeting options](#device-targeting-options)). With `pick`, `ble_scan` returns only the device that strategy picks.
+All tools that interact with a remote device accept optional targeting parameters (`name`, `device_id`, `service`, `manufacturer`, `rssi_min`, `pick`) and auto-connect if not already connected. A connected device that does not match the parameters given is replaced by the named device (see [Device targeting options](#device-targeting-options)); `device_id` is an identifier or a fragment of one, never a name. A call that disconnected the connected device to connect to another adds `deviceSwitches` to its structured result, `[{"from": "<old-id>", "to": "<new-id>"}]`, whether or not that connect or the call then succeeded; when the call has no other result, it is the only field. The switches of a cancelled call, which gets no response, come with the next call's result. With `pick`, `ble_scan` returns only the device that strategy picks.
 
 Global options given before `mcp` apply to every tool call: `blew -t 30 mcp` gives each BLE operation a 30-second timeout.
 

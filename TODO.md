@@ -104,30 +104,6 @@ None open.
   `sub -n -b 2A19` starts a background subscription. MCP calls are immune
   (`foregroundOnly`), but the other MCP builders still pass free text
   through a command line; build them from typed fields, as `ble_nus` does.
-- [ ] **C5. An advertised name can capture `-i` and MCP `device_id`.**
-  `CommandRouter.swift:1249` (`resolveDevice`), called for `-i` at `:1083`.
-  Resolution tries an exact identifier, then a name substring, then an
-  identifier fragment, all over `lastScanResults`. Scenario: `read -i
-  1234ABCD 2a19` meant as an identifier fragment; a nearby device named
-  `1234ABCD` resolves first, and blew connects to it and reads from it. A
-  full identifier missing from the last scan can be captured by a device
-  whose cached GAP name contains it. Fix: for `-i`, never match names;
-  match identifier fragments only, and an input that parses as a UUID only
-  exactly.
-- [ ] **C6. `-i` does not resolve against the connected device.**
-  `CommandRouter.swift:1081-1087`. A name or fragment given to `-i` is
-  resolved only against `lastScanResults`. Scenario: `connect -n Thingy`,
-  `scan` (the connected Thingy no longer advertises, so it is missing from
-  the results), `read -i Thing 2a19`: the fragment does not resolve, fails as
-  not found, although the connected device is the one meant; if another
-  "Thingy 2" was in the scan, blew switches to it. Fix: move resolution into
-  `DeviceSelection.swift` and include the connected device as a candidate.
-- [ ] **C7. A device switch by auto-connect is reported only at `-v`.**
-  `CommandRouter.swift:1120` uses `renderInfo`; MCP renders nothing, and
-  callers drop the `ensureConnected` result on success. Scenario: an MCP
-  agent or an `exec` script loses its connection and background
-  subscriptions on the old device with no sign in its output. Fix: carry the
-  notice in the command's result (MCP `content`) and show it without `-v`.
 - [ ] **C9. Option values have two strict readers and a lenient one.**
   `DeviceSelection.swift:59` (`DeviceTarget.parse`, its local `value` and
   `values`) repeats `CommandRouter.optionValue`/`optionValues`, messages

@@ -12,6 +12,9 @@ final class CommandRouter {
     /// The scan record of the device `connect(to:)` last connected, so a
     /// later scan that no longer sees it does not lose what it advertised.
     private var connectedAdvertisement: DiscoveredDevice?
+    /// The device switches made while `collectingDeviceSwitches` runs; nil
+    /// outside it, when `reportDeviceSwitch` writes each to stderr.
+    private var collectedDeviceSwitches: [DeviceSwitch]?
     /// The caller's request to stop the command that is running, besides
     /// SIGINT; set only inside `run(stoppingOn:_:)`.
     private var stopRequest: StopRequest?
@@ -477,17 +480,6 @@ final class CommandRouter {
             result.errors.append("connection timed out")
             result.exitCode = BlewExitCode.timeout.code
         }
-        return result
-    }
-
-    private static func ambiguousDevice(_ input: String, _ matches: [DiscoveredDevice]) -> CommandResult {
-        var result = CommandResult()
-        result.errors.append("ambiguous device '\(input)' -- matches:")
-        for d in matches {
-            let label = d.name.map { "\($0) (\(d.identifier))" } ?? d.identifier
-            result.errors.append("  \(label)")
-        }
-        result.exitCode = BlewExitCode.invalidArguments.code
         return result
     }
 
@@ -1173,37 +1165,24 @@ final class CommandRouter {
     /// value, so their values are never read as targeting options.
     func ensureConnected(args: [String], optionsWithValue: Set<String>,
                          defaultFilter: DeviceFilter = DeviceFilter(), reconnect: Bool = false) -> CommandResult {
-        var target: DeviceTarget
+        let target: DeviceTarget
         do {
             target = try DeviceTarget.parse(args, optionsWithValue: optionsWithValue)
         } catch {
             return Self.invalidArguments("\(error)")
         }
-        // `-i` also takes a name or an identifier fragment from the last
-        // scan; compare the full identifier it stands for.
-        if let input = target.filter.id {
-            switch resolveDevice(input) {
-            case .resolved(let device): target.filter.id = device.identifier
-            case .ambiguous(let matches): return Self.ambiguousDevice(input, matches)
-            case .notFound: break
-            }
-        }
 
         let connected = connectedDevice()
         let deviceId: String
         switch AutoConnectPlan.make(target: target, defaultFilter: defaultFilter, connected: connected,
-                                    reconnect: reconnect) {
+                                    scanned: lastScanResults.map(\.identifier), reconnect: reconnect) {
         case .useConnected:
             return CommandResult()
         case .noTarget:
             return Self.invalidArguments("not connected -- specify a device with --id or --name")
+        case .unresolvedIdentifier(let input, let failure):
+            return unresolvedIdentifier(input, failure)
         case .connect(let id):
-            guard UUID(uuidString: id) != nil else {
-                var result = CommandResult()
-                result.errors.append("device '\(id)' not found: it is not an identifier, and no device of the last scan matches it")
-                result.exitCode = BlewExitCode.notFound.code
-                return result
-            }
             deviceId = id
         case .scan(let filter, let pick):
             let duration: TimeInterval
@@ -1218,11 +1197,63 @@ final class CommandRouter {
             deviceId = device.identifier
         }
 
-        // BLECentral.connect disconnects the connected device first.
-        if let connected, connected.id.caseInsensitiveCompare(deviceId) != .orderedSame {
-            renderer.renderInfo("replacing the connected device \(connected.id)")
+        // BLECentral.connect disconnects the connected device first, unless
+        // it fails before (Bluetooth off, an identifier CoreBluetooth does
+        // not know): report a switch only once the old device is gone.
+        let result = connect(to: deviceId)
+        if let replaced = DeviceSwitch(replacing: connected, with: deviceId),
+           connectedDevice()?.id.caseInsensitiveCompare(replaced.from) != .orderedSame {
+            reportDeviceSwitch(replaced)
         }
-        return connect(to: deviceId)
+        return result
+    }
+
+    /// Tell the user or agent that auto-connect replaced the connected
+    /// device, so they know which device the command acted on: on stderr at
+    /// every verbosity, in text and kv alike, or, inside
+    /// `collectingDeviceSwitches`, into its result.
+    func reportDeviceSwitch(_ replaced: DeviceSwitch) {
+        if collectedDeviceSwitches != nil {
+            collectedDeviceSwitches?.append(replaced)
+        } else {
+            StandardErrorLog.write("", replaced.notice)
+        }
+    }
+
+    /// Run `body`, returning its value and the device switches made while it
+    /// ran instead of writing them to stderr (the MCP server returns them in
+    /// the call's result).
+    func collectingDeviceSwitches<T>(_ body: () -> T) -> (T, [DeviceSwitch]) {
+        let outer = collectedDeviceSwitches
+        collectedDeviceSwitches = []
+        let value = body()
+        let collected = collectedDeviceSwitches ?? []
+        collectedDeviceSwitches = outer.map { $0 + collected }
+        return (value, collected)
+    }
+
+    /// The error for a `-i` value that does not stand for one identifier.
+    private func unresolvedIdentifier(_ input: String, _ failure: IdentifierFailure) -> CommandResult {
+        switch failure {
+        case .notAnIdentifier:
+            return Self.invalidArguments(
+                "'\(input)' is not a device identifier or part of one (-i takes hex digits; select by name with -n)")
+        case .notFound:
+            var result = CommandResult()
+            result.errors.append("device '\(input)' not found: no device of the last scan, and not the connected device, has an identifier containing it")
+            result.exitCode = BlewExitCode.notFound.code
+            return result
+        case .ambiguous(let ids):
+            var result = CommandResult()
+            result.errors.append("ambiguous device '\(input)' -- matches:")
+            for id in ids {
+                let name = (lastScanResults + [connectedAdvertisement].compactMap { $0 })
+                    .first { $0.identifier.caseInsensitiveCompare(id) == .orderedSame }?.name
+                result.errors.append("  " + (name.map { "\($0) (\(id))" } ?? id))
+            }
+            result.exitCode = BlewExitCode.invalidArguments.code
+            return result
+        }
     }
 
     /// The connected device with its advertisement: the record of the scan
@@ -1403,45 +1434,6 @@ final class CommandRouter {
 // MARK: - Device & characteristic resolution
 
 extension CommandRouter {
-    enum DeviceMatch {
-        case resolved(DiscoveredDevice)
-        case ambiguous([DiscoveredDevice])
-        case notFound
-    }
-
-    /// Resolve a user-supplied string to a device from the last scan.
-    /// Priority: exact UUID → name substring → UUID substring (hyphens stripped).
-    func resolveDevice(_ input: String) -> DeviceMatch {
-        let lower = input.lowercased()
-
-        // Exact UUID match
-        if let exact = lastScanResults.first(where: {
-            $0.identifier.lowercased() == lower
-        }) {
-            return .resolved(exact)
-        }
-
-        // Name contains match (case-insensitive)
-        let nameMatches = lastScanResults.filter {
-            $0.name?.lowercased().contains(lower) == true
-        }
-        if nameMatches.count == 1 { return .resolved(nameMatches[0]) }
-        if nameMatches.count > 1 { return .ambiguous(nameMatches) }
-
-        // UUID substring match — strip hyphens so partial segments like "683687" or
-        // "683687E7E810" match anywhere in the UUID, not just at the start.
-        let strippedInput = lower.replacingOccurrences(of: "-", with: "")
-        guard !strippedInput.isEmpty else { return .notFound }
-        let uuidMatches = lastScanResults.filter {
-            let strippedId = $0.identifier.lowercased().replacingOccurrences(of: "-", with: "")
-            return strippedId.contains(strippedInput)
-        }
-        if uuidMatches.count == 1 { return .resolved(uuidMatches[0]) }
-        if uuidMatches.count > 1 { return .ambiguous(uuidMatches) }
-
-        return .notFound
-    }
-
     enum UUIDMatch {
         case resolved(String)
         case ambiguous([String])

@@ -50,6 +50,9 @@ final class BlewMCPServer {
     private let server: Server
     let router: CommandRouter
     private let calls = ToolCallQueue()
+    /// Device switches made by calls whose result has not been sent: the
+    /// running call's, and a cancelled call's, which go with the next result.
+    private let unreportedSwitches = UnreportedDeviceSwitches()
 
     /// `globals` are the options given before `mcp` (`blew -t 30 mcp`).
     init(globals: GlobalOptions) {
@@ -111,21 +114,27 @@ final class BlewMCPServer {
     /// the call's result.
     func execute(_ command: ToolCommand, name: String, budget: TimeInterval) async throws -> CallTool.Result {
         let router = self.router
+        let unreported = self.unreportedSwitches
         let outcome = await calls.run(budget: budget) { stop in
-            router.run(stoppingOn: stop) { command.run(router) }
+            let (result, switches) = router.collectingDeviceSwitches {
+                router.run(stoppingOn: stop) { command.run(router) }
+            }
+            unreported.append(switches)
+            return result
         }
         switch outcome {
         case .cancelled:
+            // A cancelled call gets no response; its switches go with the next one.
             throw CancellationError()
         case .finished(let result):
-            return buildMCPResult(result)
+            return buildMCPResult(result, deviceSwitches: unreported.take())
         case .budgetExhausted(var result):
             // A command that still succeeded is reported as it finished.
             if result.exitCode != 0 {
                 result.exitCode = BlewExitCode.timeout.code
                 result.errors.append("\(name) did not finish within its \(Int(budget))-second budget")
             }
-            return buildMCPResult(result)
+            return buildMCPResult(result, deviceSwitches: unreported.take())
         }
     }
 
@@ -233,26 +242,21 @@ final class BlewMCPServer {
         return enc
     }()
 
-    func buildMCPResult(_ result: CommandResult) -> CallTool.Result {
-        let isError = result.exitCode != 0
-        let structured = encodeStructuredContent(result.output)
-        let text = buildTextContent(result, structured: structured)
-
-        do {
-            if let structured = structured {
-                return try CallTool.Result(
-                    content: [.text(text: text, annotations: nil, _meta: nil)],
-                    structuredContent: structured,
-                    isError: isError
-                )
-            }
-        } catch {
-            // Fall through to text-only
+    /// The call's result. `deviceSwitches` are the connected devices the
+    /// call replaced, in order; when there are any, they are the
+    /// `deviceSwitches` field of the structured result, beside the command's
+    /// own fields.
+    func buildMCPResult(_ result: CommandResult, deviceSwitches: [DeviceSwitch] = []) -> CallTool.Result {
+        var structured = encodeStructuredContent(result.output).flatMap { try? Value($0) }
+        if !deviceSwitches.isEmpty, let value = try? Value(deviceSwitches) {
+            var fields = structured?.objectValue ?? [:]
+            fields["deviceSwitches"] = value
+            structured = .object(fields)
         }
-
         return CallTool.Result(
-            content: [.text(text: text, annotations: nil, _meta: nil)],
-            isError: isError
+            content: [.text(text: buildTextContent(result, structured: structured), annotations: nil, _meta: nil)],
+            structuredContent: structured,
+            isError: result.exitCode != 0
         )
     }
 
@@ -318,7 +322,7 @@ final class BlewMCPServer {
     /// Build the text content for the MCP result. When structured data is
     /// available, serialize it as JSON so agents that only read `content`
     /// still get the full data instead of a useless summary.
-    func buildTextContent(_ result: CommandResult, structured: StructuredResult?) -> String {
+    func buildTextContent(_ result: CommandResult, structured: Value?) -> String {
         var parts: [String] = []
 
         for msg in result.errors {
@@ -457,6 +461,26 @@ final class BlewMCPServer {
         var result = [cmd]
         if let fmt = args["format"]?.stringValue { result += ["-f", fmt] }
         return result + positionals(args["char_uuid"]?.stringValue, args["value"]?.stringValue)
+    }
+}
+
+/// The device switches of MCP calls whose result is not sent yet. Written
+/// on the tool-call queue and taken by `execute` after the call returned,
+/// so it has a lock of its own.
+final class UnreportedDeviceSwitches {
+    private let lock = NSLock()
+    private var switches: [DeviceSwitch] = []
+
+    func append(_ more: [DeviceSwitch]) {
+        lock.withLock { switches += more }
+    }
+
+    /// The switches so far, oldest first; none are left after.
+    func take() -> [DeviceSwitch] {
+        lock.withLock {
+            defer { switches = [] }
+            return switches
+        }
     }
 }
 
@@ -601,7 +625,7 @@ extension BlewMCPServer {
             inputSchema: .object([
                 "type": .string("object"),
                 "properties": .object([
-                    "device_id":    .object(["type": .string("string"), "description": .string("Device UUID to connect to")]),
+                    "device_id":    .object(["type": .string("string"), "description": .string("Identifier (UUID) of the device to connect to, or a fragment of it that matches one device; never a name")]),
                     "name":         .object(["type": .string("string"), "description": .string("Connect to device matching this name (substring)")]),
                     "service":      .object(["type": .string("string"), "description": .string("Filter by advertised service UUID")]),
                     "manufacturer": .object(["type": .string("integer"), "description": .string("Filter by manufacturer ID")]),
@@ -809,7 +833,7 @@ extension BlewMCPServer {
 
     static let targetingProperties: [String: Value] = [
         "name":         .object(["type": .string("string"), "description": .string("Device name filter (substring match)")]),
-        "device_id":    .object(["type": .string("string"), "description": .string("Device UUID")]),
+        "device_id":    .object(["type": .string("string"), "description": .string("Device identifier (UUID), or a fragment of it that matches one device; never a name")]),
         "service":      .object(["type": .string("string"), "description": .string("Service UUID filter")]),
         "manufacturer": .object(["type": .string("integer"), "description": .string("Manufacturer ID filter")]),
         "rssi_min":     .object(["type": .string("integer"), "description": .string("Minimum RSSI threshold")]),

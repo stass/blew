@@ -851,6 +851,31 @@ final class MCPToolDispatchTests: XCTestCase {
         }.joined()
         XCTAssertEqual(text, "OK")
     }
+
+    /// A call that replaced the connected device says so in its structured
+    /// result, beside the command's own fields, and in its text.
+    func testACallThatSwitchedDevicesReportsTheSwitch() async throws {
+        let a = "AAAAAAAA-0000-0000-0000-000000000001", b = "BBBBBBBB-0000-0000-0000-000000000002"
+        let replaced = try XCTUnwrap(DeviceSwitch(replacing: ConnectedDevice(id: a, advertisement: nil), with: b))
+        let command = ToolCommand(duration: 0) { router in
+            router.reportDeviceSwitch(replaced)
+            var result = CommandResult()
+            result.output = [.message("done")]
+            return result
+        }
+        let mcpResult = try await server.execute(command, name: "ble_read", budget: 5)
+        let fields = try XCTUnwrap(mcpResult.structuredContent?.objectValue)
+        XCTAssertEqual(fields["deviceSwitches"], .array([.object(["from": .string(a), "to": .string(b)])]))
+        XCTAssertEqual(fields["message"], .string("done"))
+        let text = mcpResult.content.compactMap { item -> String? in
+            if case .text(let text, _, _) = item { return text }
+            return nil
+        }.joined()
+        XCTAssertTrue(text.contains(b), text)
+
+        let next = try await server.execute(ToolCommand(duration: 0) { _ in CommandResult() }, name: "ble_status", budget: 5)
+        XCTAssertNil(next.structuredContent, "a switch belongs to the call that made it")
+    }
 }
 
 // MARK: - MCPToolDefinitionTests

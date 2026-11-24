@@ -135,11 +135,13 @@ final class ScanResultsTests: XCTestCase {
 final class AutoConnectPlanTests: XCTestCase {
     private let a = device("AAAAAAAA-0000-0000-0000-000000000001", name: "Alpha", services: ["180F"])
     private let nusFilter = DeviceFilter(services: [nus])
+    private let b = "BBBBBBBB-0000-0000-0000-000000000002"
 
     private func plan(_ args: [String], connected: DiscoveredDevice?, record: Bool = true,
-                      defaultFilter: DeviceFilter = DeviceFilter()) throws -> AutoConnectPlan {
+                      defaultFilter: DeviceFilter = DeviceFilter(), scanned: [String] = []) throws -> AutoConnectPlan {
         AutoConnectPlan.make(target: try target(args), defaultFilter: defaultFilter,
-                             connected: connected.map { ConnectedDevice(id: $0.identifier, advertisement: record ? $0 : nil) })
+                             connected: connected.map { ConnectedDevice(id: $0.identifier, advertisement: record ? $0 : nil) },
+                             scanned: scanned)
     }
 
     func testConnectedDeviceIsUsedWhenItMatchesOrNothingIsNamed() throws {
@@ -152,7 +154,7 @@ final class AutoConnectPlanTests: XCTestCase {
 
     func testAnotherTargetReplacesTheConnectedDevice() throws {
         XCTAssertEqual(try plan(["-n", "Beta"], connected: a), .scan(DeviceFilter(name: "Beta"), .strongest))
-        XCTAssertEqual(try plan(["-i", "B"], connected: a), .connect("B"))
+        XCTAssertEqual(try plan(["-i", "B"], connected: a, scanned: [b]), .connect(b))
         XCTAssertEqual(try plan(["-S", "180A", "-p", "first"], connected: a),
                        .scan(DeviceFilter(services: ["180A"]), .first))
     }
@@ -162,13 +164,13 @@ final class AutoConnectPlanTests: XCTestCase {
     func testReconnectNamingTheConnectedDeviceUsesItsIdentifier() throws {
         let t = try target(["-n", "Alpha"])
         XCTAssertEqual(AutoConnectPlan.make(target: t, connected: ConnectedDevice(id: a.identifier, advertisement: a),
-                                            reconnect: true), .connect(a.identifier))
+                                            scanned: [], reconnect: true), .connect(a.identifier))
         XCTAssertEqual(AutoConnectPlan.make(target: try target(["-p", "only"]),
                                             connected: ConnectedDevice(id: a.identifier, advertisement: a),
-                                            reconnect: true), .useConnected, "bare connect keeps the device")
+                                            scanned: [], reconnect: true), .useConnected, "bare connect keeps the device")
         XCTAssertEqual(AutoConnectPlan.make(target: try target(["-n", "Beta"]),
                                             connected: ConnectedDevice(id: a.identifier, advertisement: a),
-                                            reconnect: true), .scan(DeviceFilter(name: "Beta"), .strongest))
+                                            scanned: [], reconnect: true), .scan(DeviceFilter(name: "Beta"), .strongest))
     }
 
     func testAConnectedDeviceWithoutAScanRecordMatchesOnlyByID() throws {
@@ -177,7 +179,7 @@ final class AutoConnectPlanTests: XCTestCase {
     }
 
     func testNotConnected() throws {
-        XCTAssertEqual(try plan(["-i", "X", "-n", "Alpha"], connected: nil), .connect("X"))
+        XCTAssertEqual(try plan(["-i", b.lowercased(), "-n", "Alpha"], connected: nil), .connect(b))
         XCTAssertEqual(try plan(["-m", "89"], connected: nil), .scan(DeviceFilter(manufacturer: 89), .strongest))
         XCTAssertEqual(try plan(["-p", "only"], connected: nil, defaultFilter: nusFilter), .scan(nusFilter, .only))
         XCTAssertEqual(try plan(["-n", "x"], connected: nil, defaultFilter: nusFilter),
@@ -220,13 +222,101 @@ final class ScanArgumentTests: XCTestCase {
 
     /// An `-i` that is neither an identifier nor a device of the last scan
     /// fails before anything is disconnected or connected.
-    func testUnknownDeviceNameFailsWithoutConnecting() {
-        XCTAssertEqual(router(["-o", "kv"]).runConnect(["Fo0"]).exitCode, BlewExitCode.notFound.code)
+    /// `-i` (here `connect`'s positional) never matches a name, whatever the
+    /// last scan saw; each way it fails has its exit code.
+    func testAnIdentifierThatDoesNotResolveFailsWithoutConnecting() {
+        let r = router(["-o", "kv"])
+        r.lastScanResults = [
+            DiscoveredDevice(identifier: "AAAAAAAA-0000-0000-0000-000000000001", name: "1234ABCD", rssi: -50,
+                             serviceUUIDs: [], manufacturerData: nil),
+            DiscoveredDevice(identifier: "BBBBBBBB-1234-0000-0000-000000000002", name: "Thingy", rssi: -50,
+                             serviceUUIDs: [], manufacturerData: nil),
+        ]
+        XCTAssertEqual(r.runConnect(["1234ABCD"]).exitCode, BlewExitCode.notFound.code)
+        XCTAssertEqual(r.runConnect(["Thingy"]).exitCode, BlewExitCode.invalidArguments.code)
+        let ambiguous = r.runConnect(["0000-0000"])
+        XCTAssertEqual(ambiguous.exitCode, BlewExitCode.invalidArguments.code)
+        XCTAssertEqual(ambiguous.errors.dropFirst(), ["  1234ABCD (AAAAAAAA-0000-0000-0000-000000000001)",
+                                                      "  Thingy (BBBBBBBB-1234-0000-0000-000000000002)"])
     }
 
     func testInvalidFiltersAreRejected() {
         for args in [["-S", "nope"], ["-m", "0x59"], ["-p", "bogus"], ["-w", "-p", "first"], ["-t", "soon"]] {
             XCTAssertEqual(router(["-o", "kv"]).runScan(args).exitCode, BlewExitCode.invalidArguments.code, "\(args)")
         }
+    }
+}
+
+/// `-i` and MCP `device_id` name a device by its identifier only: an
+/// advertised name never takes part, so a nearby device cannot capture them.
+final class IdentifierResolutionTests: XCTestCase {
+    private let named = "AAAAAAAA-0000-0000-0000-000000000001"  // advertises the name "1234ABCD"
+    private let byID = "1234ABCD-0000-0000-0000-000000000002"
+    private let other = "CCCCCCCC-1234-0000-0000-000000000003"
+
+    private func resolve(_ input: String, _ known: [String]) -> Result<String, IdentifierFailure> {
+        DeviceTarget.resolveIdentifier(input, among: known)
+    }
+
+    private func target(_ id: String) throws -> DeviceTarget {
+        try DeviceTarget.parse(["-i", id], optionsWithValue: CommandRouter.targetingOptionsWithValue)
+    }
+
+    func testAFragmentMatchesIdentifiersNotNames() {
+        XCTAssertEqual(resolve("1234abcd", [named, byID]), .success(byID))
+        XCTAssertEqual(resolve("1234-ABCD", [named, byID]), .success(byID), "hyphens are ignored")
+        XCTAssertEqual(resolve("1234ABCD", [named]), .failure(.notFound))
+    }
+
+    func testAnAmbiguousFragmentListsEveryCandidate() {
+        XCTAssertEqual(resolve("1234", [named, byID, other]), .failure(.ambiguous([byID, other])))
+    }
+
+    /// A UUID names exactly that identifier, known or not, and is never a
+    /// fragment of a longer one.
+    func testAUUIDNamesOnlyItself() {
+        let unseen = "1234ABCD-0000-0000-0000-000000000009"
+        XCTAssertEqual(resolve(unseen.lowercased(), [named, byID]), .success(unseen))
+        XCTAssertEqual(resolve(byID.lowercased(), [byID]), .success(byID))
+        XCTAssertEqual(resolve(unseen.replacingOccurrences(of: "-", with: ""), [byID]), .success(unseen),
+                       "32 hex digits are a full identifier too")
+    }
+
+    func testANameIsNotAnIdentifier() {
+        for input in ["Thingy", "", "-", "12 34", "\u{FF11}\u{FF12}"] {
+            XCTAssertEqual(resolve(input, [byID]), .failure(.notAnIdentifier), input)
+        }
+    }
+
+    /// `-i` resolves against the connected device too, which a scan usually
+    /// misses because a connected device stops advertising.
+    func testAFragmentOfTheConnectedDeviceKeepsIt() throws {
+        let connected = ConnectedDevice(id: byID, advertisement: nil)
+        XCTAssertEqual(AutoConnectPlan.make(target: try target("1234ABCD"), connected: connected, scanned: [named]),
+                       .useConnected)
+        XCTAssertEqual(AutoConnectPlan.make(target: try target("1234ABCD"), connected: connected, scanned: [byID, named]),
+                       .useConnected, "the connected device is one candidate even when the scan saw it")
+        XCTAssertEqual(AutoConnectPlan.make(target: try target("1234"), connected: connected, scanned: [other]),
+                       .unresolvedIdentifier("1234", .ambiguous([other, byID])),
+                       "a fragment of the connected device and another is ambiguous, not a switch")
+    }
+
+    func testAnUnresolvedIdentifierNeverConnects() throws {
+        XCTAssertEqual(AutoConnectPlan.make(target: try target("1234ABCD"), connected: nil, scanned: [named]),
+                       .unresolvedIdentifier("1234ABCD", .notFound))
+        XCTAssertEqual(AutoConnectPlan.make(target: try target("Thingy"), connected: nil, scanned: [named]),
+                       .unresolvedIdentifier("Thingy", .notAnIdentifier))
+    }
+}
+
+final class DeviceSwitchTests: XCTestCase {
+    private let a = "AAAAAAAA-0000-0000-0000-000000000001"
+    private let b = "BBBBBBBB-0000-0000-0000-000000000002"
+
+    func testASwitchIsReplacingAnotherConnectedDevice() {
+        XCTAssertEqual(DeviceSwitch(replacing: ConnectedDevice(id: a, advertisement: nil), with: b)?.notice,
+                       "disconnected \(a) to connect to \(b)")
+        XCTAssertNil(DeviceSwitch(replacing: ConnectedDevice(id: a, advertisement: nil), with: a.lowercased()))
+        XCTAssertNil(DeviceSwitch(replacing: nil, with: b))
     }
 }

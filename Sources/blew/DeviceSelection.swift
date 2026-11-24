@@ -122,6 +122,65 @@ struct ConnectedDevice {
     let advertisement: DiscoveredDevice?
 }
 
+/// Why a `-i` value (or MCP `device_id`) does not stand for one identifier.
+enum IdentifierFailure: Error, Equatable {
+    /// The value is a fragment of several known identifiers, listed in order.
+    case ambiguous([String])
+    /// The value is hex digits and hyphens, but no known identifier contains it.
+    case notFound
+    /// The value is neither a UUID nor hex digits and hyphens.
+    case notAnIdentifier
+}
+
+extension DeviceTarget {
+    /// The full identifier `input` stands for among the `known` identifiers.
+    /// Only identifiers are compared, never advertised names, so a nearby
+    /// device cannot capture the value by advertising it as its name. A
+    /// value that parses as a UUID names exactly that identifier, whether or
+    /// not it is known, and so do its 32 hex digits without hyphens.
+    /// Otherwise its hex digits, hyphens removed and without regard to case,
+    /// must occur in exactly one known identifier with its hyphens removed.
+    static func resolveIdentifier(_ input: String, among known: [String]) -> Result<String, IdentifierFailure> {
+        if let uuid = UUID(uuidString: input) {
+            return .success(known.first { UUID(uuidString: $0) == uuid } ?? uuid.uuidString)
+        }
+        let fragment = input.replacingOccurrences(of: "-", with: "").uppercased()
+        guard !fragment.isEmpty, fragment.allSatisfy({ $0.isASCII && $0.isHexDigit }) else {
+            return .failure(.notAnIdentifier)
+        }
+        if fragment.count == 32 {
+            let digits = Array(fragment)
+            let groups = [0..<8, 8..<12, 12..<16, 16..<20, 20..<32].map { String(digits[$0]) }
+            return resolveIdentifier(groups.joined(separator: "-"), among: known)
+        }
+        let matches = known.filter { $0.replacingOccurrences(of: "-", with: "").uppercased().contains(fragment) }
+        switch matches.count {
+        case 0: return .failure(.notFound)
+        case 1: return .success(matches[0])
+        default: return .failure(.ambiguous(matches))
+        }
+    }
+}
+
+/// Auto-connect replacing the connected device `from` with `to`. It is
+/// reported once `from` is disconnected, which ends every subscription on
+/// it, whether or not the connect to `to` then succeeded.
+struct DeviceSwitch: Equatable, Codable {
+    let from: String
+    let to: String
+
+    /// The switch from `connected` to the device `id`; nil when nothing is
+    /// connected or `id` is the connected device.
+    init?(replacing connected: ConnectedDevice?, with id: String) {
+        guard let connected, connected.id.caseInsensitiveCompare(id) != .orderedSame else { return nil }
+        from = connected.id
+        to = id
+    }
+
+    /// The line for stderr.
+    var notice: String { "disconnected \(from) to connect to \(to)" }
+}
+
 /// A command argument that cannot be used, with the message for the user.
 struct InvalidArgument: Error, LocalizedError, CustomStringConvertible {
     let description: String
@@ -135,21 +194,36 @@ struct InvalidArgument: Error, LocalizedError, CustomStringConvertible {
 enum AutoConnectPlan: Equatable {
     /// The connected device is the target; use it.
     case useConnected
-    /// Connect to this identifier (or the device from the last scan it resolves to).
+    /// Connect to this full identifier.
     case connect(String)
     /// Scan for devices that match the filter and connect to the one the strategy picks.
     case scan(DeviceFilter, PickStrategy)
     /// Nothing is connected and nothing names a device.
     case noTarget
+    /// `-i` (the value given) does not stand for one identifier.
+    case unresolvedIdentifier(String, IdentifierFailure)
 
-    /// `connected` is nil when nothing is connected. `defaultFilter` is the
+    /// `connected` is nil when nothing is connected. `scanned` are the
+    /// identifiers of the last scan; `-i` resolves among them and the
+    /// connected device's (`DeviceTarget.resolveIdentifier`). `defaultFilter` is the
     /// filter to scan with when the target names no device (`nus` looks for
     /// the Nordic UART Service); it never replaces a connected device. With
     /// `reconnect` (the `connect` command), a target that names the
     /// connected device connects to it afresh by its identifier, without a
     /// scan, since a connected device usually stops advertising.
     static func make(target: DeviceTarget, defaultFilter: DeviceFilter = DeviceFilter(),
-                     connected: ConnectedDevice?, reconnect: Bool = false) -> AutoConnectPlan {
+                     connected: ConnectedDevice?, scanned: [String], reconnect: Bool = false) -> AutoConnectPlan {
+        var target = target
+        if let input = target.filter.id {
+            var known = scanned
+            if let connected, !known.contains(where: { $0.caseInsensitiveCompare(connected.id) == .orderedSame }) {
+                known.append(connected.id)
+            }
+            switch DeviceTarget.resolveIdentifier(input, among: known) {
+            case .success(let id): target.filter.id = id
+            case .failure(let failure): return .unresolvedIdentifier(input, failure)
+            }
+        }
         if let connected, target.accepts(connected) {
             return reconnect && !target.filter.isEmpty ? .connect(connected.id) : .useConnected
         }
