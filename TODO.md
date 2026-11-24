@@ -20,16 +20,25 @@ None open.
 
 ### Peripheral mode
 
-- [ ] **P5. A callback CoreBluetooth never sends for an undone request
-  desynchronises the callback FIFO.** `PendingCallbacks.swift` (`complete`),
-  `BLEPeripheralDelegate.swift` (`peripheralManagerDidStartAdvertising`,
-  `didAdd`). A request cancelled after it was issued stays queued as
-  abandoned, on the assumption that CoreBluetooth still answers it once
-  after `stopAdvertising` / `removeAllServices` *(plausible)*. If it does
-  not, the next request's callback is taken for the abandoned one: in the
-  REPL, after one `periph adv` times out, every later `periph adv` times
-  out too until Bluetooth is power-cycled. Confirm the behaviour on a
-  radio; if confirmed, give abandoned entries a deadline.
+- [ ] **P5. An add CoreBluetooth never answers desynchronises the
+  service-callback FIFO.** `Sources/BLEManager/PendingCallbacks.swift`
+  (`complete`), `Sources/BLEManager/BLEPeripheralDelegate.swift`
+  (`peripheralManager(_:didAdd:error:)`), `BLEPeripheral.configure`. A
+  request cancelled after it was issued stays queued as abandoned, on the
+  assumption that CoreBluetooth still answers it. On a radio (macOS 27,
+  the TESTS.md check "Cancelled peripheral requests"), that holds for
+  `startAdvertising` followed at once by `stopAdvertising`: 18 of 18 such
+  requests got their `didStartAdvertising`. It does not hold for `add`
+  followed at once by `removeAllServices`: 0 of 16 got a `didAdd`. The
+  next `periph adv -c` then has its `didAdd` taken by the abandoned
+  entry, times out after 15 s (exit 4, "advertising failed to start (timed
+  out)") and leaves its own entry abandoned, so in the REPL or `blew mcp`
+  every later `periph adv -c` with the same service UUID times out until the process restarts. The cancel lands before the
+  answer when `configure` times out or is interrupted while CoreBluetooth
+  is slow to answer (on an idle Mac `didAdd` comes back within 1 ms, so
+  `-t` alone does not reach the window). Fix direction: since
+  `removeAllServices` is the undo of every add, have it drop the abandoned
+  `addService` entries instead of leaving them to wait for a callback.
 
 ## P2: release hygiene (0.3.0)
 
