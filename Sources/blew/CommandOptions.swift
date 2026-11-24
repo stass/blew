@@ -49,7 +49,7 @@ struct OptionSpec: Hashable, Sendable {
     static let count = OptionSpec("c", "--count", .single)
     static let background = OptionSpec("b", "--bg", .flag)
     static let config = OptionSpec("c", "--config", .single)
-    static let save = OptionSpec("o", "--save", .single)
+    static let save = OptionSpec(nil, "--save", .single)
     static let send = OptionSpec("s", "--send", .repeated)
     static let file = OptionSpec(nil, "--file", .single)
     static let expect = OptionSpec("e", "--expect", .single)

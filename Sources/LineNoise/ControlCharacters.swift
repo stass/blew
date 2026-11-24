@@ -40,6 +40,7 @@ internal enum ControlCharacters: UInt8 {
     case Bell       = 7
     case Ctrl_H     = 8
     case Tab        = 9
+    case LineFeed   = 10
     case Ctrl_K     = 11
     case Ctrl_L     = 12
     case Enter      = 13

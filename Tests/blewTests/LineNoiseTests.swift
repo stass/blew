@@ -73,6 +73,12 @@ final class LineNoiseTests: XCTestCase {
         XCTAssertEqual(try edit(bytes("a€😀b") + enter), "a€😀b")
     }
 
+    /// A line typed while the terminal was cooked reaches the editor with
+    /// its CR already turned into LF (ICRNL), so LF ends a line as Enter does.
+    func testLineFeedEndsTheLine() throws {
+        XCTAssertEqual(try edit(bytes("ab\n")), "ab")
+    }
+
     func testCombiningMarkJoinsThePreviousCharacter() throws {
         // "e" then U+0301 COMBINING ACUTE ACCENT, then Ctrl-B and "x":
         // the cursor steps over the whole "é", not into it.
@@ -146,11 +152,9 @@ final class LineNoiseTests: XCTestCase {
         var slave: Int32 = -1
         XCTAssertEqual(openpty(&master, &slave, nil, nil, nil), 0)
         openFDs.append(slave)
-        // The thread plays the terminal. Raw mode flushes pending input when
-        // it starts, so it types only once canonical mode is off. It then
-        // reads what the editor draws (leaving raw mode waits for that output
-        // to drain) until the line ends with CR LF, or for 5 seconds. It
-        // closes the master when done, so an editor still waiting then gets
+        // The thread plays the terminal. It types once canonical mode is
+        // off, then reads what the editor draws until the line ends with
+        // CR LF, or for 5 seconds. It closes the master when done, so an editor still waiting then gets
         // an error instead of hanging the suite.
         var drawn: [UInt8] = []
         let finished = DispatchSemaphore(value: 0)

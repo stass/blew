@@ -465,7 +465,7 @@ final class BlewMCPServer {
 
     func buildPeriphCloneArgs(_ args: [String: Value]) -> [String] {
         var result = ["clone"] + buildTargetingArgs(args)
-        if let file = args["save_file"]?.stringValue { result += ["-o", file] }
+        if let file = args["save_file"]?.stringValue { result += [OptionSpec.save.long, file] }
         return result
     }
 

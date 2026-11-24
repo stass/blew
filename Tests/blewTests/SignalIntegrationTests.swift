@@ -124,6 +124,36 @@ final class SignalIntegrationTests: XCTestCase {
         XCTAssertTrue(repl.terminalIsCooked(), "blew left the terminal in raw mode")
     }
 
+    /// A line typed while a command runs is the next command: entering raw
+    /// mode for the next prompt keeps the input the terminal holds.
+    func testLineTypedDuringACommandRunsAtTheNextPrompt() throws {
+        let repl = try TerminalBlew()
+        XCTAssertTrue(repl.waitForOutput(containing: "blew> "), "no prompt: \(repl.output)")
+        XCTAssertEqual(repl.send("sleep 2\r"), 8)
+        XCTAssertTrue(eventually { repl.terminalIsCooked() }, "sleep did not start: \(repl.output.debugDescription)")
+        XCTAssertEqual(repl.send("typedahead\r"), 11)
+        // Still cooked: the line went in while the command ran, not at a prompt.
+        XCTAssertTrue(repl.terminalIsCooked(), "sleep ended before the line was typed")
+        XCTAssertTrue(repl.waitForOutput(containing: "unknown command 'typedahead'"),
+                      "the typed-ahead line was dropped: \(repl.output.debugDescription)")
+        repl.process.terminate()
+        XCTAssertEqual(try repl.waitForExit().code, 143)
+    }
+
+    /// Keys typed for blew do not reach the shell after a signal exit, even
+    /// when the signal comes while a command runs with the terminal cooked.
+    func testSIGTERMDuringACommandDiscardsTypedKeys() throws {
+        let repl = try TerminalBlew()
+        XCTAssertTrue(repl.waitForOutput(containing: "blew> "), "no prompt: \(repl.output)")
+        XCTAssertEqual(repl.send("sleep 5\r"), 8)
+        XCTAssertTrue(eventually { repl.terminalIsCooked() }, "sleep did not start: \(repl.output.debugDescription)")
+        XCTAssertEqual(repl.send("ls\r"), 3)
+        XCTAssertTrue(eventually { repl.hasUnreadInput() }, "the typed line did not reach the terminal")
+        repl.process.terminate()
+        XCTAssertEqual(try repl.waitForExit().code, 143)
+        XCTAssertFalse(repl.hasUnreadInput(), "keys typed for blew were left for the shell")
+    }
+
     func testSIGINTDuringREPLCommandReturnsToPrompt() throws {
         let repl = try TerminalBlew()
         XCTAssertTrue(repl.waitForOutput(containing: "blew> "), "no prompt: \(repl.output)")
@@ -289,6 +319,13 @@ private final class TerminalBlew {
         guard tcgetattr(slave, &settings) == 0 else { return false }
         let cooked = tcflag_t(ICANON | ECHO)
         return settings.c_lflag & cooked == cooked
+    }
+
+    /// Whether the terminal holds typed input nobody has read (in cooked
+    /// mode, a whole line).
+    func hasUnreadInput() -> Bool {
+        var request = pollfd(fd: slave, events: Int16(POLLIN), revents: 0)
+        return poll(&request, 1, 0) == 1 && request.revents & Int16(POLLIN) != 0
     }
 
     func waitForExit(seconds: TimeInterval = 10) throws -> ExitStatus {

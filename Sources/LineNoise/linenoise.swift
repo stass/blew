@@ -619,7 +619,9 @@ public class LineNoise {
     internal func handleCharacter(_ char: UInt8, editState: EditState) throws -> String? {
         switch char {
             
-        case ControlCharacters.Enter.rawValue:
+        // LF ends a line as Enter does: keys typed while a command ran
+        // waited in the cooked terminal, whose ICRNL turned their CR into LF.
+        case ControlCharacters.Enter.rawValue, ControlCharacters.LineFeed.rawValue:
             return editState.buffer
             
         case ControlCharacters.Ctrl_A.rawValue:

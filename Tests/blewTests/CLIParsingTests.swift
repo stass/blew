@@ -247,7 +247,16 @@ final class CLIParsingTests: XCTestCase {
     }
 
     func testPeriphCloneWithSave() throws {
-        _ = try Blew.parseAsRoot(["periph", "clone", "-n", "Thingy", "--save", "/tmp/out.json"])
+        let saving = try XCTUnwrap(Blew.parseAsRoot(["periph", "clone", "-n", "Thingy", "--save", "/tmp/out.json"]) as? CloneCommand)
+        XCTAssertEqual(saving.save, "/tmp/out.json")
+    }
+
+    /// `--save` has no short form: `-o` after `periph clone` is the global
+    /// `-o/--out`, as after every other command.
+    func testPeriphCloneDashOIsTheOutputFormat() throws {
+        let parsed = try Blew.parseAsRoot(["periph", "clone", "-n", "Thingy", "-o", "kv"])
+        XCTAssertNil(try XCTUnwrap(parsed as? CloneCommand).save)
+        XCTAssertFalse(CloneCommand.helpMessage().contains("-o, --save"), CloneCommand.helpMessage())
     }
 
     // MARK: - Global options

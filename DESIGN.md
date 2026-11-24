@@ -336,7 +336,7 @@ nus     [-n/-S/-i/-m/-p] [-s <text>... | --file <path> | --pty | -l <port> [--bi
         [-e <text>] [-d <sec>] [--reconnect] [-r|-w]
 periph
   adv   [-n <name>] [-S <uuid>...] [-c/--config <file>]
-  clone [-n/-S/-i/-m/-p] [-o/--save <file>]
+  clone [-n/-S/-i/-m/-p] [--save <file>]
 ```
 
 `ExecCommand` replaces the old `--exec` global flag. It calls `CommandRouter.executeScript(_:keepGoing:dryRun:)` directly.
@@ -537,7 +537,8 @@ The `hex` and `raw` formats both produce hex output but differ: `hex` is a compa
 - History file: `~/.config/blew/history`, for interactive input only: loaded on init, saved whenever `run()` returns or throws
 - Prompt: `blew> `
 - `Ctrl-C` during REPL: prints `^C` and continues (does not exit). At the prompt the terminal is in raw mode, so Ctrl-C is a key LineNoise reads; while a command runs it is a SIGINT that stops the command (see 4.1)
-- A signal that ends the process (SIGTERM, or a SIGINT outside a command) saves the history through the `ProcessSignals` exit hook and restores the terminal
+- A signal that ends the process (SIGTERM, or a SIGINT outside a command) saves the history through the `ProcessSignals` exit hook, restores the terminal and discards its unread input, so keys typed for blew do not reach the shell
+- Switching between raw mode (the prompt) and cooked mode (a command) keeps unread input: lines typed while a command runs, or the rest of a pasted block, are the next prompts' input. The cooked terminal's ICRNL turns their CR into LF, so `LineNoise` ends a line on LF as on CR
 - `EOF` or `quit`/`exit`: saves history and returns
 - Input that is not a terminal is a script: `LineNoise` reads it one line at a time without a prompt or editing; the REPL prints no banner, neither loads nor saves the history file, and throws the exit code of the first failing command, as `exec` does. A line that is not valid UTF-8 is an invalid argument (6) in a script and is skipped with an error at a terminal. A read or write error on the terminal or standard input exits 5.
 - `LineNoise` decodes typed UTF-8 (`UTF8Input`) and edits the line as grapheme clusters (`EditState`: a `[Character]` and an integer cursor).

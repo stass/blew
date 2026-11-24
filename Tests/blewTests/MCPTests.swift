@@ -268,11 +268,14 @@ final class MCPArgBuilderTests: XCTestCase {
         XCTAssertTrue(result.contains("clone"))
     }
 
-    func testPeriphCloneArgsSaveFile() {
+    /// The built command line is one `periph clone` parses, with the file
+    /// as its `--save` value.
+    func testPeriphCloneArgsSaveFile() throws {
         let args: [String: Value] = ["save_file": .string("/tmp/clone.json")]
         let result = server.buildPeriphCloneArgs(args)
-        XCTAssertTrue(result.contains("-o"))
-        XCTAssertTrue(result.contains("/tmp/clone.json"))
+        XCTAssertEqual(result.first, "clone")
+        let parsed = try CommandSyntax.periphClone.parse(Array(result.dropFirst()))
+        XCTAssertEqual(parsed.value(.save), "/tmp/clone.json")
     }
 
     // MARK: buildPeriphSetArgs

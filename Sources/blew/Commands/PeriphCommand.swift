@@ -58,14 +58,14 @@ struct CloneCommand: ParsableCommand {
 
     @OptionGroup var targeting: DeviceTargetingOptions
 
-    @Option(name: [.customShort("o"), .customLong("save")], help: "Save cloned GATT structure to a JSON config file.")
+    @Option(name: .customLong("save"), help: ArgumentHelp("Save cloned GATT structure to a JSON config file.", valueName: "file"))
     var save: String?
 
     mutating func run() throws {
         let globals = GlobalOptions.current!
         let router = CommandRouter(globals: globals)
         var args = targeting.toArgs()
-        if let s = save { args += ["-o", s] }
+        if let s = save { args += [OptionSpec.save.long, s] }
         let result = router.runPeriphClone(args, emit: { router.renderer.render($0) })
         router.renderer.renderResult(result)
         if result.exitCode != 0 { throw BlewExitCode(result.exitCode) }

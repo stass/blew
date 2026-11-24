@@ -182,11 +182,11 @@ final class CommandOptionsTests: XCTestCase {
     }
 
     /// An option without its value, or given twice, is an error before any
-    /// connection, not an absent option (`periph clone -n X -o` must not
+    /// connection, not an absent option (`periph clone -n X --save` must not
     /// clone without saving).
     func testOptionWithoutValueIsAnError() {
         let results = [
-            router.runPeriphClone(["-n", "X", "-o"]),
+            router.runPeriphClone(["-n", "X", "--save"]),
             router.runRead(["2a19", "-f"]),
             router.runSub(["2a19", "-c"]),
             router.runSub(["2a19", "-d"]),
@@ -210,6 +210,15 @@ final class CommandOptionsTests: XCTestCase {
         try CommandRouter.save(config, to: url.path)
         XCTAssertEqual(try PeripheralConfig.load(from: url.path).name, "x")
         XCTAssertEqual(CommandRouter.unwritableReason(FileManager.default.temporaryDirectory.path), "it is a directory")
+    }
+
+    /// The REPL and `exec` spell it `--save` only; `-o` is the global
+    /// `-o/--out`, which a command line inside the REPL does not take.
+    func testPeriphCloneSaveHasNoShortForm() throws {
+        XCTAssertEqual(try CommandSyntax.periphClone.parse(["--save", "x.json"]).value(.save), "x.json")
+        XCTAssertThrowsError(try CommandSyntax.periphClone.parse(["-o", "x.json"])) { error in
+            XCTAssertTrue("\(error)".contains("unknown option '-o'"), "\(error)")
+        }
     }
 
     /// An unusable `--save` path fails before clone connects to anything.

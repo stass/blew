@@ -166,7 +166,7 @@ Use `--id` to target an explicit device, or combine selectors to let blew find a
 
 | Flag | Description |
 |------|-------------|
-| `-i, --id <device-id>` | Target a specific device by its identifier. `connect` and auto-connect also take a fragment of the identifier (hex digits, hyphens and case ignored) that occurs in exactly one identifier of the last scan or of the connected device; a fragment that matches several is an error listing them. A full identifier (a UUID, with or without its hyphens) names exactly that device, seen or not. Names are never matched: select by name with `-n`. With `-i`, `connect` and auto-connect connect directly and ignore the other selectors. |
+| `-i, --id <device-id>` | Target a specific device by its identifier. `connect` and auto-connect also take a fragment of the identifier (hex digits, hyphens and case ignored) that occurs in exactly one identifier of the last scan or of the connected device; a fragment that matches several is an error listing them. A full identifier (a UUID, with or without its hyphens) names exactly that device, whether or not the last scan saw it; one CoreBluetooth on this Mac has never seen (from any scan or connection) fails with exit code 2 ("Device not found: <id>"). Names are never matched: select by name with `-n`. With `-i`, `connect` and auto-connect connect directly and ignore the other selectors. |
 | `-n, --name <substring>` | Filter by advertised name (case-insensitive substring). |
 | `-S, --service <uuid>` | Filter by advertised service UUID: 4 or 8 hex digits or a 128-bit UUID, so `180F` and `0000180F-0000-1000-8000-00805F9B34FB` are the same service. Repeatable; the device must advertise every one. |
 | `-m, --manufacturer <id>` | Filter by manufacturer: the decimal Bluetooth SIG company identifier at the start of the advertised manufacturer data (e.g. `89` for Nordic Semiconductor, `76` for Apple). |
@@ -591,6 +591,8 @@ The REPL provides:
 - **Persistent history** — saved to `~/.config/blew/history` across sessions
 - **Tab completion** — commands, known UUIDs after GATT discovery, and format names
 
+Lines typed while a command runs are kept and run in order at the next prompts, and so is every line of a pasted block. Ctrl-J ends a line as Enter does. When blew exits on a signal (such as SIGTERM), keys typed and not yet read are discarded, so they do not reach the shell.
+
 When standard input is not a terminal, the REPL runs it as a script, the way `exec` runs one: one command per line, without a prompt, banner or line editing, until end of input. The first failing command ends the run with its exit code; a line that is not valid UTF-8 exits with code 6, and an unreadable standard input with code 5. Ctrl-C ends the script with code 130, also while it waits for its next line. A script neither reads nor writes the history file.
 
 ```sh
@@ -789,7 +791,7 @@ Ctrl-C stops the running command: it stops scanning, subscribing or advertising,
 blew periph adv [-n <name>] [-S <uuid>] [--config <file>]
 ```
 
-Starts advertising, prints what it advertises, and runs until interrupted (Ctrl-C), which stops advertising and exits with code 130. Events (reads, writes, subscriptions) are logged to stdout. If Bluetooth is turned off or access is revoked while it advertises, advertising ends, the services are gone, and `periph adv` exits with code 3 ("Bluetooth unavailable: Bluetooth is powered off"). Starting up (configuring the services, then starting to advertise) must finish within the timeout, 15 seconds unless `-t` is given; past it `periph adv` fails with exit code 4 ("advertising failed to start (timed out)"). The wait for Bluetooth to power on inside that start has its own limit of 5 seconds: Bluetooth that is not on by then fails it with exit code 3, whatever `-t` is. In the REPL and `exec`, `periph adv` also takes `-t <sec>` for the timeout of that start (`periph adv -t 5 -n Sensor -S 180F`); on the command line it is the global `-t` (`blew -t 5 periph adv -n Sensor -S 180F`). If starting up times out or is interrupted, nothing is left advertising, even when CoreBluetooth confirms the start afterwards.
+Starts advertising, prints what it advertises, and runs until interrupted (Ctrl-C), which stops advertising and exits with code 130. Events (reads, writes, subscriptions) are logged to stdout. If Bluetooth is turned off or access is revoked while it advertises, advertising ends, the services are gone, and `periph adv` exits with code 3 ("Bluetooth unavailable: Bluetooth is powered off"). Starting up (configuring the services, then starting to advertise) must finish within the timeout, 15 seconds unless `-t` is given; past it `periph adv` fails with exit code 4 ("advertising failed to start (timed out)"). That start includes the wait for Bluetooth to power on, which in a fresh process (the first `periph` command of a `blew` run) takes a moment even when Bluetooth is on, so a very short `-t` there times out with exit code 4 before anything is configured. The power-on wait also has its own limit of 5 seconds: Bluetooth still not on by then fails the start with exit code 3, unless `-t` ran out first. In the REPL and `exec`, `periph adv` also takes `-t <sec>` for the timeout of that start (`periph adv -t 5 -n Sensor -S 180F`); on the command line it is the global `-t` (`blew -t 5 periph adv -n Sensor -S 180F`). If starting up times out or is interrupted, nothing is left advertising, even when CoreBluetooth confirms the start afterwards.
 
 The GATT server answers a remote central the way ATT specifies. A read at an offset past the end of the value is answered with an Invalid Offset error; at the end, with an empty value. A long (prepared) write is assembled from its fragments in order: a write at offset n keeps the first n bytes of the value and replaces the rest. A write at an offset past the end of the value is rejected with Invalid Offset, and one that would make the value longer than 512 bytes (the ATT maximum) with Invalid Attribute Value Length; a rejected request changes nothing. A `writeRequest` event shows the whole value after the write.
 
@@ -893,7 +895,7 @@ Connects to a target device, discovers its full GATT tree, reads all readable ch
 |------|-------------|
 | `-n, --name` | Target device name filter. |
 | `-i, --id` | Target device identifier. |
-| `-o, --save <file>` | Save the cloned GATT structure to a JSON config file for later reuse. The path is checked before blew connects: a directory, or a path whose directory is missing or read-only, fails with exit code 6. The file is replaced whole. If writing the file then fails, clone stops with exit code 5 and does not advertise. |
+| `--save <file>` | Save the cloned GATT structure to a JSON config file for later reuse. The path is checked before blew connects: a directory, or a path whose directory is missing or read-only, fails with exit code 6. The file is replaced whole. If writing the file then fails, clone stops with exit code 5 and does not advertise. |
 
 **Clone scope:**
 - Cloned: advertised name, service UUIDs, full GATT structure, initial characteristic values (for readable characteristics).

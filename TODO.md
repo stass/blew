@@ -103,6 +103,22 @@ None open.
   operand names (`<char>`, `<data>`) repeat the `PositionalSpec`s. Fix:
   derive both from `CommandSyntax` (its `usage` already renders the
   positionals).
+- [ ] **O1. Progress messages appear only when the command ends.**
+  `Sources/blew/CommandRouter.swift:531` (and `:1524`, `:1606`, `:1707`)
+  appends "connecting to X...", "configuring N service(s)..." and
+  "snapshotting GATT tree..." to `result.infos`, which is rendered once the
+  command returns. Scenario: `blew -v connect -n <slow device>` shows
+  nothing for the seconds the connect takes, then the progress line and the
+  result together. Fix: emit progress through the `emit` callback the
+  streaming commands already take, as it happens.
+- [ ] **O2. Auto-connect discards the connect's messages.** `read`,
+  `write`, `sub`, `gatt` and `periph clone` call `ensureConnected` and
+  drop its `CommandResult` when it succeeds
+  (`Sources/blew/CommandRouter.swift:680`, `:848`, `:910`, `:985`,
+  `:1603`). Scenario: `blew -v read -n <device> 2A19` never shows
+  "connecting to / connected to", which `blew -v connect` does. Fix: carry
+  the successful connect's infos into the command's result (one helper for
+  every auto-connecting command).
 - [ ] Codegen backslash escaping is a no-op (`gsub("\\", "\\\\")`).
   `generate-ble-characteristics.rb:164`, `generate-ble-names.rb:31`. "CO2
   Concentration" renders a TAB.
