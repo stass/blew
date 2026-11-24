@@ -31,20 +31,6 @@ None open.
   sighting of a device must not be lost, needs the same bound with counted
   drops.
 
-### Output
-
-- [ ] **O6. Stream writes outside `Sources/blew/Output` escape per call site.**
-  `CommandRouter.swift` prints the `exec --dry-run` listing (script text)
-  with `print` and a per-line `TerminalText.escape`, the help listing from
-  `OutputFormatter.bold` strings, and the scan spinner and watch display
-  straight to stderr; `Blew.swift` writes ArgumentParser's message to
-  stderr unescaped. A new `print` there that interpolates device text has
-  no guard. kv keys are unescaped `String`s (`KVText.record`), safe only
-  while every key is a literal. Fix: route these through `TextLine` and
-  `StandardOutput`/`StandardErrorLog`, give kv keys a literal-only type,
-  and widen `OutputSourceTests` to `Sources/blew` with an allowlist for the
-  REPL's terminal control.
-
 ### Commands
 
 - [ ] **C8. Option values can become `sub -b`.** `CommandRouter.swift`

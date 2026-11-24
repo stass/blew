@@ -209,6 +209,33 @@ final class OutputEscapingTests: XCTestCase {
         XCTAssertEqual(err, "Error: x\\x1by\n")
     }
 
+    /// A message of several lines (ArgumentParser's usage error, which
+    /// quotes the command line) keeps its line breaks and nothing else.
+    func testStderrLinesEscapeEachLine() {
+        let err = captureFD(STDERR_FILENO) { StandardErrorLog.write(lines: "Error: bad '\u{1B}]0;x\u{07}'\n\nUsage: blew") }
+        XCTAssertEqual(err, "Error: bad '\\x1b]0;x\\x07'\n\nUsage: blew\n")
+    }
+
+    /// The live displays write device names only as escaped `TextLine`s; the
+    /// only control sequences are their own redraws.
+    func testLiveDisplayRedrawsEscapeText() {
+        let spinner = captureFD(STDERR_FILENO) { StandardErrorLog.redraw(TextLine("\u{1B}[2J"), styled: false) }
+        XCTAssertEqual(spinner, "\r\u{1B}[K\\x1b[2J")
+        let lines = [TextLine("a\u{9B}"), TextLine("b")]
+        let first = captureFD(STDERR_FILENO) { StandardErrorLog.redraw(lines, replacing: 0, styled: false) }
+        XCTAssertEqual(first, "a\\u009b\nb\n")
+        let next = captureFD(STDERR_FILENO) { StandardErrorLog.redraw(lines, replacing: 2, styled: false) }
+        XCTAssertEqual(next, "\u{1B}[2A\u{1B}[Ja\\u009b\nb\n")
+        let erased = captureFD(STDERR_FILENO) { StandardErrorLog.erase(.eraseLinesAbove(0)) }
+        XCTAssertEqual(erased, "")
+    }
+
+    /// A table's kv keys are its literal headers, lowercased with spaces as `_`.
+    func testColumnHeaderKeys() {
+        XCTAssertEqual(KVText.records(headers: ["Device ID", "RSSI"], rows: [["a b", "-5"]]),
+                       ["device_id=\"a b\" rssi=-5"])
+    }
+
     // MARK: - column widths
 
     /// The display column where `needle` starts in `line`, counting East
@@ -239,16 +266,14 @@ final class OutputEscapingTests: XCTestCase {
     }
 
     func testTableKeepsEmojiNamesWhole() {
-        let fmt = OutputFormatter(format: .text, verbosity: 0)
-        let table = fmt.formatTable(headers: ["Name", "RSSI"], rows: [["🔥Lamp", "-50"], ["abc", "-60"]])
+        let table = textTable(headers: ["Name", "RSSI"], rows: [["🔥Lamp", "-50"], ["abc", "-60"]])
         let lines = table.components(separatedBy: "\n")
         XCTAssertTrue(lines[2].hasPrefix("🔥Lamp"), table)
         XCTAssertEqual(column(of: "-50", in: lines[2]), column(of: "-60", in: lines[3]), table)
     }
 
     func testTableAlignsWideAndCombiningCharacters() {
-        let fmt = OutputFormatter(format: .text, verbosity: 0)
-        let table = fmt.formatTable(
+        let table = textTable(
             headers: ["Name", "RSSI"],
             rows: [["温度计", "-1"], ["e\u{301}e\u{301}", "-2"], ["abcdef", "-3"], ["👨‍👩‍👧", "-4"]])
         let lines = table.components(separatedBy: "\n")
@@ -270,8 +295,7 @@ final class OutputEscapingTests: XCTestCase {
     }
 
     func testTableEscapesCellsBeforeMeasuring() {
-        let fmt = OutputFormatter(format: .text, verbosity: 0)
-        let table = fmt.formatTable(headers: ["Name", "X"], rows: [["a\u{1B}", "1"], ["abcdef", "2"]])
+        let table = textTable(headers: ["Name", "X"], rows: [["a\u{1B}", "1"], ["abcdef", "2"]])
         let lines = table.components(separatedBy: "\n")
         XCTAssertEqual(lines[2], "a\\x1b   1", table)
     }

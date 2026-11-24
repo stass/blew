@@ -39,11 +39,7 @@ struct Blew: AsyncParsableCommand {
     /// and prints "Error: exit code N". Commands have already reported their
     /// errors when they throw BlewExitCode, so exit with its code quietly.
     static func main() async {
-        // Piped or redirected output goes out a line at a time, so a reader
-        // sees each record as it is printed (`blew -o kv sub ... >> log`).
-        if isatty(STDOUT_FILENO) == 0 {
-            setvbuf(stdout, nil, _IOLBF, 0)
-        }
+        StandardOutput.lineBufferUnlessTerminal()
         ProcessSignals.shared.install()
         do {
             var command = try parseAsRoot()
@@ -64,7 +60,8 @@ struct Blew: AsyncParsableCommand {
             let code = processExitCode(for: error)
             // `--help` and `--version` print their text and exit 0.
             if code == BlewExitCode.success.code { exit(withError: error) }
-            FileHandle.standardError.write(Data((fullMessage(for: error) + "\n").utf8))
+            // The message quotes the command line, which is untrusted.
+            StandardErrorLog.write(lines: fullMessage(for: error))
             Foundation.exit(code)
         }
     }

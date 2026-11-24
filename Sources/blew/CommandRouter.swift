@@ -44,7 +44,7 @@ final class CommandRouter {
 
         if dryRun {
             for (i, cmd) in commands.enumerated() {
-                print("[\(i + 1)] \(TerminalText.escape(cmd))")
+                output.write(TextLine("[\(i + 1)] \(cmd)"))
             }
             return 0
         }
@@ -116,35 +116,47 @@ final class CommandRouter {
     }
 
     func printHelp() {
-        func cmd(_ name: String) -> String { output.bold(name) }
+        /// A help line: two spaces, `names` in bold a space apart, then
+        /// `arguments`.
+        func command(_ names: String..., arguments: String = "") -> TextLine {
+            var line = TextLine("  ")
+            for (i, name) in names.enumerated() {
+                if i > 0 { line.append(" ") }
+                line.append(name, .bold)
+            }
+            if !arguments.isEmpty { line.append(" " + arguments) }
+            return line
+        }
+        var quit = command("quit")
+        quit.append("/")
+        quit.append("exit", .bold)
         let targeting = "[-n <name>] [-S <uuid>] [-i <id>]"
-        let lines = [
-            "Available commands:",
-            "  \(cmd("scan")) \(targeting) [-R <dBm>] [-m <mfr>] [-p <strategy>] [-w]",
-            "  \(cmd("connect")) \(targeting) [<id>]",
-            "  \(cmd("disconnect"))",
-            "  \(cmd("status"))",
-            "  \(cmd("gatt")) \(cmd("svcs")) \(targeting)",
-            "  \(cmd("gatt")) \(cmd("tree")) \(targeting) [-d] [-r]",
-            "  \(cmd("gatt")) \(cmd("chars")) \(targeting) [-r] <service>",
-            "  \(cmd("gatt")) \(cmd("desc")) \(targeting) <char>",
-            "  \(cmd("gatt")) \(cmd("info")) <char>",
-            "  \(cmd("read")) \(targeting) [-f <fmt>] <char>",
-            "  \(cmd("write")) \(targeting) [-f <fmt>] [-r|-w] <char> <data>",
-            "  \(cmd("sub")) \(targeting) [-f <fmt>] [-d <sec>] [-c <n>] [-b] <char>",
-            "  \(cmd("sub")) \(cmd("stop")) [<char>]",
-            "  \(cmd("sub")) \(cmd("status"))",
-            "  \(cmd("periph")) \(cmd("adv")) [-n <name>] [-S <uuid>] [--config <file>]",
-            "  \(cmd("periph")) \(cmd("clone")) \(targeting) [--save <file>]",
-            "  \(cmd("periph")) \(cmd("stop"))",
-            "  \(cmd("periph")) \(cmd("set")) [-f <fmt>] <char> <value>",
-            "  \(cmd("periph")) \(cmd("notify")) [-f <fmt>] <char> <value>",
-            "  \(cmd("nus")) \(targeting) [-s <text>] [--file <path>] [-e <text>] [-d <sec>] [--pty] [-l <port>] [--reconnect] [-r|-w]",
-            "  \(cmd("sleep")) <seconds>",
-            "  \(cmd("help"))",
-            "  \(cmd("quit"))/\(cmd("exit"))",
-        ]
-        print(lines.joined(separator: "\n"))
+        output.write([
+            TextLine("Available commands:"),
+            command("scan", arguments: "\(targeting) [-R <dBm>] [-m <mfr>] [-p <strategy>] [-w]"),
+            command("connect", arguments: "\(targeting) [<id>]"),
+            command("disconnect"),
+            command("status"),
+            command("gatt", "svcs", arguments: targeting),
+            command("gatt", "tree", arguments: "\(targeting) [-d] [-r]"),
+            command("gatt", "chars", arguments: "\(targeting) [-r] <service>"),
+            command("gatt", "desc", arguments: "\(targeting) <char>"),
+            command("gatt", "info", arguments: "<char>"),
+            command("read", arguments: "\(targeting) [-f <fmt>] <char>"),
+            command("write", arguments: "\(targeting) [-f <fmt>] [-r|-w] <char> <data>"),
+            command("sub", arguments: "\(targeting) [-f <fmt>] [-d <sec>] [-c <n>] [-b] <char>"),
+            command("sub", "stop", arguments: "[<char>]"),
+            command("sub", "status"),
+            command("periph", "adv", arguments: "[-n <name>] [-S <uuid>] [--config <file>]"),
+            command("periph", "clone", arguments: "\(targeting) [--save <file>]"),
+            command("periph", "stop"),
+            command("periph", "set", arguments: "[-f <fmt>] <char> <value>"),
+            command("periph", "notify", arguments: "[-f <fmt>] <char> <value>"),
+            command("nus", arguments: "\(targeting) [-s <text>] [--file <path>] [-e <text>] [-d <sec>] [--pty] [-l <port>] [--reconnect] [-r|-w]"),
+            command("sleep", arguments: "<seconds>"),
+            command("help"),
+            quit,
+        ])
     }
 
     /// One character of command text as the quoting rule reads it.
@@ -297,7 +309,7 @@ final class CommandRouter {
     /// also become `lastScanResults`. A failed or interrupted scan, or one
     /// that finds no matching device, gives a nonzero exit code.
     private func scanForDevices(timeout: TimeInterval, filter: DeviceFilter) -> (devices: [DiscoveredDevice], result: CommandResult) {
-        let interactive = isatty(fileno(stderr)) != 0
+        let interactive = StandardErrorLog.isTerminal
         let spinner: ScanSpinner? = interactive ? ScanSpinner(timeout: timeout) : nil
         if !interactive {
             renderer.renderInfo("scanning for \(timeout)s...")
@@ -360,7 +372,7 @@ final class CommandRouter {
             return runScanWatchKV(filter: filter, timeout: timeout)
         }
 
-        guard isatty(fileno(stdout)) != 0 else {
+        guard StandardOutput.isTerminal else {
             return Self.invalidArguments("scan --watch in text mode requires an interactive terminal; use -o kv for piped output")
         }
 
@@ -2093,14 +2105,14 @@ private final class ScanSpinner {
         } else {
             countStr = " · \(count) device\(count == 1 ? "" : "s")"
         }
-        let line = "\r\u{1B}[K\(frame) Scanning… \(String(format: "%.1f", elapsed))/\(String(format: "%.0f", timeout))s\(countStr)"
-        FileHandle.standardError.write(Data(line.utf8))
+        let line = TextLine("\(frame) Scanning… \(String(format: "%.1f", elapsed))/\(String(format: "%.0f", timeout))s\(countStr)")
+        StandardErrorLog.redraw(line, styled: false)
     }
 
     func stop() {
         timer?.cancel()
         timer = nil
-        FileHandle.standardError.write(Data("\r\u{1B}[K".utf8))
+        StandardErrorLog.erase(.eraseLine)
     }
 }
 
@@ -2144,7 +2156,7 @@ private final class ScanWatchDisplay {
         timer = nil
         // Erase the in-place content from stderr so the caller can print the final
         // table cleanly to stdout.
-        eraseLines(previousLineCount)
+        StandardErrorLog.erase(.eraseLinesAbove(previousLineCount))
     }
 
     // MARK: - Private
@@ -2162,37 +2174,21 @@ private final class ScanWatchDisplay {
         let countStr = count == 0 ? "no devices yet" : "\(count) device\(count == 1 ? "" : "s")"
         let header = "\(frame) Scanning \(String(format: "%.0f", elapsed))s  \(countStr)  (Ctrl-C to stop)"
 
-        var lines: [String] = [header]
-        if !devices.isEmpty {
-            let tableHeaders = ["ID", "Name", "RSSI", "Signal", "Services"]
-            let rows: [[String]] = devices.map { d in
-                [
-                    d.identifier,
-                    d.name ?? "(unknown)",
-                    "\(d.rssi)",
-                    CommandRouter.rssiBar(d.rssi),
-                    d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) }.joined(separator: ", "),
-                ]
-            }
-            let table = formatter.formatTable(headers: tableHeaders, rows: rows)
-            lines.append(contentsOf: table.components(separatedBy: "\n"))
+        let rows = devices.map { d in
+            TextTable.Row(cells: [
+                d.identifier,
+                d.name ?? "(unknown)",
+                "\(d.rssi)",
+                CommandRouter.rssiBar(d.rssi),
+                d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) }.joined(separator: ", "),
+            ])
         }
+        let lines = [TextLine(header)]
+            + TextTable.lines(headers: ["ID", "Name", "RSSI", "Signal", "Services"], rows: rows)
 
-        let newLineCount = lines.count
-
-        // Move cursor up by the number of lines drawn previously and clear to end of screen.
-        eraseLines(previousLineCount)
-        previousLineCount = newLineCount
-
-        let output = lines.joined(separator: "\n") + "\n"
-        FileHandle.standardError.write(Data(output.utf8))
-    }
-
-    private func eraseLines(_ count: Int) {
-        guard count > 0 else { return }
-        // Move up `count` lines then clear from cursor to end of screen.
-        let escape = "\u{1B}[\(count)A\u{1B}[J"
-        FileHandle.standardError.write(Data(escape.utf8))
+        // Replace the lines drawn last.
+        StandardErrorLog.redraw(lines, replacing: previousLineCount, styled: formatter.styled)
+        previousLineCount = lines.count
     }
 }
 

@@ -1,19 +1,25 @@
 import XCTest
 
-/// No file of the output layer but `StandardStreams.swift` writes to stdout
-/// or stderr, so every line the renderers print is a `TextLine`, a kv
-/// record or a stderr message, each escaped on its way out. Swift's access
-/// control cannot keep a file from calling the standard library's `print`
-/// or `FileHandle.standardOutput`, so this reads the sources.
+/// No file of `Sources/blew` but `Output/StandardStreams.swift` writes to
+/// stdout or stderr, so every line blew prints is a `TextLine`, a kv
+/// record, a stderr message or a redraw of a live display, each escaped on
+/// its way out, and the bytes a user asks to stream raw go out through
+/// `StandardOutput.writeRaw`. Swift's access control cannot keep a file from
+/// calling the standard library's `print` or `FileHandle.standardOutput`,
+/// so this reads the sources.
 final class OutputSourceTests: XCTestCase {
+
+    /// The one file allowed to match the patterns below.
+    private static let writer = "Output/StandardStreams.swift"
 
     func testOnlyStandardStreamsWritesToStdoutOrStderr() throws {
         let dir = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/blew/Output")
+            .appendingPathComponent("Sources/blew")
         let files = (FileManager.default.enumerator(atPath: dir.path)?.allObjects as? [String] ?? [])
-            .filter { $0.hasSuffix(".swift") && $0 != "StandardStreams.swift" }
-        XCTAssertTrue(files.contains("TextRenderer.swift"), "\(dir.path): \(files)")
+            .filter { $0.hasSuffix(".swift") }
+        XCTAssertTrue(files.contains("CommandRouter.swift"), "\(dir.path): \(files)")
+        XCTAssertTrue(files.contains("Output/TextRenderer.swift"), "\(dir.path): \(files)")
         let forbidden = try NSRegularExpression(pattern: [
             #"\b(print|debugPrint|dump|NSLog|perror|puts|fputs|fputws|fputc|putchar|putc|fwrite|writev|printf|fprintf|vprintf|vfprintf)\s*\("#,
             #"\bfflush\s*\("#,
@@ -22,14 +28,14 @@ final class OutputSourceTests: XCTestCase {
             #"/dev/(stdout|stderr|tty|fd/)"#,
             #"\bwrite\s*\(\s*[12]\s*,"#,
         ].joined(separator: "|"))
-        for file in files {
+        XCTAssertTrue(files.contains(Self.writer), "\(dir.path): \(files)")
+        for file in files where file != Self.writer {
             let source = try String(contentsOf: dir.appendingPathComponent(file), encoding: .utf8)
             for (number, line) in source.components(separatedBy: "\n").enumerated() {
                 // Whole-line comments only: a `//` inside a string literal
                 // must not hide the code after it.
-                let code = line.trimmingCharacters(in: .whitespaces).hasPrefix("//") ? "" : line
-                let range = NSRange(code.startIndex..., in: code)
-                XCTAssertNil(forbidden.firstMatch(in: code, range: range),
+                guard !line.trimmingCharacters(in: .whitespaces).hasPrefix("//") else { continue }
+                XCTAssertNil(forbidden.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
                              "\(file):\(number + 1) writes to a standard stream: \(line)")
             }
         }

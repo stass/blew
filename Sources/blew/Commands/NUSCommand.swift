@@ -38,7 +38,7 @@ struct NUSCommand: ParsableCommand {
         valueName: "sec"))
     var duration: Double?
 
-    @Flag(name: .customLong("pty"), help: "Bridge a pseudo-terminal instead of standard input/output; its path is printed on stderr.")
+    @Flag(name: .customLong("pty"), help: "Bridge a pseudo-terminal instead of standard input/output; its path is printed on standard error.")
     var pty: Bool = false
 
     @Option(name: [.customShort("l"), .long], help: ArgumentHelp("Bridge one TCP client at a time on this port.", valueName: "port"))

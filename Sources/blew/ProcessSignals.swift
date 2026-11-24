@@ -171,10 +171,7 @@ final class ProcessSignals: @unchecked Sendable {
         let hook = lock.withLock { exitHook }
         hook?()
         cleanupBeforeExit()
-        if ftrylockfile(stdout) == 0 {
-            fflush(stdout)
-            funlockfile(stdout)
-        }
+        StandardOutput.flushUnlessLocked()
         _exit(code)
     }
 }

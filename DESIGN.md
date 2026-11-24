@@ -487,8 +487,6 @@ Three implementations:
 The renderers' writer for one output format. Provides:
 - `write(_:)` — writes a `TextLine`, with its styles as ANSI codes only in text mode on a TTY
 - `printTable(headers:rows:)` / `printRecord(_:)` — a table or record: through `TextTable` and `TextLine` in text mode, as kv records in kv mode
-- `formatTable(headers:rows:)` — a `TextTable` rendered as one `String`, for the scan watch display on stderr
-- `bold(_:)` / `dim(_:)` — one styled, escaped `TextLine` run as a `String`, for text built outside the renderers (the help listing)
 - `printError` / `printInfo` / `printDebug` — the stderr lines, through `StandardErrorLog`
 
 **Lines and tables** (`Sources/blew/Output/TextLine.swift`)
@@ -497,14 +495,14 @@ A `TextLine` is a sequence of runs, each plain, bold or dim. Every run's text is
 
 **Streams** (`Sources/blew/Output/StandardStreams.swift`)
 
-`StandardOutput` and `StandardErrorLog` are the only code in `Sources/blew/Output` that writes to stdout or stderr: a `TextLine`, kv records, an escaped stderr message, or raw `nus` bytes (`StandardOutput.writeRaw`). `OutputSourceTests` reads the other files of the directory and fails on any direct stream write, since access control cannot keep a file from calling `print`. The rest of `Sources/blew` (help, `exec --dry-run`, the scan display, the REPL) writes to the streams itself; TODO.md O6 tracks it.
+`StandardOutput` and `StandardErrorLog` are the only code in `Sources/blew` that writes to stdout or stderr: a `TextLine`, kv records, an escaped stderr message (`write(lines:)` for one of several lines, such as ArgumentParser's usage error), a redraw of a live display, or raw `nus` bytes (`StandardOutput.writeRaw`). The help listing, `exec --dry-run` and the REPL's banner write `TextLine`s. The scan spinner and the `scan -w` table redraw themselves with `StandardErrorLog.redraw` and `erase`: escaped `TextLine`s after a `TerminalControl` sequence (erase line; cursor up and erase to end of screen), a closed enum that carries no text. `StandardOutput` also owns stdout's buffering: line buffering when it is not a terminal, the flush before LineNoise writes its prompt, and the flush that skips a locked stdout before a signalled exit. `OutputSourceTests` reads every file of `Sources/blew` and fails on any direct stream use outside `StandardStreams.swift`, since access control cannot keep a file from calling `print`. Three writers sit outside `Sources/blew`'s own code and do not pass through `StandardStreams`: the MCP SDK's stdio transport (JSON-RPC on stdout, so nothing else may write stdout in MCP mode), ArgumentParser's help and version output, and LineNoise's prompt and echo. None of them carries device text.
 
 **Escaping and display width** (`Sources/blew/Output/TextEscaping.swift`)
 
 Text from devices, config files, MCP clients and arguments is untrusted, so each output format has one function that every such string passes through on its way out, applied by the renderers rather than by the commands that produce the text:
 
 - `TerminalText.escape` — text output and every stderr line: `StandardErrorLog.write` (error, info, debug and `nus` status lines, through `OutputFormatter.printError`/`printInfo`/`printDebug`) and `StandardErrorLog.writeLive` (`renderLive`). It escapes the characters of `TextEscaping.isEscaped`: C0 and C1 controls, DEL, U+2028/U+2029 and Unicode format characters (category Cf) other than ZWJ and ZWNJ.
-- `KVText.value` / `KVText.record` — kv values: bare, or double-quoted with `\` and `"` escaped as well. README's "Key-value output" is the specification. A multi-field characteristic value is one `value=`, flattened by `LabeledValue.flattened`.
+- `KVText.value` / `KVText.record` — kv values: bare, or double-quoted with `\` and `"` escaped as well. Keys are `KVKey`s and table headers `ColumnHeader`s, both made only from string literals, so no device text becomes a key and keys are not escaped. README's "Key-value output" is the specification. A multi-field characteristic value is one `value=`, flattened by `LabeledValue.flattened`.
 
 Both write escapes in one syntax (`\n`, `\r`, `\t`, `\xHH`, `\uHHHH`, `\UHHHHHHHH`). A `TextLine` adds ANSI bold and dim around escaped runs, never inside them. `nusData` in text mode is the one raw path: the bytes a UART delivers, written unchanged because the user asked for a byte stream.
 

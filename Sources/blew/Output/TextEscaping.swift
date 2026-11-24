@@ -162,15 +162,50 @@ enum KVText {
     }
 
     /// One kv record: `key=value` pairs separated by one space. Keys are
-    /// blew's own names (lowercase letters, digits, `_`) and are not escaped.
-    static func record(_ pairs: [(String, String)]) -> String {
-        pairs.map { key, value in "\(key)=\(Self.value(value))" }.joined(separator: " ")
+    /// `KVKey`s, blew's own names, and are not escaped.
+    static func record(_ pairs: [(KVKey, String)]) -> String {
+        pairs.map { key, value in "\(key.name)=\(Self.value(value))" }.joined(separator: " ")
     }
 
-    /// A table as kv records, one per row, keyed by the column headers
-    /// lowercased with spaces as `_`.
-    static func records(headers: [String], rows: [[String]]) -> [String] {
-        let keys = headers.map { $0.lowercased().replacingOccurrences(of: " ", with: "_") }
+    /// A table as kv records, one per row, keyed by the column headers'
+    /// `key`s.
+    static func records(headers: [ColumnHeader], rows: [[String]]) -> [String] {
+        let keys = headers.map(\.key)
         return rows.map { record(Array(zip(keys, $0))) }
+    }
+}
+
+/// The key of a kv pair: one of blew's own names (lowercase ASCII letters,
+/// digits and `_`), written in the source as a string literal. It has no
+/// initializer from a `String` and no string interpolation, so text from a
+/// device or a user cannot become a key, and keys need no escaping.
+struct KVKey: ExpressibleByStringLiteral, Equatable {
+    let name: String
+
+    init(stringLiteral name: StaticString) {
+        self.init(checked: "\(name)")
+    }
+
+    /// The key a `ColumnHeader` derives from its literal title.
+    fileprivate init(checked name: String) {
+        assert(!name.isEmpty && name.unicodeScalars.allSatisfy {
+            ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "_"
+        }, "kv key \(name)")
+        self.name = name
+    }
+}
+
+/// The title of a table column, written in the source as a string literal:
+/// the bold header of a text table, and in kv output, lowercased with
+/// spaces as `_`, the key of the column's values.
+struct ColumnHeader: ExpressibleByStringLiteral {
+    let title: String
+
+    init(stringLiteral title: StaticString) {
+        self.title = "\(title)"
+    }
+
+    var key: KVKey {
+        KVKey(checked: title.lowercased().replacingOccurrences(of: " ", with: "_"))
     }
 }

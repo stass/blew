@@ -80,7 +80,7 @@ final class TextRenderer: OutputRenderer {
     // MARK: - Devices table
 
     private func renderDevices(_ devices: [DeviceRow]) {
-        let headers = ["ID", "Name", "RSSI", "Signal", "Services"]
+        let headers: [ColumnHeader] = ["ID", "Name", "RSSI", "Signal", "Services"]
         let rows: [[String]] = devices.map { d in
             [
                 d.id,
@@ -96,7 +96,7 @@ final class TextRenderer: OutputRenderer {
     // MARK: - Services table
 
     private func renderServices(_ services: [ServiceRow]) {
-        let headers = ["UUID", "Name", "Primary"]
+        let headers: [ColumnHeader] = ["UUID", "Name", "Primary"]
         let rows = services.map { svc -> [String] in
             [svc.uuid, svc.name ?? "", svc.isPrimary ? "yes" : "no"]
         }
@@ -129,7 +129,7 @@ final class TextRenderer: OutputRenderer {
     // MARK: - Descriptors table
 
     private func renderDescriptors(_ descs: [DescriptorRow]) {
-        let headers = ["UUID", "Name"]
+        let headers: [ColumnHeader] = ["UUID", "Name"]
         let rows = descs.map { [$0.uuid, $0.name ?? ""] }
         formatter.printTable(headers: headers, rows: rows)
     }

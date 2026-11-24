@@ -41,7 +41,7 @@ final class REPL {
     ///   input cannot be read or written. Each is reported first.
     func run() throws {
         if isInteractive {
-            print("blew — type 'help' for commands, 'quit' to exit")
+            StandardOutput.write(TextLine("blew — type 'help' for commands, 'quit' to exit"), styled: false)
         }
         if isInteractive {
             // A signal that ends the process saves the history too. The
@@ -65,8 +65,8 @@ final class REPL {
         while true {
             do {
                 // LineNoise writes the prompt straight to the terminal, so
-                // output buffered by print() must go out first.
-                fflush(stdout)
+                // buffered output must go out first.
+                StandardOutput.flush()
                 let line = try ln.getLine(prompt: "blew> ")
 
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -89,7 +89,7 @@ final class REPL {
                 }
 
             } catch LinenoiseError.CTRL_C {
-                print("^C")
+                StandardOutput.write(TextLine("^C"), styled: false)
                 continue
             } catch LinenoiseError.EOF {
                 break

@@ -3,39 +3,15 @@ import XCTest
 
 final class OutputFormatterTests: XCTestCase {
 
-    // OutputFormatter in tests is never a TTY, so bold/dim return the input unchanged.
-
-    // MARK: - ANSI helpers (non-TTY)
-
-    func testBoldReturnRawWhenNotTTY() {
-        let fmt = OutputFormatter(format: .text, verbosity: 0)
-        XCTAssertFalse(fmt.isTTY)
-        XCTAssertEqual(fmt.bold("hello"), "hello")
-    }
-
-    func testDimReturnsRawWhenNotTTY() {
-        let fmt = OutputFormatter(format: .text, verbosity: 0)
-        XCTAssertEqual(fmt.dim("world"), "world")
-    }
-
-    func testBoldReturnRawInKVMode() {
-        // Even if somehow isTTY were true, KV mode should not apply ANSI.
-        // In tests isTTY is always false, so this is covered by the non-TTY test above.
-        let fmt = OutputFormatter(format: .kv, verbosity: 0)
-        XCTAssertEqual(fmt.bold("label"), "label")
-    }
-
-    // MARK: - formatTable: text mode
+    // MARK: - TextTable: text mode
 
     func testFormatTableEmptyRowsReturnsEmpty() {
-        let fmt = OutputFormatter(format: .text, verbosity: 0)
-        let result = fmt.formatTable(headers: ["A", "B"], rows: [])
+        let result = textTable(headers: ["A", "B"], rows: [])
         XCTAssertEqual(result, "")
     }
 
     func testFormatTableSingleRow() {
-        let fmt = OutputFormatter(format: .text, verbosity: 0)
-        let result = fmt.formatTable(headers: ["UUID", "Name"], rows: [["180F", "Battery Service"]])
+        let result = textTable(headers: ["UUID", "Name"], rows: [["180F", "Battery Service"]])
         let lines = result.components(separatedBy: "\n")
         XCTAssertEqual(lines.count, 3)  // header, separator, data row
         XCTAssertTrue(lines[0].contains("UUID"))
@@ -45,8 +21,7 @@ final class OutputFormatterTests: XCTestCase {
     }
 
     func testFormatTableColumnsAligned() {
-        let fmt = OutputFormatter(format: .text, verbosity: 0)
-        let result = fmt.formatTable(
+        let result = textTable(
             headers: ["ID", "Name"],
             rows: [
                 ["short", "A Long Name"],
@@ -59,8 +34,7 @@ final class OutputFormatterTests: XCTestCase {
     }
 
     func testFormatTableMultipleRows() {
-        let fmt = OutputFormatter(format: .text, verbosity: 0)
-        let result = fmt.formatTable(
+        let result = textTable(
             headers: ["A", "B"],
             rows: [["1", "x"], ["2", "y"], ["3", "z"]]
         )
@@ -175,4 +149,12 @@ private func captureStdout(_ block: () -> Void) -> String {
     pipe.fileHandleForWriting.closeFile()
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     return String(data: data, encoding: .utf8) ?? ""
+}
+
+/// A text table as `TextTable` lays it out, unstyled, as one string of
+/// newline-separated lines; empty when `rows` is.
+func textTable(headers: [String], rows: [[String]]) -> String {
+    TextTable.lines(headers: headers, rows: rows.map { TextTable.Row(cells: $0) })
+        .map { $0.rendered(styled: false) }
+        .joined(separator: "\n")
 }

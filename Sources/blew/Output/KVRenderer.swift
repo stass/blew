@@ -34,7 +34,7 @@ final class KVRenderer: OutputRenderer {
         case .peripheralStatus(let status):
             renderPeripheralStatus(status)
         case .readValue(let result):
-            var pairs: [(String, String)] = [("char", result.char)]
+            var pairs: [(KVKey, String)] = [("char", result.char)]
             if let name = result.name { pairs.append(("name", name)) }
             pairs.append(("value", result.value))
             pairs.append(("fmt", result.format.rawValue))
@@ -42,7 +42,7 @@ final class KVRenderer: OutputRenderer {
         case .writeSuccess:
             break
         case .notification(let nv):
-            var pairs: [(String, String)] = [("ts", nv.timestamp), ("char", nv.char)]
+            var pairs: [(KVKey, String)] = [("ts", nv.timestamp), ("char", nv.char)]
             if let name = nv.name { pairs.append(("name", name)) }
             pairs.append(("value", nv.value))
             printKV(pairs)
@@ -88,18 +88,18 @@ final class KVRenderer: OutputRenderer {
 
     // MARK: - KV formatting
 
-    private func printKV(_ pairs: [(String, String)]) {
+    private func printKV(_ pairs: [(KVKey, String)]) {
         StandardOutput.write(record: pairs)
     }
 
-    private func printTable(headers: [String], rows: [[String]]) {
+    private func printTable(headers: [ColumnHeader], rows: [[String]]) {
         StandardOutput.write(recordsWithHeaders: headers, rows: rows)
     }
 
     // MARK: - Devices
 
     private func renderDevices(_ devices: [DeviceRow]) {
-        let headers = ["ID", "Name", "RSSI", "Services"]
+        let headers: [ColumnHeader] = ["ID", "Name", "RSSI", "Services"]
         let rows: [[String]] = devices.map { d in
             [
                 d.id,
@@ -114,7 +114,7 @@ final class KVRenderer: OutputRenderer {
     // MARK: - Services
 
     private func renderServices(_ services: [ServiceRow]) {
-        let headers = ["UUID", "Name", "Primary"]
+        let headers: [ColumnHeader] = ["UUID", "Name", "Primary"]
         let rows = services.map { [$0.uuid, $0.name ?? "", $0.isPrimary ? "yes" : "no"] }
         printTable(headers: headers, rows: rows)
     }
@@ -124,7 +124,7 @@ final class KVRenderer: OutputRenderer {
     private func renderCharacteristics(_ chars: [CharacteristicRow]) {
         let hasValues = chars.contains { LabeledValue.flattened(value: $0.value, fields: $0.valueFields) != nil }
         if hasValues {
-            let headers = ["UUID", "Name", "Properties", "Value"]
+            let headers: [ColumnHeader] = ["UUID", "Name", "Properties", "Value"]
             let rows = chars.map { char -> [String] in
                 [char.uuid, char.name ?? "", char.properties.joined(separator: ","),
                  LabeledValue.flattened(value: char.value, fields: char.valueFields) ?? ""]
@@ -149,11 +149,11 @@ final class KVRenderer: OutputRenderer {
 
     private func renderGATTTreeKV(_ tree: [GATTTreeService]) {
         for service in tree {
-            var svcPairs: [(String, String)] = [("type", "service"), ("uuid", service.uuid)]
+            var svcPairs: [(KVKey, String)] = [("type", "service"), ("uuid", service.uuid)]
             if let name = service.name { svcPairs.append(("name", name)) }
             printKV(svcPairs)
             for char in service.characteristics {
-                var charPairs: [(String, String)] = [
+                var charPairs: [(KVKey, String)] = [
                     ("type", "characteristic"),
                     ("service", service.uuid),
                     ("uuid", char.uuid),
@@ -165,7 +165,7 @@ final class KVRenderer: OutputRenderer {
                 }
                 printKV(charPairs)
                 for desc in char.descriptors {
-                    var descPairs: [(String, String)] = [
+                    var descPairs: [(KVKey, String)] = [
                         ("type", "descriptor"),
                         ("char", char.uuid),
                         ("uuid", desc.uuid),
@@ -182,7 +182,7 @@ final class KVRenderer: OutputRenderer {
     private func renderCharacteristicInfoKV(_ info: GATTCharInfo) {
         printKV([("uuid", info.uuid), ("name", info.name), ("description", info.description)])
         for f in info.fields {
-            var pairs: [(String, String)] = [
+            var pairs: [(KVKey, String)] = [
                 ("field", f.name),
                 ("type", f.typeName),
                 ("size", f.sizeDescription),
@@ -197,7 +197,7 @@ final class KVRenderer: OutputRenderer {
     // MARK: - Connection status
 
     private func renderConnectionStatus(_ status: ConnectionStatus) {
-        var pairs: [(String, String)] = [
+        var pairs: [(KVKey, String)] = [
             ("connected", status.isConnected ? "yes" : "no"),
             ("device", status.deviceId ?? "(none)"),
             ("name", status.deviceName ?? "(none)"),
