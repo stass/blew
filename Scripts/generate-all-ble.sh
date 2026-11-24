@@ -1,7 +1,7 @@
 #!/bin/bash
 # generate-all-ble.sh <names-data-dir> <sig-dir> <output-dir>
 #
-# Wrapper that runs both BLE code generation scripts in sequence.
+# Wrapper that runs the BLE code generation scripts in sequence.
 set -e
 
 NAMES_DATA_DIR="$1"
@@ -17,3 +17,7 @@ ruby "$SCRIPTS_DIR/generate-ble-names.rb" \
 ruby "$SCRIPTS_DIR/generate-ble-characteristics.rb" \
     "$SIG_DIR" \
     "$OUTPUT_DIR/BLECharacteristics.generated.swift"
+
+ruby "$SCRIPTS_DIR/generate-ble-companies.rb" \
+    "$SIG_DIR" \
+    "$OUTPUT_DIR/CompanyNames.generated.swift"

@@ -343,11 +343,12 @@ final class CommandRouter {
         return result
     }
 
-    private static func deviceRows(_ devices: [DiscoveredDevice]) -> [DeviceRow] {
+    static func deviceRows(_ devices: [DiscoveredDevice]) -> [DeviceRow] {
         devices.map { d in
             DeviceRow(id: d.identifier, name: d.name, rssi: d.rssi,
                       serviceUUIDs: d.serviceUUIDs,
-                      serviceDisplayNames: d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) })
+                      serviceDisplayNames: d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) },
+                      manufacturer: AdvertisedManufacturer(d.manufacturerData))
         }
     }
 
@@ -1954,17 +1955,6 @@ extension CommandRouter {
     }
 }
 
-// MARK: - RSSI signal bar
-
-extension CommandRouter {
-    static func rssiBar(_ rssi: Int, width: Int = 8) -> String {
-        let clamped = max(-100, min(-30, rssi))
-        let ratio = Double(clamped + 100) / 70.0
-        let filled = Int((ratio * Double(width)).rounded())
-        return String(repeating: "█", count: filled) + String(repeating: "░", count: width - filled)
-    }
-}
-
 // MARK: - Scan spinner
 
 private final class ScanSpinner {
@@ -2075,17 +2065,9 @@ private final class ScanWatchDisplay {
         let countStr = count == 0 ? "no devices yet" : "\(count) device\(count == 1 ? "" : "s")"
         let header = "\(frame) Scanning \(String(format: "%.0f", elapsed))s  \(countStr)  (Ctrl-C to stop)"
 
-        let rows = devices.map { d in
-            TextTable.Row(cells: [
-                d.identifier,
-                d.name ?? "(unknown)",
-                "\(d.rssi)",
-                CommandRouter.rssiBar(d.rssi),
-                d.serviceUUIDs.map { BLENames.displayUUID($0, category: .service) }.joined(separator: ", "),
-            ])
-        }
+        let rows = CommandRouter.deviceRows(devices).map { TextTable.Row(cells: TextRenderer.deviceCells($0)) }
         let lines = [TextLine(header)]
-            + TextTable.lines(headers: ["ID", "Name", "RSSI", "Signal", "Services"], rows: rows)
+            + TextTable.lines(headers: TextRenderer.deviceHeaders.map(\.title), rows: rows)
 
         // Replace the lines drawn last.
         StandardErrorLog.redraw(lines, replacing: previousLineCount, styled: formatter.styled)

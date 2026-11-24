@@ -81,18 +81,35 @@ final class TextRenderer: OutputRenderer {
 
     // MARK: - Devices table
 
-    private func renderDevices(_ devices: [DeviceRow]) {
-        let headers: [ColumnHeader] = ["ID", "Name", "RSSI", "Signal", "Services"]
-        let rows: [[String]] = devices.map { d in
-            [
-                d.id,
-                d.name ?? "(unknown)",
-                "\(d.rssi)",
-                rssiBar(d.rssi),
-                d.serviceDisplayNames.joined(separator: ", "),
-            ]
+    /// The columns of the device table, which `scan` prints and
+    /// `scan --watch` redraws.
+    static let deviceHeaders: [ColumnHeader] = ["ID", "Name", "RSSI", "Signal", "Manufacturer", "Services"]
+
+    /// One device's cells, in `deviceHeaders` order.
+    static func deviceCells(_ d: DeviceRow) -> [String] {
+        [
+            d.id,
+            d.name ?? "(unknown)",
+            "\(d.rssi)",
+            rssiBar(d.rssi),
+            manufacturerCell(d.manufacturer),
+            d.serviceDisplayNames.joined(separator: ", "),
+        ]
+    }
+
+    /// The Manufacturer cell: "0x004C Apple, Inc.", the identifier alone
+    /// when the SIG list has no name for it, "(too short: 1 byte)", or
+    /// empty for a device that advertises no manufacturer data.
+    static func manufacturerCell(_ manufacturer: AdvertisedManufacturer?) -> String {
+        switch manufacturer {
+        case .company(let company)?: return company.name.map { "\(company.hex) \($0)" } ?? company.hex
+        case .tooShort(let count)?: return "(too short: \(count) byte\(count == 1 ? "" : "s"))"
+        case nil: return ""
         }
-        formatter.printTable(headers: headers, rows: rows)
+    }
+
+    private func renderDevices(_ devices: [DeviceRow]) {
+        formatter.printTable(headers: Self.deviceHeaders, rows: devices.map(Self.deviceCells))
     }
 
     // MARK: - Services table

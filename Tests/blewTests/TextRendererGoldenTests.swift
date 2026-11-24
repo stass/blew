@@ -46,8 +46,13 @@ final class TextRendererGoldenTests: XCTestCase {
                 uuid: "2A00", name: "Device Name", description: "d", fields: []))),
             ("devices", .devices([
                 DeviceRow(id: "ID1", name: "\u{1B}]8;;http://x\u{07}Lamp", rssi: -50,
-                          serviceUUIDs: ["180F"], serviceDisplayNames: ["Battery", "H\u{200F}R"]),
+                          serviceUUIDs: ["180F"], serviceDisplayNames: ["Battery", "H\u{200F}R"],
+                          manufacturer: .company(0x0059)),
                 DeviceRow(id: "ID-LONGER", name: nil, rssi: -90, serviceUUIDs: [], serviceDisplayNames: []),
+                DeviceRow(id: "ID3", name: nil, rssi: -70, serviceUUIDs: [], serviceDisplayNames: [],
+                          manufacturer: .company(0xFFFF)),
+                DeviceRow(id: "ID4", name: nil, rssi: -70, serviceUUIDs: [], serviceDisplayNames: [],
+                          manufacturer: .tooShort(byteCount: 1)),
             ])),
             ("devicesEmpty", .devices([])),
             ("services", .services([ServiceRow(uuid: "180F", name: "B\u{85}", isPrimary: true)])),
@@ -184,14 +189,18 @@ extension TextRendererGoldenTests {
             ]),
         "devices": (
             text: [
-                #"ID         Name                      RSSI  Signal    Services         "#,
-                #"──────────────────────────────────────────────────────────────────────"#,
-                #"ID1        \x1b]8;;http://x\x07Lamp  -50   ██████░░  Battery, H\u200fR"#,
-                #"ID-LONGER  (unknown)                 -90   █░░░░░░░                   "#,
+                #"ID         Name                      RSSI  Signal    Manufacturer                     Services         "#,
+                #"───────────────────────────────────────────────────────────────────────────────────────────────────────"#,
+                #"ID1        \x1b]8;;http://x\x07Lamp  -50   ██████░░  0x0059 Nordic Semiconductor ASA  Battery, H\u200fR"#,
+                #"ID-LONGER  (unknown)                 -90   █░░░░░░░                                                    "#,
+                #"ID3        (unknown)                 -70   ███░░░░░  0xFFFF                                            "#,
+                #"ID4        (unknown)                 -70   ███░░░░░  (too short: 1 byte)                               "#,
             ],
             kv: [
-                #"id=ID1 name="\x1b]8;;http://x\x07Lamp" rssi=-50 services=180F"#,
+                #"id=ID1 name="\x1b]8;;http://x\x07Lamp" rssi=-50 manufacturer_id=0x0059 manufacturer="Nordic Semiconductor ASA" services=180F"#,
                 #"id=ID-LONGER name=(unknown) rssi=-90 services="""#,
+                #"id=ID3 name=(unknown) rssi=-70 manufacturer_id=0xFFFF services="""#,
+                #"id=ID4 name=(unknown) rssi=-70 manufacturer_data_length=1 services="""#,
             ]),
         "devicesEmpty": (
             text: [

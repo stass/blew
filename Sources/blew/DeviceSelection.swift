@@ -18,7 +18,7 @@ struct DeviceFilter: Equatable {
     var services: [String] = []
     /// `-m`: the Bluetooth SIG company identifier that starts the
     /// manufacturer data (its first two bytes, little-endian).
-    var manufacturer: UInt16?
+    var manufacturer: CompanyIdentifier?
     /// `-R`: the lowest RSSI, in dBm.
     var rssiMin: Int?
 
@@ -34,11 +34,7 @@ struct DeviceFilter: Equatable {
             let advertised = Set(device.serviceUUIDs.map { BLENames.canonicalUUID($0) ?? $0.uppercased() })
             guard services.allSatisfy(advertised.contains) else { return false }
         }
-        if let manufacturer {
-            guard let data = device.manufacturerData, data.count >= 2 else { return false }
-            let company = UInt16(data[data.startIndex]) | UInt16(data[data.startIndex + 1]) << 8
-            guard company == manufacturer else { return false }
-        }
+        if let manufacturer, AdvertisedManufacturer(device.manufacturerData) != .company(manufacturer) { return false }
         if let rssiMin, device.rssi < rssiMin { return false }
         return true
     }
@@ -81,8 +77,8 @@ extension DeviceTarget {
             return uuid
         }
         if let text = arguments.value(.manufacturer) {
-            guard let id = UInt16(text) else {
-                throw InvalidArgument("invalid manufacturer ID '\(text)' (use a decimal company identifier, 0 to 65535)")
+            guard let id = CompanyIdentifier(parsing: text) else {
+                throw InvalidArgument("invalid manufacturer ID '\(text)' (use a company identifier, 0 to 65535, in decimal or as 0x and hex digits)")
             }
             filter.manufacturer = id
         }

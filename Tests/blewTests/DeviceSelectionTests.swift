@@ -40,6 +40,17 @@ final class DeviceFilterTests: XCTestCase {
         XCTAssertTrue(try target(["-m", "76"]).filter.matches(device("E", manufacturer: [0x4C, 0x00])))
     }
 
+    func testManufacturerTakesDecimalOrHex() throws {
+        XCTAssertEqual(try target(["-m", "0x0059"]).filter, DeviceFilter(manufacturer: 89))
+        XCTAssertEqual(try target(["-m", "0X4c"]).filter, DeviceFilter(manufacturer: 76))
+        XCTAssertEqual(try target(["--manufacturer=65535"]).filter, DeviceFilter(manufacturer: 0xFFFF))
+        for bad in ["65536", "0x10000", "4C", "0x", "-1", "Apple"] {
+            XCTAssertThrowsError(try target(["-m", bad]), bad) { error in
+                XCTAssertTrue(error is InvalidArgument, bad)
+            }
+        }
+    }
+
     func testIdNameAndRSSIFilters() throws {
         let thingy = device("F3C2A1B0-1234-5678-ABCD-000000000001", name: "Nordic Thingy", rssi: -70)
         XCTAssertTrue(try target(["-i", "f3c2a1b0-1234-5678-abcd-000000000001"]).filter.matches(thingy))
@@ -241,7 +252,7 @@ final class ScanArgumentTests: XCTestCase {
     }
 
     func testInvalidFiltersAreRejected() {
-        for args in [["-S", "nope"], ["-m", "0x59"], ["-p", "bogus"], ["-w", "-p", "first"], ["-t", "soon"]] {
+        for args in [["-S", "nope"], ["-m", "0x10000"], ["-p", "bogus"], ["-w", "-p", "first"], ["-t", "soon"]] {
             XCTAssertEqual(router(["-o", "kv"]).runScan(args).exitCode, BlewExitCode.invalidArguments.code, "\(args)")
         }
     }

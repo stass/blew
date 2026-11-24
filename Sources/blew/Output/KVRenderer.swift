@@ -101,16 +101,21 @@ final class KVRenderer: OutputRenderer {
     // MARK: - Devices
 
     private func renderDevices(_ devices: [DeviceRow]) {
-        let headers: [ColumnHeader] = ["ID", "Name", "RSSI", "Services"]
-        let rows: [[String]] = devices.map { d in
-            [
-                d.id,
-                d.name ?? "(unknown)",
-                "\(d.rssi)",
-                d.serviceUUIDs.joined(separator: ","),
-            ]
+        for d in devices {
+            var pairs: [(KVKey, String)] = [("id", d.id), ("name", d.name ?? "(unknown)"), ("rssi", "\(d.rssi)")]
+            // Like the JSON form: a manufacturer field with nothing to show is left out.
+            switch d.manufacturer {
+            case .company(let company)?:
+                pairs.append(("manufacturer_id", company.hex))
+                if let name = company.name { pairs.append(("manufacturer", name)) }
+            case .tooShort(let count)?:
+                pairs.append(("manufacturer_data_length", "\(count)"))
+            case nil:
+                break
+            }
+            pairs.append(("services", d.serviceUUIDs.joined(separator: ",")))
+            StandardOutput.write(record: pairs)
         }
-        printTable(headers: headers, rows: rows)
     }
 
     // MARK: - Services

@@ -59,6 +59,54 @@ struct DeviceRow: Codable {
     let rssi: Int
     let serviceUUIDs: [String]
     let serviceDisplayNames: [String]
+    /// What the advertised manufacturer data says; nil when the device
+    /// advertises none.
+    var manufacturer: AdvertisedManufacturer? = nil
+}
+
+/// The JSON form of a device: `manufacturer` becomes `manufacturerID` (a
+/// number) and `manufacturer` (the company name) for an identifier, or
+/// `manufacturerDataLength` for data too short to hold one; a field with
+/// nothing to show is left out.
+extension DeviceRow {
+    private enum CodingKeys: String, CodingKey {
+        case id, name, rssi, serviceUUIDs, serviceDisplayNames
+        case manufacturerID, manufacturer, manufacturerDataLength
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+        rssi = try c.decode(Int.self, forKey: .rssi)
+        serviceUUIDs = try c.decode([String].self, forKey: .serviceUUIDs)
+        serviceDisplayNames = try c.decode([String].self, forKey: .serviceDisplayNames)
+        if let id = try c.decodeIfPresent(UInt16.self, forKey: .manufacturerID) {
+            manufacturer = .company(CompanyIdentifier(id))
+        } else if let count = try c.decodeIfPresent(Int.self, forKey: .manufacturerDataLength) {
+            manufacturer = .tooShort(byteCount: count)
+        } else {
+            manufacturer = nil
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encodeIfPresent(name, forKey: .name)
+        try c.encode(rssi, forKey: .rssi)
+        try c.encode(serviceUUIDs, forKey: .serviceUUIDs)
+        try c.encode(serviceDisplayNames, forKey: .serviceDisplayNames)
+        switch manufacturer {
+        case .company(let company)?:
+            try c.encode(company.value, forKey: .manufacturerID)
+            try c.encodeIfPresent(company.name, forKey: .manufacturer)
+        case .tooShort(let count)?:
+            try c.encode(count, forKey: .manufacturerDataLength)
+        case nil:
+            break
+        }
+    }
 }
 
 struct ServiceRow: Codable {

@@ -115,10 +115,10 @@ final class DeviceTargetingOptionsTests: XCTestCase {
 
     func testManufacturerOptionSerialized() {
         var opts = try! DeviceTargetingOptions.parse([])
-        opts.manufacturer = 0x004C
+        opts.manufacturer = "0x004C"
         let args = opts.toArgs()
         XCTAssertTrue(args.contains("-m"))
-        XCTAssertTrue(args.contains("76"))
+        XCTAssertTrue(args.contains("0x004C"))
     }
 
     func testRSSIMinOptionSerialized() {
@@ -162,7 +162,7 @@ final class DeviceTargetingOptionsTests: XCTestCase {
         opts.id = "SOME-UUID"
         opts.name = "MyDevice"
         opts.service = ["180F"]
-        opts.manufacturer = 10
+        opts.manufacturer = "10"
         opts.rssiMin = -65
         opts.pick = .first
         let args = opts.toArgs()

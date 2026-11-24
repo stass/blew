@@ -628,14 +628,14 @@ extension BlewMCPServer {
     static let toolDefinitions: [Tool] = [
         Tool(
             name: "ble_scan",
-            description: "Scan for nearby BLE devices. Returns a list of discovered devices with their IDs, names, RSSI, and advertised services.",
+            description: "Scan for nearby BLE devices. Returns a list of discovered devices with their IDs, names, RSSI, manufacturer (company identifier and name), and advertised services.",
             inputSchema: .object([
                 "type": .string("object"),
                 "properties": .object([
                     "name":         .object(["type": .string("string"), "description": .string("Filter by device name (substring match)")]),
                     "service":      .object(["type": .string("string"), "description": .string("Filter by advertised service UUID")]),
                     "rssi_min":     .object(["type": .string("integer"), "description": .string("Minimum RSSI threshold (e.g. -70)")]),
-                    "manufacturer": .object(["type": .string("integer"), "description": .string("Filter by manufacturer ID")]),
+                    "manufacturer": manufacturerProperty,
                     "pick":         .object(["type": .string("string"), "enum": .array([.string("strongest"), .string("first"), .string("only")]), "description": .string("Return only the device this strategy picks: strongest RSSI, first discovered, or the only match (error when several match)")]),
                     "timeout":      .object(["type": .string("number"), "minimum": .int(0), "maximum": .double(maxCallDuration), "description": .string("Scan duration in seconds (default: 5, at most \(Int(maxCallDuration)))")]),
                 ]),
@@ -651,7 +651,7 @@ extension BlewMCPServer {
                     "device_id":    .object(["type": .string("string"), "description": .string("Identifier (UUID) of the device to connect to, or a fragment of it that matches one device; never a name")]),
                     "name":         .object(["type": .string("string"), "description": .string("Connect to device matching this name (substring)")]),
                     "service":      .object(["type": .string("string"), "description": .string("Filter by advertised service UUID")]),
-                    "manufacturer": .object(["type": .string("integer"), "description": .string("Filter by manufacturer ID")]),
+                    "manufacturer": manufacturerProperty,
                     "rssi_min":     .object(["type": .string("integer"), "description": .string("Minimum RSSI threshold")]),
                     "pick":         .object(["type": .string("string"), "enum": .array([.string("strongest"), .string("first"), .string("only")]), "description": .string("Auto-select strategy")]),
                 ]),
@@ -853,6 +853,13 @@ extension BlewMCPServer {
         ),
     ]
 
+    /// The `manufacturer` filter: a JSON integer, which `buildTargetingArgs`
+    /// passes to `-m` in decimal.
+    static let manufacturerProperty: Value = .object([
+        "type": .string("integer"), "minimum": .int(0), "maximum": .int(65535),
+        "description": .string("Filter by the Bluetooth SIG company identifier that starts the manufacturer data, as an integer (76 is 0x004C, Apple)"),
+    ])
+
     /// The `format` values a tool takes: every `ValueFormat`, in its order.
     static let formatNames: Value = .array(ValueFormat.allCases.map { .string($0.rawValue) })
     /// The `format` values `ble_gatt_tree` and `ble_gatt_chars` take: every
@@ -863,7 +870,7 @@ extension BlewMCPServer {
         "name":         .object(["type": .string("string"), "description": .string("Device name filter (substring match)")]),
         "device_id":    .object(["type": .string("string"), "description": .string("Device identifier (UUID), or a fragment of it that matches one device; never a name")]),
         "service":      .object(["type": .string("string"), "description": .string("Service UUID filter")]),
-        "manufacturer": .object(["type": .string("integer"), "description": .string("Manufacturer ID filter")]),
+        "manufacturer": manufacturerProperty,
         "rssi_min":     .object(["type": .string("integer"), "description": .string("Minimum RSSI threshold")]),
         "pick":         .object(["type": .string("string"), "enum": .array([.string("strongest"), .string("first"), .string("only")]), "description": .string("Auto-select strategy")]),
     ]

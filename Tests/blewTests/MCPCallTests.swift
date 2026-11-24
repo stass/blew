@@ -79,6 +79,19 @@ final class MCPArgumentValidationTests: XCTestCase {
                                                     against: read.inputSchema))
     }
 
+    func testManufacturerIsAnIntegerCompanyIdentifierInEveryTool() throws {
+        for name in ["ble_scan", "ble_connect", "ble_read"] {
+            let tool = try XCTUnwrap(BlewMCPServer.toolDefinitions.first { $0.name == name })
+            var base: [String: Value] = name == "ble_read" ? ["char_uuid": .string("2A19")] : [:]
+            base["manufacturer"] = .int(76)
+            XCTAssertNoThrow(try ToolArguments.validate(base, against: tool.inputSchema), name)
+            for bad: Value in [.string("0x004C"), .int(65536), .int(-1)] {
+                base["manufacturer"] = bad
+                XCTAssertThrowsError(try ToolArguments.validate(base, against: tool.inputSchema), "\(name) \(bad)")
+            }
+        }
+    }
+
     func testGlobalOptionsReachTheRouter() throws {
         let server = BlewMCPServer(globals: try GlobalOptions.parse(["-t", "30", "-v"]))
         XCTAssertEqual(server.router.globals.timeout, 30)

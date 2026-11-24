@@ -169,7 +169,7 @@ Use `--id` to target an explicit device, or combine selectors to let blew find a
 | `-i, --id <device-id>` | Target a specific device by its identifier. `connect` and auto-connect also take a fragment of the identifier (hex digits, hyphens and case ignored) that occurs in exactly one identifier of the last scan or of the connected device; a fragment that matches several is an error listing them. A full identifier (a UUID, with or without its hyphens) names exactly that device, whether or not the last scan saw it; one CoreBluetooth on this Mac has never seen (from any scan or connection) fails with exit code 2 ("Device not found: <id>"). Names are never matched: select by name with `-n`. With `-i`, `connect` and auto-connect connect directly and ignore the other selectors. |
 | `-n, --name <substring>` | Filter by advertised name (case-insensitive substring). |
 | `-S, --service <uuid>` | Filter by advertised service UUID: 4 or 8 hex digits or a 128-bit UUID, so `180F` and `0000180F-0000-1000-8000-00805F9B34FB` are the same service. Repeatable; the device must advertise every one. |
-| `-m, --manufacturer <id>` | Filter by manufacturer: the decimal Bluetooth SIG company identifier at the start of the advertised manufacturer data (e.g. `89` for Nordic Semiconductor, `76` for Apple). |
+| `-m, --manufacturer <id>` | Filter by manufacturer: the Bluetooth SIG company identifier at the start of the advertised manufacturer data, in decimal or as `0x` and one to four hex digits (either case), as the Manufacturer column of `scan` shows it: `0x0059` or `89` for Nordic Semiconductor, `0x004C` or `76` for Apple. |
 | `-R, --rssi-min <dBm>` | Minimum RSSI threshold (e.g. `-R -70`). |
 | `-p, --pick <strategy>` | How to pick when multiple devices match: `strongest` (default, highest RSSI), `first` (the first discovered in the scan), `only` (error, exit code 2, if more than one matches). |
 
@@ -197,11 +197,24 @@ Scans for advertising BLE peripherals and prints a table of discovered devices. 
 | `-S, --service` | Filter by advertised service UUID. Repeatable. |
 | `-R, --rssi-min` | Minimum RSSI threshold (e.g. `-R -70`). |
 | `-i, --id` | Show only the device with this identifier (the full identifier, any case). |
-| `-m, --manufacturer` | Filter by manufacturer ID (decimal company identifier). |
+| `-m, --manufacturer` | Filter by manufacturer: the company identifier, in decimal (`76`) or hex (`0x004C`). |
 | `-p, --pick` | Show only the device auto-connect would pick with this strategy: `strongest`, `first`, `only`. Not valid with `-w`. |
 | `-w, --watch` | Continuously scan and show a live-updating device list. Runs until Ctrl-C or `-t` expires. Requires a TTY in text mode; use `-o kv` for piped output. |
 
-**Output columns (text):** ID, Name, RSSI, Signal (visual bar), Services
+**Output columns (text):** ID, Name, RSSI, Signal (visual bar), Manufacturer, Services
+
+The Manufacturer column shows the Bluetooth SIG company identifier in the
+first two bytes (little-endian) of the advertised manufacturer data, and the
+company it is assigned to: `0x004C Apple, Inc.`, `0x0059 Nordic Semiconductor
+ASA`. An identifier the SIG list blew was built with does not name shows as
+the number alone (`0xFFFF`); manufacturer data shorter than two bytes shows
+as `(too short: 1 byte)`; a device that advertises no manufacturer data has
+an empty cell. The Name column shows only the advertised name, `(unknown)`
+when there is none, so the Manufacturer column is what tells unnamed devices
+apart. With `-o kv`, a record has `manufacturer_id=0x004C` when the device
+advertises an identifier and `manufacturer="Apple, Inc."` when the SIG list
+names it; data shorter than two bytes gives `manufacturer_data_length=1`
+instead; a device with no manufacturer data has none of these fields.
 
 `scan -w -o kv` writes a record each time a device is seen. When the reader
 falls behind, the advertisements a device sent meanwhile come as one record
@@ -219,6 +232,7 @@ Standard Bluetooth SIG service UUIDs in the Services column are shown with their
 % blew scan -n "Heart" -w            # Watch for Heart Rate devices
 % blew scan -S 180D -R -65           # Heart Rate service, RSSI ≥ -65 dBm
 % blew scan -m 89 -p first           # The first Nordic device discovered
+% blew scan -m 0x004C                # Only devices with Apple manufacturer data
 % blew -o kv scan                    # Machine-readable output
 % blew -o kv scan -w                 # Stream device updates (piping-friendly)
 ```
@@ -631,9 +645,9 @@ When standard input is not a terminal, the REPL runs it as a script, the way `ex
 **Example session:**
 ```
 blew> scan -t 3 -n Thingy
-ID                                    NAME    RSSI  Signal    Services
--------------------------------------------------------------------------------------------
-F3C2A1B0-1234-5678-ABCD-000000000001  Thingy  -58   ████████  180F (Battery Service), 180A (Device Information)
+ID                                    Name    RSSI  Signal    Manufacturer                     Services
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+F3C2A1B0-1234-5678-ABCD-000000000001  Thingy  -58   ████████  0x0059 Nordic Semiconductor ASA  180F (Battery Service), 180A (Device Information)
 
 blew> connect F3C2A1B0-1234-5678-ABCD-000000000001
 
@@ -736,7 +750,7 @@ With `-vv`, debug-level messages are added:
 Pass `-o kv` to get machine-parseable output. Each record is one line of space-separated `key=value` pairs. Easy to process with `awk`, `grep`, or any log parser:
 
 ```
-id=F3C2A1B0-... name=Thingy rssi=-58 services=180F,180A
+id=F3C2A1B0-... name=Thingy rssi=-58 manufacturer_id=0x0059 manufacturer="Nordic Semiconductor ASA" services=180F,180A
 char=2A19 name="Battery Level" value=57 fmt=uint8
 ts=2026-02-21T12:34:56.789Z char=fff1 value=deadbeef
 ```
@@ -998,7 +1012,7 @@ The server is stateful: BLE connections and peripheral state persist across tool
 | `ble_periph_status` | Show peripheral state |
 | `ble_nus` | Send text over the Nordic UART Service and collect the reply, optionally waiting for an expected text |
 
-All tools that interact with a remote device accept optional targeting parameters (`name`, `device_id`, `service`, `manufacturer`, `rssi_min`, `pick`) and auto-connect if not already connected. A connected device that does not match the parameters given is replaced by the named device (see [Device targeting options](#device-targeting-options)); `device_id` is an identifier or a fragment of one, never a name. A call that disconnected the connected device to connect to another adds `deviceSwitches` to its structured result, `[{"from": "<old-id>", "to": "<new-id>"}]`, whether or not that connect or the call then succeeded; when the call has no other result, it is the only field. The switches of a cancelled call, which gets no response, come with the result of the next call that runs after it and finishes, before that call's own, all in the order the calls ran; a call rejected for its arguments runs nothing and carries none. With `pick`, `ble_scan` returns only the device that strategy picks.
+All tools that interact with a remote device accept optional targeting parameters (`name`, `device_id`, `service`, `manufacturer`, `rssi_min`, `pick`) and auto-connect if not already connected. A connected device that does not match the parameters given is replaced by the named device (see [Device targeting options](#device-targeting-options)); `device_id` is an identifier or a fragment of one, never a name. `manufacturer` is the company identifier as a JSON integer, 0 to 65535 (`76` for Apple's `0x004C`); a string such as `"0x004C"` is rejected as an invalid argument. A call that disconnected the connected device to connect to another adds `deviceSwitches` to its structured result, `[{"from": "<old-id>", "to": "<new-id>"}]`, whether or not that connect or the call then succeeded; when the call has no other result, it is the only field. The switches of a cancelled call, which gets no response, come with the result of the next call that runs after it and finishes, before that call's own, all in the order the calls ran; a call rejected for its arguments runs nothing and carries none. With `pick`, `ble_scan` returns only the device that strategy picks.
 
 Global options given before `mcp` apply to every tool call: `blew -t 30 mcp` gives each BLE operation a 30-second timeout.
 
@@ -1024,12 +1038,22 @@ A `ble_scan` call returns:
       "id": "A1B2C3D4-...",
       "name": "Heart Rate Sensor",
       "rssi": -55,
+      "manufacturerID": 89,
+      "manufacturer": "Nordic Semiconductor ASA",
       "serviceUUIDs": ["180D"],
       "serviceDisplayNames": ["Heart Rate"]
     }
   ]
 }
 ```
+
+`manufacturerID` is the company identifier (a number) and `manufacturer` the
+company name, as in the Manufacturer column of `scan`. A field with nothing
+to show is left out: `name` for a device that advertises none,
+`manufacturerID` when there is no manufacturer data or it is shorter than two
+bytes, `manufacturer` also when the identifier has no name in the SIG list.
+Manufacturer data shorter than two bytes gives `manufacturerDataLength` (its
+length in bytes) instead.
 
 A `ble_read` call returns:
 

@@ -300,7 +300,7 @@ An interrupted command finishes the ordinary way: a CLI subcommand renders what 
 --id (-i)            String? — explicit device UUID
 --name (-n)          String? — device name filter (substring)
 --service (-S)       [String] — service UUID filter, repeatable
---manufacturer (-m)  Int? — manufacturer ID filter
+--manufacturer (-m)  String? — company identifier filter, decimal or 0x hex (CompanyIdentifier(parsing:))
 --rssi-min (-R)      Int? — minimum RSSI (uppercase -R to avoid conflict with -r/--read, -r/--with-response)
 --pick (-p)          PickStrategy: strongest | first | only
 ```
@@ -609,12 +609,13 @@ Two git submodules under `Vendor/` provide the raw data:
 
 **Build-time generation**
 
-The `GenerateBLENames` SwiftPM build tool plugin (`Plugins/GenerateBLENames/plugin.swift`) declares a single `prebuildCommand` that runs `Scripts/generate-all-ble.sh` before each build. That shell script invokes two Ruby generators in sequence:
+The `GenerateBLENames` SwiftPM build tool plugin (`Plugins/GenerateBLENames/plugin.swift`) declares a single `prebuildCommand` that runs `Scripts/generate-all-ble.sh` before each build. That shell script invokes three Ruby generators in sequence:
 
 1. `Scripts/generate-ble-names.rb` — reads the Nordic JSON files, filters to `source == "gss"` entries, deduplicates by UUID, and writes `BLENames.generated.swift` (UUID-to-name dictionaries for services, characteristics, and descriptors).
 2. `Scripts/generate-ble-characteristics.rb` — reads `characteristic_uuids.yaml` and all `gss/*.yaml` files, resolves struct fields recursively via `\autoref` annotations, and writes `BLECharacteristics.generated.swift` (the full `GATTCharacteristicDB` with field-level structure for each characteristic). Build-time warnings are emitted for struct fields that cannot be resolved.
+3. `Scripts/generate-ble-companies.rb` — reads `assigned_numbers/company_identifiers/company_identifiers.yaml` and writes `CompanyNames.generated.swift` (company identifier to company name, for the Manufacturer column of `scan` through `CompanyIdentifier.name`). It fails the build on an identifier outside 16 bits, an entry without a name, or an identifier listed twice.
 
-Both generated files are written to SwiftPM's plugin work directory and compiled as part of the `blew` target. Neither is checked in.
+The generated files are written to SwiftPM's plugin work directory and compiled as part of the `blew` target. None is checked in.
 
 To update the databases, run `git submodule update --remote` and rebuild.
 
@@ -807,6 +808,9 @@ blew (executable)
                                            reads Vendor/bluetooth-SIG/gss/*.yaml
                                            reads Vendor/bluetooth-SIG/assigned_numbers/uuids/characteristic_uuids.yaml
                                            emits BLECharacteristics.generated.swift
+                                         Scripts/generate-ble-companies.rb
+                                           reads Vendor/bluetooth-SIG/assigned_numbers/company_identifiers/company_identifiers.yaml
+                                           emits CompanyNames.generated.swift
 ```
 
 `BLEManager` and `LineNoise` have no dependency on each other. `BLEManager` has no dependency on ArgumentParser or any CLI concern. The `GenerateBLENames` plugin runs as a prebuild command and has no runtime presence.

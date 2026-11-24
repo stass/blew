@@ -18,7 +18,17 @@ None open.
 
 ## P1: important (0.3.0)
 
-None open.
+- [ ] **W1. `scan -w` leaves stale rows on a terminal narrower than the
+  table.** `Sources/blew/Output/StandardStreams.swift:100` (`redraw`) moves
+  the cursor up by the number of lines it wrote, not the terminal rows they
+  took, and `TextTable` pads every row to the table width. The Manufacturer
+  column makes rows of about 130 columns routine (`0x0075 Samsung
+  Electronics Co. Ltd.` beside a service list). Scenario: `blew scan -w` in
+  an 80- or 120-column terminal near Apple and Samsung devices: every row
+  wraps, each redraw erases only part of the previous frame, and old rows
+  pile up. Unverified on a narrow TTY. Fix: clip each redraw line to the
+  terminal width (`TIOCGWINSZ`) in `ScanWatchDisplay`, or count wrapped
+  rows in `redraw`.
 
 ## P2: release hygiene (0.3.0)
 

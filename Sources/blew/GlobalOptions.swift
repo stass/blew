@@ -31,8 +31,8 @@ struct DeviceTargetingOptions: ParsableArguments {
     @Option(name: [.customShort("S"), .long], help: "Filter by advertised service UUID (repeatable).")
     var service: [String] = []
 
-    @Option(name: [.short, .long], help: "Filter by manufacturer ID.")
-    var manufacturer: Int?
+    @Option(name: [.short, .long], help: "Filter by manufacturer (company) ID, decimal or 0x hex.")
+    var manufacturer: String?
 
     @Option(name: [.customShort("R"), .customLong("rssi-min")], parsing: .unconditional, help: "Minimum RSSI in dBm.")
     var rssiMin: Int?
@@ -46,7 +46,7 @@ struct DeviceTargetingOptions: ParsableArguments {
         if let id = id { args += ["-i", id] }
         if let name = name { args += ["-n", name] }
         for uuid in service { args += ["-S", uuid] }
-        if let m = manufacturer { args += ["-m", "\(m)"] }
+        if let m = manufacturer { args += ["-m", m] }
         if let r = rssiMin { args += ["-R", "\(r)"] }
         if let pick { args += ["-p", pick.rawValue] }
         return args
