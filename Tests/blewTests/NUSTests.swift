@@ -278,6 +278,36 @@ final class NUSSessionTests: XCTestCase {
         XCTAssertEqual(outcome, .expectMissed)
     }
 
+    /// A drop breaks the received stream, so a match never spans it. The
+    /// device sent `SU`, `JUNK`, `CCESS`; the session fell behind after
+    /// `SU`, and `JUNK` was dropped to make room for later notifications.
+    func testExpectNeverMatchesAcrossDroppedNotifications() async {
+        let firstDelivered = DispatchSemaphore(value: 0), keepReading = DispatchSemaphore(value: 0)
+        let deliveries = Locked(0)
+        let (session, deviceSends) = makeSession(
+            input: NUSPort.fixed(Data(), write: { _ in }).input(), expect: bytes("SUCCESS"), linger: 30,
+            deliver: { _ in
+                // Hold the reader after the first chunk, so the next ones pile up.
+                if deliveries.withValue({ $0 += 1; return $0 }) == 1 {
+                    firstDelivered.signal()
+                    keepReading.wait()
+                }
+            },
+            send: { _ in })
+        deviceSends.yield(bytes("SU"))
+        let run = Task { await session.run() }
+        await withCheckedContinuation { done in DispatchQueue.global().async { firstDelivered.wait(); done.resume() } }
+        deviceSends.yield(bytes("JUNK"))
+        deviceSends.yield(bytes("CCESS"))
+        // One more than fits behind JUNK and CCESS: JUNK, the oldest, is dropped.
+        for _ in 0..<(NotificationStream.capacity - 1) { deviceSends.yield(bytes("z")) }
+        // The device then disconnects: the session ends on what it read by then.
+        deviceSends.finish()
+        keepReading.signal()
+        let outcome = await run.value
+        XCTAssertEqual(outcome, .linkLost("device disconnected"), "SU and CCESS were joined across the dropped JUNK")
+    }
+
     func testDeviceDisconnectIsLinkLost() async {
         let (session, deviceSends, _, _) = makeSession(input: [], inputEnds: false)
         deviceSends.finish(throwing: BLEError.connectionFailed("disconnected"))
@@ -786,12 +816,38 @@ final class NUSMCPTests: XCTestCase {
         guard case .nus(let transcript) = BlewMCPServer().encodeStructuredContent(output) else {
             return XCTFail("expected a nus transcript")
         }
-        XCTAssertEqual(transcript, NUSTranscript(received: "ping\n", receivedHex: "70696e670a"))
+        XCTAssertEqual(transcript, NUSTranscript(received: "ping\n", receivedHex: "70696e670a", dropped: 0))
         let json = try JSONEncoder().encode(StructuredResult.nus(transcript))
         guard case .nus(let back) = try JSONDecoder().decode(StructuredResult.self, from: json) else {
             return XCTFail("round trip lost the type")
         }
         XCTAssertEqual(back, transcript)
+    }
+
+    /// Notifications a `ble_nus` call dropped are counted in its result,
+    /// over every session of the call, so an incomplete transcript is not
+    /// reported as the whole of what the device sent.
+    func testNUSTranscriptCountsDroppedNotifications() throws {
+        let output: [CommandOutput] = [
+            .nusData(NUSData(timestamp: "t1", data: Data("SU".utf8))),
+            .nusDropped(NUSDrops(session: 3, total: 3, sessionEnded: false)),
+            .nusData(NUSData(timestamp: "t2", data: Data("CCESS".utf8))),
+            .nusDropped(NUSDrops(session: 5, total: 5, sessionEnded: true)),
+            .nusStatus(NUSStatus(event: "reconnecting", detail: "")),
+            .nusDropped(NUSDrops(session: 2, total: 7, sessionEnded: false)),
+        ]
+        let server = BlewMCPServer()
+        guard case .nus(let transcript) = server.encodeStructuredContent(output) else {
+            return XCTFail("expected a nus transcript")
+        }
+        XCTAssertEqual(transcript, NUSTranscript(received: "SUCCESS", receivedHex: "53554343455353", dropped: 7))
+        var result = CommandResult()
+        result.output = output
+        let text = server.buildMCPResult(result).content.compactMap { item -> String? in
+            if case .text(let text, _, _) = item { return text }
+            return nil
+        }.joined()
+        XCTAssertTrue(text.contains("\"dropped\":7"), text)
     }
 }
 #endif

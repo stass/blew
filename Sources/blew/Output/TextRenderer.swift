@@ -54,6 +54,8 @@ final class TextRenderer: OutputRenderer {
             // stderr, so stdout carries only the device's bytes.
             let detail = status.detail.isEmpty ? "" : ": \(status.detail)"
             StandardErrorLog.write("nus ", "\(status.event)\(detail)")
+        case .nusDropped(let drops):
+            StandardErrorLog.write("nus ", "dropped: \(drops.detail)")
         case .message(let msg):
             write(TextLine(msg))
         case .empty:

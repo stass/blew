@@ -42,7 +42,9 @@ enum NUS {
 }
 
 /// Watches the received byte stream for an expected byte sequence, which may
-/// arrive split across any number of notifications.
+/// arrive split across any number of notifications. A match never spans
+/// notifications that were dropped (`gap()`): the expected bytes count as
+/// received only when they arrived contiguously.
 struct NUSExpect {
     let pattern: Data
     /// The last `pattern.count - 1` bytes seen, so a match spanning two
@@ -51,6 +53,13 @@ struct NUSExpect {
 
     init(_ pattern: Data) {
         self.pattern = pattern
+    }
+
+    /// Values were dropped before the next chunk: the bytes before the drop
+    /// and those after it were not contiguous on the device, so a match
+    /// starts afresh after it.
+    mutating func gap() {
+        tail = Data()
     }
 
     /// Feed the next received chunk; true once the pattern has appeared.
@@ -112,9 +121,10 @@ struct NUSSession: Sendable {
             group.addTask { [received, deliver, expect] in
                 var matcher = expect.map(NUSExpect.init)
                 do {
-                    for try await chunk in received {
-                        deliver(chunk)
-                        if matcher?.feed(chunk) == true { return .matched }
+                    for try await chunk in received.withGaps {
+                        deliver(chunk.data)
+                        if chunk.droppedBefore > 0 { matcher?.gap() }
+                        if matcher?.feed(chunk.data) == true { return .matched }
                     }
                 } catch {
                     return .linkLost(nil, error)

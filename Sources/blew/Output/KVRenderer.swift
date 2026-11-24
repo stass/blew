@@ -63,6 +63,8 @@ final class KVRenderer: OutputRenderer {
             printKV([("sub", "dropped"), ("char", drops.char), ("total", "\(drops.total)")])
         case .nusStatus(let status):
             printKV([("nus", status.event), ("detail", status.detail)])
+        case .nusDropped(let drops):
+            printKV([("nus", "dropped"), ("detail", drops.detail)])
         case .message(let msg):
             formatter.write(TextLine(msg))
         case .empty:

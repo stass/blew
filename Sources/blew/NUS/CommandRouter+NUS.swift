@@ -246,7 +246,8 @@ extension CommandRouter {
                 status("dropped", "\(lost) bytes from the device: the local client is not reading or not connected")
             }
         }
-        let finished = bridgeNUS(options: options, port: port, deliver: deliver, status: status)
+        let finished = bridgeNUS(options: options, port: port, deliver: deliver, status: status,
+                                 dropped: { emit(.nusDropped($0)) })
         let dropped = port.droppedCount
         if dropped > 0 { status("dropped", "\(dropped) bytes from the device in total") }
         return finished
@@ -254,8 +255,11 @@ extension CommandRouter {
 
     /// The connect, session and reconnect loop of `runNUS` over `port`.
     private func bridgeNUS(options: NUSOptions, port: NUSPort, deliver: @escaping @Sendable (Data) -> Void,
-                           status: @escaping @Sendable (String, String) -> Void) -> CommandResult {
+                           status: @escaping @Sendable (String, String) -> Void,
+                           dropped: @escaping @Sendable (NUSDrops) -> Void) -> CommandResult {
         var result = CommandResult()
+        // Notifications the sessions before this one dropped.
+        var droppedEarlier = 0
         // After the first connection, reconnect only to that device, never
         // to whichever device matching the filter is strongest by then.
         var targeting = options.targeting
@@ -285,7 +289,10 @@ extension CommandRouter {
             connectedOnce = true
             status("connected", device.label)
 
-            var outcome = runNUSSession(options: options, port: port, deliver: deliver, status: status)
+            let session = runNUSSession(options: options, port: port, deliver: deliver,
+                                        droppedEarlier: droppedEarlier, dropped: dropped)
+            droppedEarlier += session.dropped
+            var outcome = session.outcome
             var stillConnected = outcome != nil && connectedDevice().id != nil
             // A write error can arrive before the disconnect that caused it:
             // let the connection state settle before deciding to reconnect.
@@ -317,14 +324,18 @@ extension CommandRouter {
         }
     }
 
-    /// Run one session on the current connection. Nil when interrupted.
+    /// Run one session on the current connection: its outcome (nil when
+    /// interrupted) and the notifications it reported dropped.
     /// Notifications the session did not read fast enough to keep
-    /// (`NotificationStream.capacity`) are reported as a "dropped" status:
-    /// at the first loss, as it is seen, and with the total when the
-    /// session ends if more were lost since.
+    /// (`NotificationStream.capacity`) are reported to `dropped`: at the
+    /// first loss, as it is seen, and with the session's count when it
+    /// ends if more were lost since. `droppedEarlier`, the earlier
+    /// sessions' count, makes each report's command total.
     private func runNUSSession(options: NUSOptions, port: NUSPort,
                                deliver: @escaping @Sendable (Data) -> Void,
-                               status: @escaping @Sendable (String, String) -> Void) -> NUSOutcome? {
+                               droppedEarlier: Int,
+                               dropped: @escaping @Sendable (NUSDrops) -> Void)
+        -> (outcome: NUSOutcome?, dropped: Int) {
         let outcome = Locked<NUSOutcome>(.linkLost("session did not start"))
         let manager = self.manager
         // The operation timeout bounds the subscribe and each write.
@@ -354,7 +365,7 @@ extension CommandRouter {
                             let lost = received.droppedCount
                             if lost > 0 {
                                 reported.set(lost)
-                                status("dropped", "\(lost) notifications from the device: they came faster than blew delivered them")
+                                dropped(NUSDrops(session: lost, total: droppedEarlier + lost, sessionEnded: false))
                             }
                         }
                         deliver(data)
@@ -364,14 +375,15 @@ extension CommandRouter {
                 outcome.set(await session.run())
                 let lost = received.droppedCount
                 if lost > reported.value {
-                    status("dropped", "\(lost) notifications from the device in this session")
+                    reported.set(lost)
+                    dropped(NUSDrops(session: lost, total: droppedEarlier + lost, sessionEnded: true))
                 }
             } catch {
                 outcome.set(.linkLost(nil, error))
             }
         }
-        if case .interrupted = waitInterruptible(operation) { return nil }
-        return outcome.value
+        if case .interrupted = waitInterruptible(operation) { return (nil, reported.value) }
+        return (outcome.value, reported.value)
     }
 
     private func pauseInterruptibly(seconds: TimeInterval) -> CommandOutcome {

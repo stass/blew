@@ -27,6 +27,7 @@ enum CommandOutput {
     case subscriptionList([String])
     case nusData(NUSData)
     case nusStatus(NUSStatus)
+    case nusDropped(NUSDrops)
     case message(String)
     case empty
 }
@@ -146,11 +147,33 @@ struct NUSStatus: Codable, Equatable {
     let detail: String
 }
 
+/// Notifications from a NUS device that the bridge dropped because they
+/// came faster than it passed them on (`NotificationStream.capacity`):
+/// `session` since this connection's session started, `total` since the
+/// command started, over every reconnect. Reported at the first loss of a
+/// session and, with `sessionEnded`, when a session that lost more since
+/// ends.
+struct NUSDrops: Codable, Equatable {
+    let session: Int
+    let total: Int
+    let sessionEnded: Bool
+
+    /// The `dropped` event's detail.
+    var detail: String {
+        sessionEnded
+            ? "\(session) notifications from the device in this session"
+            : "\(session) notifications from the device: they came faster than blew delivered them"
+    }
+}
+
 /// What an MCP `ble_nus` call received, all notifications joined.
 struct NUSTranscript: Codable, Equatable {
     /// The bytes as UTF-8, invalid sequences replaced.
     let received: String
     let receivedHex: String
+    /// The notifications dropped before blew collected them, so missing
+    /// from `received`; 0 when none were.
+    let dropped: Int
 }
 
 // MARK: - Peripheral types

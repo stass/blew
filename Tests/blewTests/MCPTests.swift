@@ -893,6 +893,81 @@ final class MCPToolDispatchTests: XCTestCase {
         let next = try await server.execute(ToolCommand(duration: 0) { _ in CommandResult() }, name: "ble_status", budget: 5)
         XCTAssertNil(next.structuredContent, "a switch belongs to the call that made it")
     }
+
+    /// Two calls in flight, the first one's reply held back until the second
+    /// has run and replied: each reply reports only the switch its own call
+    /// made.
+    func testEachReplyReportsOnlyItsOwnCallsSwitches() async throws {
+        guard #available(macOS 15.0, *) else { throw XCTSkip("needs task executors") }
+        let a = "AAAAAAAA-0000-0000-0000-000000000001", b = "BBBBBBBB-0000-0000-0000-000000000002",
+            c = "CCCCCCCC-0000-0000-0000-000000000003"
+        let first = try XCTUnwrap(DeviceSwitch(replacing: ConnectedDevice(id: a, advertisement: nil), with: b))
+        let second = try XCTUnwrap(DeviceSwitch(replacing: ConnectedDevice(id: b, advertisement: nil), with: c))
+        let started = DispatchSemaphore(value: 0), finish = DispatchSemaphore(value: 0)
+        let replies = HeldExecutor()
+        let server: BlewMCPServer = self.server
+        let firstCall = Task(executorPreference: replies) {
+            try await server.execute(ToolCommand(duration: 0) { router in
+                router.reportDeviceSwitch(first)
+                started.signal()
+                finish.wait()
+                return CommandResult()
+            }, name: "ble_read", budget: 30)
+        }
+        await withCheckedContinuation { done in DispatchQueue.global().async { started.wait(); done.resume() } }
+        // The first call's work is running: hold the job that resumes its reply.
+        replies.hold()
+        let secondCall = Task {
+            try await server.execute(ToolCommand(duration: 0) { router in
+                router.reportDeviceSwitch(second)
+                return CommandResult()
+            }, name: "ble_read", budget: 30)
+        }
+        finish.signal()
+        let secondReply = try await secondCall.value
+        XCTAssertGreaterThan(replies.release(), 0, "the first call's reply was not held back")
+        let firstReply = try await firstCall.value
+
+        func switches(_ reply: CallTool.Result) -> Value? { reply.structuredContent?.objectValue?["deviceSwitches"] }
+        XCTAssertEqual(switches(secondReply), .array([.object(["from": .string(b), "to": .string(c)])]))
+        XCTAssertEqual(switches(firstReply), .array([.object(["from": .string(a), "to": .string(b)])]))
+    }
+}
+
+/// Runs a task's jobs on the global queue, except while held: then it keeps
+/// them until `release`.
+@available(macOS 15.0, *)
+private final class HeldExecutor: TaskExecutor, @unchecked Sendable {
+    private let lock = NSLock()
+    private var holding = false
+    private var held: [UnownedJob] = []
+
+    func enqueue(_ job: consuming ExecutorJob) {
+        let job = UnownedJob(job)
+        let runNow = lock.withLock { () -> Bool in
+            if holding { held.append(job) }
+            return !holding
+        }
+        if runNow { start(job) }
+    }
+
+    func hold() { lock.withLock { holding = true } }
+
+    /// Run the jobs held; returns how many there were.
+    @discardableResult
+    func release() -> Int {
+        let jobs = lock.withLock { () -> [UnownedJob] in
+            holding = false
+            defer { held = [] }
+            return held
+        }
+        jobs.forEach(start)
+        return jobs.count
+    }
+
+    private func start(_ job: UnownedJob) {
+        DispatchQueue.global().async { job.runSynchronously(on: self.asUnownedTaskExecutor()) }
+    }
 }
 
 // MARK: - MCPToolDefinitionTests
