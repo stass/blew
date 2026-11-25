@@ -1468,7 +1468,10 @@ extension CommandRouter {
 
     /// The listing value of `data` read from `uuid`: in `format` when one
     /// is given (a value that does not fit it is `.failed`), otherwise
-    /// decoded by its Bluetooth SIG definition, or hex when it has none.
+    /// decoded by its Bluetooth SIG definition, or hex when it has none. A
+    /// decoded field whose bytes are not a value of its type (invalid UTF-8
+    /// in a `utf8s` field) fails the value, naming the field when there are
+    /// several.
     static func listedValue(_ data: Data, uuid: String, format: ValueFormat?) -> ListedValue {
         if let format {
             do {
@@ -1477,23 +1480,27 @@ extension CommandRouter {
                 return .failed(error.message)
             }
         }
-        let decoded = GATTDecoder.decode(data, uuid: uuid) ?? DataFormatter.hex(data)
-        let parts = decoded.components(separatedBy: " | ")
-        return parts.count > 1 ? .fields(parts.map { splitFieldPart($0) }) : .value(decoded)
+        guard let fields = GATTDecoder.fields(data, uuid: uuid) else { return .value(DataFormatter.hex(data)) }
+        if fields.count == 1 {
+            switch fields[0].value {
+            case .success(let value): return .value(value)
+            case .failure(let error): return .failed(error.message)
+            }
+        }
+        var labeled: [LabeledValue] = []
+        for field in fields {
+            switch field.value {
+            case .success(let value): labeled.append(LabeledValue(label: fieldLabel(field.name), value: value))
+            case .failure(let error): return .failed("\(fieldLabel(field.name)): \(error.message)")
+            }
+        }
+        return .fields(labeled)
     }
 
-    /// Split a decoded field string like "Outer.Inner.Leaf: 2026" into
-    /// a simplified label ("Leaf") and the raw value string ("2026").
-    /// The caller is responsible for applying any visual styling to each part.
-    static func splitFieldPart(_ field: String) -> LabeledValue {
-        guard let colonRange = field.range(of: ": ") else { return LabeledValue(label: "", value: field) }
-        let fullName = String(field[field.startIndex..<colonRange.lowerBound])
-        let value = String(field[colonRange.upperBound...])
-        let shortName = fullName
-            .components(separatedBy: ".")
-            .last?
-            .trimmingCharacters(in: .whitespaces) ?? fullName
-        return LabeledValue(label: shortName, value: value)
+    /// The label a listing shows for a decoded field: the last component of
+    /// its GSS name ("Date Time.Year" is "Year").
+    static func fieldLabel(_ name: String) -> String {
+        name.components(separatedBy: ".").last?.trimmingCharacters(in: .whitespaces) ?? name
     }
 }
 

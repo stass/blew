@@ -89,52 +89,52 @@ final class GATTDecoderTests: XCTestCase {
 
     // MARK: - decode(_:uuid:)
 
-    func testDecodeBatteryLevel() {
+    func testDecodeBatteryLevel() throws {
         // Battery Level 2A19: single uint8 field
         let data = Data([85])
-        let result = GATTDecoder.decode(data, uuid: "2A19")
+        let result = try GATTDecoder.decode(data, uuid: "2A19")
         XCTAssertEqual(result, "85")
     }
 
     func testDecodeBatteryLevelMax() {
         let data = Data([100])
-        XCTAssertEqual(GATTDecoder.decode(data, uuid: "2A19"), "100")
+        XCTAssertEqual(try GATTDecoder.decode(data, uuid: "2A19"), "100")
     }
 
     func testDecodeBatteryLevelZero() {
         let data = Data([0])
-        XCTAssertEqual(GATTDecoder.decode(data, uuid: "2A19"), "0")
+        XCTAssertEqual(try GATTDecoder.decode(data, uuid: "2A19"), "0")
     }
 
     func testDecodeUnknownUUIDReturnsNil() {
         let data = Data([0x01, 0x02])
-        XCTAssertNil(GATTDecoder.decode(data, uuid: "FFFF"))
+        XCTAssertNil(try GATTDecoder.decode(data, uuid: "FFFF"))
     }
 
     func testDecodeCustomUUIDReturnsNil() {
         let data = Data([0x01])
-        XCTAssertNil(GATTDecoder.decode(data, uuid: "12345678-1234-1234-1234-123456789ABC"))
+        XCTAssertNil(try GATTDecoder.decode(data, uuid: "12345678-1234-1234-1234-123456789ABC"))
     }
 
-    func testDecodeHeartRateMeasurementSingleByte() {
+    func testDecodeHeartRateMeasurementSingleByte() throws {
         // Heart Rate Measurement: flag byte 0x00 (HR value 8-bit) + HR value uint8
         // Flags = 0x00 → bit 0 = 0 → 8-bit HR value
         let data = Data([0x00, 72])  // Flags=0, HR=72
-        let result = GATTDecoder.decode(data, uuid: "2A37")
+        let result = try GATTDecoder.decode(data, uuid: "2A37")
         XCTAssertNotNil(result)
         // Result should contain "72" somewhere
         XCTAssertTrue(result?.contains("72") ?? false, "Expected 72 in result: \(result ?? "nil")")
     }
 
-    func testDecodeHeartRateMeasurementConditionalFieldAbsent() {
+    func testDecodeHeartRateMeasurementConditionalFieldAbsent() throws {
         // Flags = 0x00 → Energy Expended (bit 3) absent, RR-interval (bit 4) absent
         let data = Data([0x00, 80])
-        let result = GATTDecoder.decode(data, uuid: "2A37")
+        let result = try GATTDecoder.decode(data, uuid: "2A37")
         // Should not contain "Energy" or similar multi-field separator
         XCTAssertNotNil(result)
     }
 
-    func testDecodeMultiFieldCharReturnsBarSeparated() {
+    func testDecodeMultiFieldCharReturnsBarSeparated() throws {
         // Heart Rate with Energy Expended: flags bit 3 set
         // Flags = 0x08 (bit 3 set) → HR 8-bit present + Energy Expended uint16 present
         let flags: UInt8 = 0x08
@@ -142,21 +142,21 @@ final class GATTDecoderTests: XCTestCase {
         var energy: UInt16 = 1000
         let energyData = withUnsafeBytes(of: &energy) { Data($0) }
         let data = Data([flags, hr]) + energyData
-        let result = GATTDecoder.decode(data, uuid: "2A37")
+        let result = try GATTDecoder.decode(data, uuid: "2A37")
         XCTAssertNotNil(result)
         XCTAssertTrue(result?.contains("|") ?? false, "Expected '|' separator in multi-field result: \(result ?? "nil")")
     }
 
-    func testDecodeEmptyDataForSingleFieldReturnsNil() {
+    func testDecodeEmptyDataForSingleFieldReturnsNil() throws {
         // Empty data for Battery Level: no field can be parsed → empty parts → nil
-        let result = GATTDecoder.decode(Data(), uuid: "2A19")
+        let result = try GATTDecoder.decode(Data(), uuid: "2A19")
         XCTAssertNil(result)
     }
 
-    func testDecodeManufacturerNameString() {
+    func testDecodeManufacturerNameString() throws {
         // 2A29 = Manufacturer Name String (utf8s)
         let data = "Apple Inc.".data(using: .utf8)!
-        let result = GATTDecoder.decode(data, uuid: "2A29")
+        let result = try GATTDecoder.decode(data, uuid: "2A29")
         XCTAssertEqual(result, "Apple Inc.")
     }
 
@@ -167,7 +167,7 @@ final class GATTDecoderTests: XCTestCase {
         // and Additional Status (bit 2) but not Identifier (bit 0).
         let data = Data([0x06, 0x00, 0x00, 0x50, 0x01])
         XCTAssertEqual(
-            GATTDecoder.decode(data, uuid: "2BED"),
+            try GATTDecoder.decode(data, uuid: "2BED"),
             "Flags: 0x06 | Power State: 0x0000 | Battery Level: 80 | Additional Status: 0x01")
     }
 
@@ -175,7 +175,7 @@ final class GATTDecoderTests: XCTestCase {
         // 2B4D High Intensity Exercise Threshold: Field Selector 3 selects
         // the Percentage of Maximum Heart Rate field.
         XCTAssertEqual(
-            GATTDecoder.decode(Data([0x03, 90]), uuid: "2B4D"),
+            try GATTDecoder.decode(Data([0x03, 90]), uuid: "2B4D"),
             "Field Selector: 3 | Threshold as Percentage of Maximum Heart Rate: 90")
     }
 
@@ -184,7 +184,7 @@ final class GATTDecoderTests: XCTestCase {
         // Flags bit 3 alone selects Temperature but not Temperature Gradient.
         let data = Data([0x08, 0x00, 0x01, 0x00, 0x00, 0xC8, 0x00])
         XCTAssertEqual(
-            GATTDecoder.decode(data, uuid: "2C27"),
+            try GATTDecoder.decode(data, uuid: "2C27"),
             "Flags: 0x0008 | Cooking Step Index: 1 | Cooking Process Type: 0"
                 + " | Temperature.Temperature: 20.0 degree Celsius")
     }
@@ -193,7 +193,7 @@ final class GATTDecoderTests: XCTestCase {
         // 2C27 Recipe Parameters: Temperature Gradient needs bits 3 and 4.
         let data = Data([0x18, 0x00, 0x01, 0x00, 0x00, 0xC8, 0x00, 0x05])
         XCTAssertEqual(
-            GATTDecoder.decode(data, uuid: "2C27"),
+            try GATTDecoder.decode(data, uuid: "2C27"),
             "Flags: 0x0018 | Cooking Step Index: 1 | Cooking Process Type: 0"
                 + " | Temperature.Temperature: 20.0 degree Celsius | Temperature Gradient: 5")
     }
@@ -333,19 +333,19 @@ final class GATTDecoderTests: XCTestCase {
 
     /// temperature.yaml: sint16, base unit degree_celsius, M = 1, d = -2, b = 0.
     func testDecodeTemperatureAppliesDecimalExponentAndUnit() {
-        XCTAssertEqual(GATTDecoder.decode(Data([0x24, 0x09]), uuid: "2A6E"), "23.40 degree Celsius")
-        XCTAssertEqual(GATTDecoder.decode(Data([0xFB, 0xFF]), uuid: "2A6E"), "-0.05 degree Celsius")
-        XCTAssertEqual(GATTDecoder.decode(Data([0x00, 0x00]), uuid: "2A6E"), "0.00 degree Celsius")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0x24, 0x09]), uuid: "2A6E"), "23.40 degree Celsius")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0xFB, 0xFF]), uuid: "2A6E"), "-0.05 degree Celsius")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0x00, 0x00]), uuid: "2A6E"), "0.00 degree Celsius")
     }
 
     /// humidity.yaml: uint16, base unit percentage, M = 1, d = -2, b = 0.
     func testDecodeHumidityAppliesDecimalExponentAndUnit() {
-        XCTAssertEqual(GATTDecoder.decode(Data([0xB4, 0x16]), uuid: "2A6F"), "58.12 percentage")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0xB4, 0x16]), uuid: "2A6F"), "58.12 percentage")
     }
 
     /// pressure.yaml: uint32, base unit pascal, M = 1, d = -1, b = 0.
     func testDecodePressureAppliesDecimalExponentAndUnit() {
-        XCTAssertEqual(GATTDecoder.decode(Data([0x02, 0x76, 0x0F, 0x00]), uuid: "2A6D"), "101325.0 pascal")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0x02, 0x76, 0x0F, 0x00]), uuid: "2A6D"), "101325.0 pascal")
     }
 
     /// percentage_8.yaml (uint8, unit percentage) and temperature_8.yaml
@@ -355,9 +355,9 @@ final class GATTDecoderTests: XCTestCase {
     /// its resolution 2^-k supports: 1 for b = -1, 5 for b = -16
     /// (0x8000 / 65536 is 0.5).
     func testDecodeAppliesBinaryExponentToItsResolution() {
-        XCTAssertEqual(GATTDecoder.decode(Data([201]), uuid: "2B04"), "100.5 percentage")
-        XCTAssertEqual(GATTDecoder.decode(Data([0xFD]), uuid: "2B0D"), "-1.5 degree Celsius")
-        XCTAssertEqual(GATTDecoder.decode(Data([0x00, 0x80]), uuid: "2B1C"), "0.50000")
+        XCTAssertEqual(try GATTDecoder.decode(Data([201]), uuid: "2B04"), "100.5 percentage")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0xFD]), uuid: "2B0D"), "-1.5 degree Celsius")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0x00, 0x80]), uuid: "2B1C"), "0.50000")
     }
 
     /// A value with more places than its resolution supports is rounded
@@ -388,22 +388,22 @@ final class GATTDecoderTests: XCTestCase {
     /// represents "value is not known"", shown as that text, not as
     /// -327.68 or 655.35.
     func testDecodeSpecialValueShowsItsMeaning() {
-        XCTAssertEqual(GATTDecoder.decode(Data([0x00, 0x80]), uuid: "2A6E"), "value is not known")
-        XCTAssertEqual(GATTDecoder.decode(Data([0xFF, 0xFF]), uuid: "2A6F"), "value is not known")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0x00, 0x80]), uuid: "2A6E"), "value is not known")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0xFF, 0xFF]), uuid: "2A6F"), "value is not known")
         // time_accuracy.yaml (b = -3, second): "A value of 255 means drift is
         // unknown", a decimal special value; 253 is a number.
-        XCTAssertEqual(GATTDecoder.decode(Data([0xFF]), uuid: "2A12"), "drift is unknown")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0xFF]), uuid: "2A12"), "drift is unknown")
         // 253 / 8 = 31.625, at the 1 place b = -3 supports.
-        XCTAssertEqual(GATTDecoder.decode(Data([0xFD]), uuid: "2A12"), "31.6 second")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0xFD]), uuid: "2A12"), "31.6 second")
         // high_voltage.yaml is in CONTRADICTED_SCALES but keeps its special value.
-        XCTAssertEqual(GATTDecoder.decode(Data([0xFF, 0xFF, 0xFF]), uuid: "2BE0"), "value is not known")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0xFF, 0xFF, 0xFF]), uuid: "2BE0"), "value is not known")
     }
 
     /// elevation.yaml: sint24, M = 1, d = -2, b = 0. Its unit,
     /// `length.meter`, is not an assigned unit, so none is shown.
     func testDecodeSint24AppliesScale() {
-        XCTAssertEqual(GATTDecoder.decode(Data([0xF4, 0x01, 0x00]), uuid: "2A6C"), "5.00")
-        XCTAssertEqual(GATTDecoder.decode(Data([0x0C, 0xFE, 0xFF]), uuid: "2A6C"), "-5.00")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0xF4, 0x01, 0x00]), uuid: "2A6C"), "5.00")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0x0C, 0xFE, 0xFF]), uuid: "2A6C"), "-5.00")
     }
 
     /// The GSS states no negative multiplier or positive exponent on a field
@@ -425,13 +425,13 @@ final class GATTDecoderTests: XCTestCase {
     /// battery_level.yaml names the base unit percentage but no scale, so the
     /// raw value is shown alone.
     func testDecodeFieldWithoutScaleShowsRawValueAlone() {
-        XCTAssertEqual(GATTDecoder.decode(Data([0x64]), uuid: "2A19"), "100")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0x64]), uuid: "2A19"), "100")
     }
 
     /// high_voltage.yaml states b = 6 but "a resolution of 1/64V", so the
     /// generator lists it in CONTRADICTED_SCALES and the raw value is shown.
     func testDecodeContradictedScaleShowsRawValue() {
-        XCTAssertEqual(GATTDecoder.decode(Data([0x02, 0x00, 0x00]), uuid: "2BE0"), "2")
+        XCTAssertEqual(try GATTDecoder.decode(Data([0x02, 0x00, 0x00]), uuid: "2BE0"), "2")
     }
 
     /// blood_pressure_measurement.yaml: the mmHg SFLOATs name their unit;
@@ -440,14 +440,14 @@ final class GATTDecoderTests: XCTestCase {
     func testDecodeFloatUnitOnlyWithoutScale() {
         // Flags 0x00 (mmHg): 120, 80, 93.
         let mmHg = Data([0x00, 0x78, 0x00, 0x50, 0x00, 0x5D, 0x00])
-        XCTAssertEqual(GATTDecoder.decode(mmHg, uuid: "2A35"),
+        XCTAssertEqual(try GATTDecoder.decode(mmHg, uuid: "2A35"),
                        "Flags: 0x00"
                        + " | Blood Pressure Measurement Compound Value - Systolic (mmHg): 120 millimetre of mercury"
                        + " | Blood Pressure Measurement Compound Value - Diastolic (mmHg): 80 millimetre of mercury"
                        + " | Blood Pressure Measurement Compound Value - Mean Arterial Pressure (mmHg): 93 millimetre of mercury")
         // Flags 0x01 (kPa): 16, 10.6 (mantissa 106, exponent -1), 12.
         let kPa = Data([0x01, 0x10, 0x00, 0x6A, 0xF0, 0x0C, 0x00])
-        XCTAssertEqual(GATTDecoder.decode(kPa, uuid: "2A35"),
+        XCTAssertEqual(try GATTDecoder.decode(kPa, uuid: "2A35"),
                        "Flags: 0x01"
                        + " | Blood Pressure Measurement Compound Value - Systolic (kPa): 16"
                        + " | Blood Pressure Measurement Compound Value - Diastolic (kPa): 10.6"
@@ -476,5 +476,47 @@ final class GATTDecoderTests: XCTestCase {
         let info = GATTDecoder.info(for: "2A2B")
         XCTAssertNotNil(info)
         XCTAssertGreaterThan(info?.fields.count ?? 0, 1)
+    }
+
+    // MARK: - utf8s fields
+
+    /// A utf8s field is text by the strict UTF-8 check of `read -f utf8`
+    /// (`DataFormatter.format(_:as: .utf8)`): every byte is kept, a leading
+    /// byte-order mark included.
+    func testUTF8FieldKeepsLeadingByteOrderMark() {
+        XCTAssertEqual(CommandRouter.listedValue(Data([0xEF, 0xBB, 0xBF, 0x41]), uuid: "2A29", format: nil),
+                       .value("\u{FEFF}A"))
+    }
+
+    /// Invalid UTF-8 is an error in the value's place, never its hex shown
+    /// as the text.
+    func testInvalidUTF8FieldFailsInsteadOfShowingHex() {
+        XCTAssertEqual(CommandRouter.listedValue(Data([0xFF, 0xFE]), uuid: "2A29", format: nil),
+                       .failed("not valid UTF-8"))
+    }
+
+    func testValidUTF8FieldIsTheText() {
+        XCTAssertEqual(CommandRouter.listedValue(Data("Nordic Semiconductor".utf8), uuid: "2A29", format: nil),
+                       .value("Nordic Semiconductor"))
+    }
+
+    /// The text is one field's value: a field separator in it does not make
+    /// more fields.
+    func testFieldSeparatorInTextStaysInTheValue() {
+        XCTAssertEqual(CommandRouter.listedValue(Data("Acme | Serial: 1".utf8), uuid: "2A29", format: nil),
+                       .value("Acme | Serial: 1"))
+        // New Alert: Category ID 1, 2 new alerts, then the text.
+        XCTAssertEqual(CommandRouter.listedValue(Data([0x01, 0x02]) + Data("a | b: c".utf8), uuid: "2A46", format: nil),
+                       .fields([LabeledValue(label: "Category ID", value: "1"),
+                                LabeledValue(label: "Number of New Alert", value: "2"),
+                                LabeledValue(label: "Text String Information", value: "a | b: c")]))
+    }
+
+    /// A multi-field value with an invalid text field fails as a whole,
+    /// naming the field; the other fields are not shown as if the value
+    /// were complete.
+    func testInvalidUTF8InAMultiFieldValueFailsTheValue() {
+        XCTAssertEqual(CommandRouter.listedValue(Data([0x01, 0x02, 0xFF]), uuid: "2A46", format: nil),
+                       .failed("Text String Information: not valid UTF-8"))
     }
 }

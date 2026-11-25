@@ -583,14 +583,15 @@ In the same way it parses each field's scale line ("Represented values: M = 1, d
 
 Many GSS characteristics embed sub-structures defined in other characteristics (e.g., `Date Time` characteristic embedded inside `Day Date Time`). The code generator (`Scripts/generate-ble-characteristics.rb`) resolves these recursively at build time by following `\autoref{sec:org.bluetooth.characteristic.XXX}` annotations in each `struct`-typed field's description. Circular references and missing references fall back to `.opaque` fields with a build-time warning.
 
-**Decoding** (`GATTDecoder.decode(_:uuid:)`)
+**Decoding** (`GATTDecoder.fields(_:uuid:)`)
 
 Reads fields sequentially from the `Data` buffer:
 1. Each decoded unsigned-integer or `boolean[N]` field is kept by name as an unsigned value.
 2. A conditional field is included only when all its conditions hold on those values; a condition on a field that was not decoded does not hold.
 3. Variable-length fields consume all remaining bytes.
 4. An integer field with a scale is printed with the decimal places its resolution supports, max(0, -d) plus ceil(k * log10 2) for b = -k, none more for b >= 0 (2A6E `2340` is `23.40`, a b = -1 field `201` is `100.5`, a b = -16 field `0x8000` is `0.50000`); a value with more places is rounded half away from zero. The arithmetic is integer, so no binary floating-point error reaches the output: 2^-k is 5^k * 10^-k, so raw * M * 5^k (or * 2^b for b >= 0) is a 64-bit integer n and the exact value is n * 10^(d - k); ceil(k * log10 2) is the number of digits of 2^k. A raw value in the field's `specialValues` is shown as its text instead. A number, but not "(short)" or a float's special value, is followed by the unit's name (`degree Celsius`, `pascal`).
-5. Single-field characteristics emit just the value; multi-field characteristics emit `"FieldName: value | FieldName: value"`.
+5. A `utf8s` field goes through `DataFormatter.format(_:as: .utf8)`, the one strict UTF-8 check: every byte is kept, a leading byte-order mark included, and invalid UTF-8 is the field's `ValueFormatMismatch`, never hex.
+6. The result is one `GATTDecoder.Field` per present field: its GSS name and a `Result` holding the value or the failure. `CommandRouter.listedValue` makes a single field the `ListedValue.value` and several `.fields`, labelled by the last component of each name (`fieldLabel`); a failed field makes the whole value `.failed` (prefixed by the field's label when there are several), shown as an error in its own cell. Field boundaries come from the decoder, never from parsing text, so a value containing `" | "` or `": "` stays one field in text output and in MCP `valueFields` (kv still joins fields with an unescaped `" | "`, TODO D2). A whole-value failure is chosen over a per-field error because only 2A46 New Alert has a `utf8s` field beside others. `decode(_:uuid:)` is the same fields on one line (`"FieldName: value | FieldName: value"`), throwing the first failure.
 
 Supported types include all standard GATT integer types (`uint8` through `uint64`, `sint8`/`sint16`/`sint32`), IEEE 11073-20601 medical floats (`medfloat16`, `medfloat32`), UTF-8 strings, and hex-encoded opaque blobs.
 

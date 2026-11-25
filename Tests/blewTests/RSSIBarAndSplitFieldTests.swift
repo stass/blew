@@ -74,76 +74,19 @@ final class RSSIBarTests: XCTestCase {
     }
 }
 
-final class SplitFieldPartTests: XCTestCase {
+/// The label a listing shows for a decoded field's GSS name.
+final class FieldLabelTests: XCTestCase {
 
-    // MARK: - Simple "Label: value" patterns
-
-    func testSimpleFieldPart() {
-        let lv = CommandRouter.splitFieldPart("Battery Level: 85")
-        XCTAssertEqual(lv.label, "Battery Level")
-        XCTAssertEqual(lv.value, "85")
+    func testPlainNameIsTheLabel() {
+        XCTAssertEqual(CommandRouter.fieldLabel("Battery Level"), "Battery Level")
     }
 
-    func testNumericValue() {
-        let lv = CommandRouter.splitFieldPart("Heart Rate: 72")
-        XCTAssertEqual(lv.label, "Heart Rate")
-        XCTAssertEqual(lv.value, "72")
-    }
-
-    func testStringValue() {
-        let lv = CommandRouter.splitFieldPart("Name: Apple Inc.")
-        XCTAssertEqual(lv.label, "Name")
-        XCTAssertEqual(lv.value, "Apple Inc.")
-    }
-
-    // MARK: - Dot-separated names (struct inlining)
-
-    func testDotSeparatedNameTakesLastComponent() {
-        let lv = CommandRouter.splitFieldPart("Date Time.Year: 2026")
-        XCTAssertEqual(lv.label, "Year")
-        XCTAssertEqual(lv.value, "2026")
-    }
-
-    func testMultipleDotsTakesLastComponent() {
-        let lv = CommandRouter.splitFieldPart("Outer.Middle.Leaf: 42")
-        XCTAssertEqual(lv.label, "Leaf")
-        XCTAssertEqual(lv.value, "42")
-    }
-
-    func testSingleDotComponent() {
-        let lv = CommandRouter.splitFieldPart("Parent.Child: hello")
-        XCTAssertEqual(lv.label, "Child")
-        XCTAssertEqual(lv.value, "hello")
-    }
-
-    // MARK: - Edge cases
-
-    func testNoColonReturnsEmptyLabelAndFullString() {
-        let lv = CommandRouter.splitFieldPart("NoColonHere")
-        XCTAssertEqual(lv.label, "")
-        XCTAssertEqual(lv.value, "NoColonHere")
-    }
-
-    func testColonInValuePreserved() {
-        let lv = CommandRouter.splitFieldPart("URL: http://example.com:8080")
-        XCTAssertEqual(lv.label, "URL")
-        XCTAssertEqual(lv.value, "http://example.com:8080")
-    }
-
-    func testEmptyValue() {
-        let lv = CommandRouter.splitFieldPart("Flags: ")
-        XCTAssertEqual(lv.label, "Flags")
-        XCTAssertEqual(lv.value, "")
-    }
-
-    func testHexValue() {
-        let lv = CommandRouter.splitFieldPart("Flags: 0x0A")
-        XCTAssertEqual(lv.label, "Flags")
-        XCTAssertEqual(lv.value, "0x0A")
+    func testNestedNameTakesTheLastComponent() {
+        XCTAssertEqual(CommandRouter.fieldLabel("Date Time.Year"), "Year")
+        XCTAssertEqual(CommandRouter.fieldLabel("Outer.Middle.Leaf"), "Leaf")
     }
 
     func testLabelWithWhitespaceIsTrimmed() {
-        let lv = CommandRouter.splitFieldPart("A. B: value")
-        XCTAssertEqual(lv.label, "B")
+        XCTAssertEqual(CommandRouter.fieldLabel("A. B"), "B")
     }
 }

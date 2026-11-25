@@ -37,14 +37,20 @@ None open.
   it only after the task has finished, or treats a task that did not
   finish as having produced nothing.
 
-- [ ] **D1. SIG decoding of a `utf8s` field drops a leading byte-order
-  mark and shows hex for invalid UTF-8 as if it were the text.**
-  `Sources/blew/GATTDecoder.swift:301` uses `String(data:encoding:)` with a
-  hex fallback, unlike `DataFormatter.format(_:as: .utf8)`. Scenario:
-  `blew gatt chars -r 180A` on a device whose Manufacturer Name is
-  `EF BB BF 41` shows `A`; one whose name is `FF FE` shows `fffe` as the
-  name. Fix: decode through `DataFormatter.format(_:as: .utf8)` and show a
-  failed field as an error.
+- [ ] **D2. kv output of a multi-field value can be given fake fields by device text.**
+  `Sources/blew/Output/CommandOutput.swift:46` (`LabeledValue.flattened`) joins
+  fields with an unescaped `" | "`, the format README.md (kv section) documents.
+  Scenario: New Alert (2A46) `01 02` + `x | Category ID: 9` gives
+  `value="Category ID: 1 | ... | Text String Information: x | Category ID: 9"`;
+  a consumer splitting on ` | ` sees a second Category ID. Fix: escape `|` and
+  `\` in field values, or one kv key per field.
+
+- [ ] **D3. Two fields of one decoded value can get the same label.**
+  `Sources/blew/CommandRouter.swift:1502` (`fieldLabel`) keeps only the last
+  component of the GSS name. Scenario: 2AEF Electric Current Range shows
+  `Current: 1.00 ampere` twice, min and max told apart only by order (also
+  2AE4, 2AF0, 2AF1, 2AF3, 2AF4, 2B00, 2B06-2B08). Fix: the shortest suffix of
+  the name that is unique within the value.
 
 - [ ] **P6. `periph adv` without GATT services keeps the previous
   command's services published.** `Sources/blew/CommandRouter.swift:1522`

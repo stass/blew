@@ -6,21 +6,37 @@ enum GATTDecoder {
 
     // MARK: - Public API
 
-    /// Decodes a characteristic value into a human-readable string using the
-    /// generated GSS database. Returns nil when the UUID is not in the database
-    /// (caller should fall back to hex).
-    static func decode(_ data: Data, uuid: String) -> String? {
+    /// One decoded field: its GSS name ("Outer.Inner" for a field of an
+    /// embedded structure) and its value, or why its bytes are not a value
+    /// of its type (invalid UTF-8 in a `utf8s` field).
+    struct Field: Equatable {
+        let name: String
+        let value: Result<String, ValueFormatMismatch>
+    }
+
+    /// The fields of a characteristic value decoded with the generated GSS
+    /// database, in order. nil when the UUID is not in the database or no
+    /// field is present (the caller shows hex).
+    static func fields(_ data: Data, uuid: String) -> [Field]? {
         guard let short = BLENames.shortUUID(uuid),
               let char = GATTCharacteristicDB.db[short],
               !char.fields.isEmpty else { return nil }
+        let fields = parseFields(char.fields, from: data)
+        return fields.isEmpty ? nil : fields
+    }
 
-        let parts = parseFields(char.fields, from: data)
-        guard !parts.isEmpty else { return nil }
-
-        if parts.count == 1 {
-            return parts[0].value
+    /// `fields(_:uuid:)` on one line: a single field's value, or
+    /// "Name: value | Name: value". Throws the first field that failed;
+    /// nil as for `fields(_:uuid:)`. Listings use `fields(_:uuid:)`, whose
+    /// field boundaries device text cannot move.
+    static func decode(_ data: Data, uuid: String) throws(ValueFormatMismatch) -> String? {
+        guard let fields = fields(data, uuid: uuid) else { return nil }
+        var parts: [String] = []
+        for field in fields {
+            let value = try field.value.get()
+            parts.append(fields.count == 1 ? value : "\(field.name): \(value)")
         }
-        return parts.map { "\($0.name): \($0.value)" }.joined(separator: " | ")
+        return parts.joined(separator: " | ")
     }
 
     /// Returns structured info about a characteristic for the `gatt info` command.
@@ -140,20 +156,15 @@ enum GATTDecoder {
 
     // MARK: - Field parsing
 
-    private struct DecodedField {
-        let name: String
-        let value: String
-    }
-
     private static func parseFields(
         _ fields: [GATTCharacteristicDB.Field],
         from data: Data
-    ) -> [DecodedField] {
+    ) -> [Field] {
         var offset = data.startIndex
         // The unsigned value of each decoded integer field, by name, for the
         // presence conditions of the fields after it.
         var integers: [String: UInt64] = [:]
-        var result: [DecodedField] = []
+        var result: [Field] = []
 
         for field in fields {
             guard field.conditions.allSatisfy({ holds($0, integers) }) else { continue }
@@ -165,10 +176,7 @@ enum GATTDecoder {
                 guard remaining > 0 else { continue }
                 let fieldData = Data(data[offset...])
                 offset = data.endIndex
-                result.append(DecodedField(
-                    name: field.name,
-                    value: formatValue(fieldData, field: field)
-                ))
+                result.append(Field(name: field.name, value: fieldValue(fieldData, field: field)))
             } else {
                 // Fixed-size
                 guard field.size > 0, remaining >= field.size else { continue }
@@ -178,10 +186,7 @@ enum GATTDecoder {
                     integers[field.name] = value
                 }
                 offset = endOffset
-                result.append(DecodedField(
-                    name: field.name,
-                    value: formatValue(fieldData, field: field)
-                ))
+                result.append(Field(name: field.name, value: fieldValue(fieldData, field: field)))
             }
         }
 
@@ -241,10 +246,22 @@ enum GATTDecoder {
 
     // MARK: - Value formatting
 
+    /// A field's value as shown, or why its bytes are not a value of its
+    /// type.
+    private static func fieldValue(_ data: Data, field: GATTCharacteristicDB.Field)
+        -> Result<String, ValueFormatMismatch> {
+        do {
+            return .success(try formatValue(data, field: field))
+        } catch {
+            return .failure(error)
+        }
+    }
+
     /// A field's value as shown: the number, followed by the unit's name
     /// when the field has one.
-    private static func formatValue(_ data: Data, field: GATTCharacteristicDB.Field) -> String {
-        let (text, isNumber) = formatted(data, field: field)
+    private static func formatValue(_ data: Data, field: GATTCharacteristicDB.Field)
+        throws(ValueFormatMismatch) -> String {
+        let (text, isNumber) = try formatted(data, field: field)
         guard isNumber, let unit = field.unit else { return text }
         return "\(text) \(unit.name)"
     }
@@ -252,11 +269,12 @@ enum GATTDecoder {
     /// A field's value without its unit, and whether it is a number (so a
     /// unit applies to it): not "(short)", hex, text or a float's special
     /// value. An integer the GSS gives a special meaning ("value is not
-    /// known") is shown as that text, never as a number.
+    /// known") is shown as that text, never as a number. Throws for a
+    /// `utf8s` field that is not valid UTF-8.
     private static func formatted(
         _ data: Data,
         field: GATTCharacteristicDB.Field
-    ) -> (text: String, isNumber: Bool) {
+    ) throws(ValueFormatMismatch) -> (text: String, isNumber: Bool) {
         if let (bits, negative, magnitude) = integerValue(data, type: field.type) {
             if let special = field.specialValues[bits] {
                 return (special, false)
@@ -298,8 +316,9 @@ enum GATTDecoder {
             return medfloat32(data)
 
         case .utf8s:
-            return (String(data: data, encoding: .utf8)
-                ?? data.map { String(format: "%02x", $0) }.joined(), false)
+            // The one strict UTF-8 check, `read -f utf8`'s: every byte is
+            // kept, a leading byte-order mark included.
+            return (try DataFormatter.format(data, as: .utf8), false)
 
         case .opaque:
             return (data.map { String(format: "%02x", $0) }.joined(), false)

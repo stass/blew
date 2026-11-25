@@ -59,7 +59,7 @@ final class ExampleConfigTests: XCTestCase {
                           let info = GATTDecoder.info(for: short), !info.fields.isEmpty
                     else { continue }
                     // The decoder answers nil when no field decodes.
-                    let text = GATTDecoder.decode(value, uuid: short) ?? "(not decoded)"
+                    let text = try GATTDecoder.decode(value, uuid: short) ?? "(not decoded)"
                     decoded["\(file.lastPathComponent)#\(short)"] = text
                 }
             }

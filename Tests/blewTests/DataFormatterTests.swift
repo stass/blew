@@ -333,8 +333,8 @@ final class UnalignedDecodeTests: XCTestCase {
     /// so this checks that decoding a misaligned slice gives the right values
     /// rather than reaching a misaligned read directly.
     func testGATTDecoderDecodesMisalignedSlices() {
-        XCTAssertEqual(GATTDecoder.decode(misaligned([0x34, 0x12]), uuid: "2A6E"), "46.60 degree Celsius")
-        XCTAssertEqual(GATTDecoder.decode(misaligned([0x78, 0x56, 0x34, 0x12]), uuid: "2A6D"), "30541989.6 pascal")
-        XCTAssertEqual(GATTDecoder.decode(misaligned([0x00, 0x72, 0x01, 0x00, 0xFF]), uuid: "2A1C"), "Flags: 0x00 | Temperature Measurement Value (Celsius): 37 degree Celsius")
+        XCTAssertEqual(try GATTDecoder.decode(misaligned([0x34, 0x12]), uuid: "2A6E"), "46.60 degree Celsius")
+        XCTAssertEqual(try GATTDecoder.decode(misaligned([0x78, 0x56, 0x34, 0x12]), uuid: "2A6D"), "30541989.6 pascal")
+        XCTAssertEqual(try GATTDecoder.decode(misaligned([0x00, 0x72, 0x01, 0x00, 0xFF]), uuid: "2A1C"), "Flags: 0x00 | Temperature Measurement Value (Celsius): 37 degree Celsius")
     }
 }

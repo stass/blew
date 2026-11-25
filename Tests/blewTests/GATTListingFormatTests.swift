@@ -161,4 +161,27 @@ final class GATTListingFormatTests: XCTestCase {
         XCTAssertEqual(okJSON?["value"] as? String, "4660")
         XCTAssertNil(okJSON?["valueError"])
     }
+
+    // MARK: - SIG-decoded text
+
+    /// A decoded text field keeps its byte-order mark, which the text
+    /// renderer escapes as `\ufeff`; an invalid one is an error in its own
+    /// cell, not hex, in text and kv.
+    func testDecodedTextFieldsInAListing() {
+        let output = CommandOutput.characteristics([
+            CharacteristicRow(uuid: "2A29", name: nil, properties: ["read"],
+                              listed: CommandRouter.listedValue(Data([0xEF, 0xBB, 0xBF, 0x41]), uuid: "2A29", format: nil)),
+            CharacteristicRow(uuid: "2A24", name: nil, properties: ["read"],
+                              listed: CommandRouter.listedValue(Data([0xFF, 0xFE]), uuid: "2A24", format: nil)),
+        ])
+        let out = text(output)
+        let lines = out.split(separator: "\n").map(String.init)
+        XCTAssertTrue(lines.contains { $0.contains("2A29") && $0.split(separator: " ").last == #"\ufeffA"# }, out)
+        XCTAssertTrue(lines.contains { $0.contains("2A24") && $0.hasSuffix("(error: not valid UTF-8)") }, out)
+        XCTAssertFalse(out.contains("fffe"), out)
+        let records = kv(output).split(separator: "\n").map(String.init)
+        XCTAssertEqual(records.count, 2, "\(records)")
+        XCTAssertTrue(records[1].contains(#"error="not valid UTF-8""#) && !records[1].contains("value="), "\(records)")
+        XCTAssertFalse(records[1].contains("fffe"), "\(records)")
+    }
 }
