@@ -545,8 +545,7 @@ private func writeNonBlocking(_ fd: Int32, _ data: Data) -> Int {
     }
 }
 
-/// A value guarded by a lock, shared between a port's reader thread and the
-/// threads that write to or close it.
+/// A value guarded by a lock, shared between threads.
 final class Locked<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: Value

@@ -128,6 +128,15 @@ None open.
   "connecting to / connected to", which `blew -v connect` does. Fix: carry
   the successful connect's infos into the command's result (one helper for
   every auto-connecting command).
+- [ ] **O3. A second Ctrl-C leaves the scan spinner or `-w` table on
+  screen.** `Sources/blew/ProcessSignals.swift` (`exitProcess`) runs the
+  exit hook and the exit cleanup (up to 2 s for a disconnect), then
+  `_exit`; the `LiveDisplay` (`Sources/blew/Output/LiveDisplay.swift`)
+  keeps redrawing during that wait and is never erased. Scenario: Ctrl-C
+  twice during `blew scan`: the shell prompt lands after
+  `⠋ Scanning… 1.2/5s` on the same line. Fix: give the displays a scoped
+  API (start, run the body, stop in a `defer`) and erase a running display
+  from the exit path without waiting on a redraw blocked on stderr.
 - [ ] Codegen backslash escaping is a no-op (`gsub("\\", "\\\\")`).
   `generate-ble-characteristics.rb:164`, `generate-ble-names.rb:31`. "CO2
   Concentration" renders a TAB.
@@ -209,15 +218,6 @@ None open.
   pile up once frames are drawn at the new width. Making the window
   shorter does the same once: the terminal pushes the top rows of a frame
   taller than the new height into scrollback, out of the cursor-up's reach.
-- [ ] `ScanWatchDisplay` (`Sources/blew/CommandRouter.swift`, `tick` and
-  `stop`) reads and writes `previousLineCount` from the timer's global
-  queue and from the caller of `stop()` with no lock, and
-  `DispatchSourceTimer.cancel()` does not wait for a running handler.
-  Scenario: Ctrl-C while a `tick` is between its redraw and storing the
-  line count: `stop()` erases the previous frame's count of lines, or the
-  tick's frame lands after the erase and stays on stderr above the final
-  table. Fix: run the timer on a private serial queue and have `stop()`
-  cancel and erase inside `queue.sync`.
 - [ ] A `scan -w` row can still wrap where the terminal and
   `TerminalText.width` disagree on a character's width.
   `Sources/blew/Output/TextEscaping.swift` (`width`) counts East Asian

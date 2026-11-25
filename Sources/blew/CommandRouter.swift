@@ -2000,110 +2000,87 @@ extension CommandRouter {
 
 // MARK: - Scan spinner
 
+/// The one-line `Scanning…` spinner on stderr while a scan without `-w`
+/// runs, redrawn by a `LiveDisplay` every 80 ms.
 private final class ScanSpinner {
     private static let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-    private var frameIndex = 0
-    private var timer: DispatchSourceTimer?
-    private let startTime = Date()
-    private let timeout: Double
-    private let lock = NSLock()
-    private var _deviceCount = 0
+    private let matchingDevices = Locked(0)
+    private let display: LiveDisplay
 
+    /// The number of matching devices found so far: set by the scan task,
+    /// read by each redraw.
     var deviceCount: Int {
-        get { lock.lock(); defer { lock.unlock() }; return _deviceCount }
-        set { lock.lock(); _deviceCount = newValue; lock.unlock() }
+        get { matchingDevices.value }
+        set { matchingDevices.set(newValue) }
     }
 
     init(timeout: Double) {
-        self.timeout = timeout
+        let startTime = Date()
+        let found = matchingDevices
+        var frameIndex = 0 // touched only by `draw`, on the display's queue
+        display = LiveDisplay(interval: .milliseconds(80), draw: { _ in
+            let elapsed = Date().timeIntervalSince(startTime)
+            let frame = Self.frames[frameIndex % Self.frames.count]
+            frameIndex += 1
+            let count = found.value
+            let countStr = count == 0 ? "" : " · \(count) device\(count == 1 ? "" : "s")"
+            let line = TextLine("\(frame) Scanning… \(String(format: "%.1f", elapsed))/\(String(format: "%.0f", timeout))s\(countStr)")
+            StandardErrorLog.redraw(line, styled: false)
+            return 1
+        }, erase: { _ in StandardErrorLog.erase(.eraseLine) })
     }
 
-    func start() {
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .userInteractive))
-        timer.schedule(deadline: .now(), repeating: .milliseconds(80))
-        timer.setEventHandler { [weak self] in
-            self?.tick()
-        }
-        self.timer = timer
-        timer.resume()
-    }
+    func start() { display.start() }
 
-    private func tick() {
-        let elapsed = Date().timeIntervalSince(startTime)
-        let frame = Self.frames[frameIndex % Self.frames.count]
-        frameIndex += 1
-        let count = deviceCount
-        let countStr: String
-        if count == 0 {
-            countStr = ""
-        } else {
-            countStr = " · \(count) device\(count == 1 ? "" : "s")"
-        }
-        let line = TextLine("\(frame) Scanning… \(String(format: "%.1f", elapsed))/\(String(format: "%.0f", timeout))s\(countStr)")
-        StandardErrorLog.redraw(line, styled: false)
-    }
-
-    func stop() {
-        timer?.cancel()
-        timer = nil
-        StandardErrorLog.erase(.eraseLine)
-    }
+    /// Stops the spinner and erases its line; returns once it is erased.
+    func stop() { display.stop() }
 }
 
 // MARK: - Watch display
 
 /// Renders a live-updating BLE device table in the terminal using ANSI in-place redraws.
 /// The table is written to stderr (to keep stdout clean for the final snapshot).
-/// A 250 ms timer fires the redraw; device data is updated from the scan Task via `update(devices:)`.
+/// A `LiveDisplay` redraws it every 250 ms; device data is updated from the scan Task via `update(devices:)`.
 private final class ScanWatchDisplay {
     private static let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-    private let formatter: OutputFormatter
-    private let startTime = Date()
-    private let lock = NSLock()
-    private var _devices: [DiscoveredDevice] = []
-    private var frameIndex = 0
-    private var timer: DispatchSourceTimer?
-    /// Number of lines written to stderr on the previous draw cycle.
-    private var previousLineCount = 0
+    private let matchingDevices = Locked<[DiscoveredDevice]>([])
+    private let display: LiveDisplay
 
     init(formatter: OutputFormatter) {
-        self.formatter = formatter
+        let startTime = Date()
+        let devices = matchingDevices
+        let styled = formatter.styled
+        var frameIndex = 0 // touched only by `draw`, on the display's queue
+        display = LiveDisplay(interval: .milliseconds(250), draw: { replacing in
+            let frame = Self.frames[frameIndex % Self.frames.count]
+            frameIndex += 1
+            return Self.redraw(devices.value, frame: frame, elapsed: Date().timeIntervalSince(startTime),
+                               replacing: replacing, styled: styled)
+        }, erase: { drawn in
+            // Erase the in-place content from stderr so the caller can print the final
+            // table cleanly to stdout.
+            StandardErrorLog.erase(.eraseLinesAbove(drawn))
+        })
     }
 
+    /// The matching devices, strongest first: set by the scan task, read by
+    /// each redraw.
     func update(devices: [DiscoveredDevice]) {
-        lock.lock()
-        _devices = devices
-        lock.unlock()
+        matchingDevices.set(devices)
     }
 
-    func start() {
-        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .userInteractive))
-        t.schedule(deadline: .now(), repeating: .milliseconds(250))
-        t.setEventHandler { [weak self] in self?.tick() }
-        timer = t
-        t.resume()
-    }
+    func start() { display.start() }
 
-    func stop() {
-        timer?.cancel()
-        timer = nil
-        // Erase the in-place content from stderr so the caller can print the final
-        // table cleanly to stdout.
-        StandardErrorLog.erase(.eraseLinesAbove(previousLineCount))
-    }
+    /// Stops the redraws and erases the table; returns once it is erased.
+    func stop() { display.stop() }
 
     // MARK: - Private
 
-    private func tick() {
-        lock.lock()
-        let devices = _devices
-        lock.unlock()
-
-        let frame = Self.frames[frameIndex % Self.frames.count]
-        frameIndex += 1
-
-        let elapsed = Date().timeIntervalSince(startTime)
+    /// Draws one frame over the `replacing` lines the last one left and
+    /// returns the number of lines it leaves.
+    private static func redraw(_ devices: [DiscoveredDevice], frame: String, elapsed: TimeInterval,
+                               replacing: Int, styled: Bool) -> Int {
         let count = devices.count
         let countStr = count == 0 ? "no devices yet" : "\(count) device\(count == 1 ? "" : "s")"
         let header = "\(frame) Scanning \(String(format: "%.0f", elapsed))s  \(countStr)  (Ctrl-C to stop)"
@@ -2115,11 +2092,10 @@ private final class ScanWatchDisplay {
         // (`devices` comes sorted strongest first).
         let tableHead = table.prefix(2)
 
-        // Replace the lines drawn last.
-        previousLineCount = StandardErrorLog.redraw(
+        return StandardErrorLog.redraw(
             head: [TextLine(header)] + tableHead, rows: Array(table.dropFirst(tableHead.count)),
             overflow: { TextLine("… \($0) more (use -o kv for all)", .dim) },
-            replacing: previousLineCount, styled: formatter.styled)
+            replacing: replacing, styled: styled)
     }
 }
 
