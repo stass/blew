@@ -26,6 +26,17 @@ None open.
 
 ## P3: later (after 0.3.0)
 
+- [ ] **S16. A scan task that outlives `waitInterruptible`'s grace shares
+  `results`, `result` and `scanFailure` with the command thread without a
+  lock.** `CommandRouter.swift` (`scanForDevices`, `runScanWatch`; the
+  2-second grace in `waitInterruptible`). Scenario: Ctrl-C or a timeout
+  while the scan task does not end within 2 s of its cancellation: the
+  command thread sets `result.exitCode` and reads `results` while the task
+  may still `add` a device or `fail` the result. Fix: the task returns its
+  outcome (or writes it through one `Locked` value) and the command reads
+  it only after the task has finished, or treats a task that did not
+  finish as having produced nothing.
+
 - [ ] **D1. SIG decoding of a `utf8s` field drops a leading byte-order
   mark and shows hex for invalid UTF-8 as if it were the text.**
   `Sources/blew/GATTDecoder.swift:301` uses `String(data:encoding:)` with a
